@@ -950,7 +950,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "control-api"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "gh-agent"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "gh-common",
  "gh-config",
@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "gh-cli"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "gh-common"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "semver",
  "serde",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "gh-config"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "flate2",
  "gh-common",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "gh-gateway"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "gh-common",
  "gh-service",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "gh-gateway-provisioner"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "hex",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "gh-harness"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "gh-common",
  "gh-config",
@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "gh-proxy"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "gh-common",
  "tracing",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "gh-service"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "gh-common",
  "reqwest",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "gh-telemetry"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "gh-common",
  "reqwest",
@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "inference-proxy"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",

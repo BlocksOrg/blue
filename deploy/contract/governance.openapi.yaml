@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Blue — Service Contract
-  version: "0.1.1"
+  version: "0.1.0"
   description: >
     The client-side contract the `blue` CLI expects from the provisioned
     service. The reference `control-api` implements it; any BYO service that
@@ -76,7 +76,7 @@ paths:
       security: []
       responses:
         "200": { description: Schema is compatible with this application generation }
-        "503": { description: Schema is incomplete, corrupted, or requires a newer application }
+        "503": { description: "Schema is incomplete, corrupted, or requires a newer application" }
 
   /health/worker:
     get:
@@ -754,7 +754,7 @@ paths:
       parameters:
         - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
         - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
-        - { name: q, in: query, description: Case-insensitive email or subject substring, schema: { type: string, maxLength: 200 } }
+        - { name: q, in: query, description: "Case-insensitive email or subject substring", schema: { type: string, maxLength: 200 } }
         - { name: role, in: query, schema: { $ref: "#/components/schemas/GovernanceRole" } }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/AdminUserStatus" } }
         - { name: provisioning_source, in: query, schema: { type: string, enum: [local, scim] } }
@@ -864,7 +864,7 @@ paths:
         - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
         - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: status, in: query, schema: { type: string, enum: [outstanding] } }
-        - { name: q, in: query, description: Case-insensitive email substring, schema: { type: string, maxLength: 200 } }
+        - { name: q, in: query, description: "Case-insensitive email substring", schema: { type: string, maxLength: 200 } }
         - { name: role, in: query, schema: { $ref: "#/components/schemas/GovernanceRole" } }
       responses:
         "200":
@@ -1302,7 +1302,7 @@ components:
         role: { $ref: "#/components/schemas/GovernanceRole" }
         active: { type: boolean, description: Compatibility projection of status == active }
         status: { $ref: "#/components/schemas/AdminUserStatus" }
-        protected: { type: boolean, description: Deployment-managed identity that cannot be demoted, suspended, or deleted }
+        protected: { type: boolean, description: "Deployment-managed identity that cannot be demoted, suspended, or deleted" }
         provisioning_source: { type: string, enum: [local, scim] }
         managed: { type: boolean, description: True when role and lifecycle are controlled through SCIM }
         created_at: { type: string, format: date-time }
@@ -1465,7 +1465,7 @@ components:
         email: { type: string, format: email }
         status: { type: string, enum: [ready, missing, invalid, recovering, error] }
         alias: { type: [string, "null"] }
-        external_id: { type: [string, "null"], description: Opaque gateway identifier, never the credential value. }
+        external_id: { type: [string, "null"], description: "Opaque gateway identifier, never the credential value." }
         expires_at: { type: [string, "null"], format: date-time }
         last_reconciled_at: { type: [string, "null"], format: date-time }
         error: { type: [string, "null"] }
@@ -1635,14 +1635,14 @@ components:
       type: object
       required: [revision, allowed_harnesses]
       properties:
-        revision: { type: string, description: Reconcile key; daemon acts on change, example: 251e6087-98cf-4861-9668-f09f537d5e4d }
+        revision: { type: string, description: "Reconcile key; daemon acts on change", example: 251e6087-98cf-4861-9668-f09f537d5e4d }
         contract_version: { type: integer, default: 1, description: Governance wire contract version }
         required_capabilities:
           type: array
           items: { type: string, enum: [adapter_intervals, compiled_harness_registry, transactional_reconcile, unverified_harness_versions, versioned_state] }
         minimum_client_version: { type: string, description: Operator-visible rollout floor; required capabilities enforce compatibility }
         ttl_seconds: { type: integer, description: Client cache TTL (default 300), example: 300 }
-        required: { type: boolean, description: If true, client fails closed without fresh config }
+        required: { type: boolean, description: "If true, client fails closed without fresh config" }
         allowed_harnesses:
           type: array
           items: { type: string, description: Harness key from the compiled registry }
@@ -1686,7 +1686,7 @@ components:
         description: { type: string }
         binary_names: { type: array, items: { type: string } }
         install_command_template: { type: string }
-        capabilities: { type: array, description: Backward-compatible union derived from all generation specifications, items: { type: string } }
+        capabilities: { type: array, description: "Backward-compatible union derived from all generation specifications", items: { type: string } }
         component_rules:
           type: object
           description: Backward-compatible summary derived from the current generation; prefer generations[].component_rules.
@@ -1896,7 +1896,7 @@ components:
       required: [harness, session_id, sha256, size_bytes, content_type]
       properties:
         harness: { type: string, description: Harness key from the compiled registry }
-        compatibility_profile: { type: string, example: claude-v1, description: Compiled harness adapter profile that produced the upload. When omitted, the upload is recorded without a profile. }
+        compatibility_profile: { type: string, example: claude-v1, description: "Compiled harness adapter profile that produced the upload. When omitted, the upload is recorded without a profile." }
         session_id: { type: string, example: codex-session-20260827 }
         sha256: { type: string, pattern: "^[a-f0-9]{64}$", example: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
         size_bytes: { type: integer, example: 48217 }
