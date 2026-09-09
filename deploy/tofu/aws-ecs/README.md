@@ -5,16 +5,15 @@ Application Load Balancer**, with **RDS PostgreSQL 16 (Multi-AZ)**, optional
 **ElastiCache Redis 7.1**, versioned **S3** package/session buckets, a **KMS**
 key, and a **Secrets Manager** runtime secret. It reuses the datastore/KMS/
 secrets design of the sibling EKS module (`../aws/`), swapping IRSA for ECS task
-roles.
+roles. The centrally managed Blue website and documentation are not part of
+user deployments.
 
-It runs four public/back-end components from the single application image plus a
-separate landing-page image:
+It runs the public and back-end components from a single application image:
 
 | Component        | Command / image                | Port | Health       | Exposure           |
 |------------------|--------------------------------|------|--------------|--------------------|
 | control-api      | `control-api` (+ `migrate` init) | 8080 | `/ready`     | `api.<domain>`     |
 | dashboard        | `dashboard`                    | 3000 | `/api/health`| `app.<domain>`     |
-| website/landing  | `website_image` (nginx)        | 3000 | `/health`    | apex `<domain>`    |
 | worker           | `control-api` (background jobs) | —    | container    | internal only      |
 | inference-proxy* | `inference-proxy`              | 8081 | `/ready`     | `inference.<domain>`|
 
@@ -38,9 +37,7 @@ separate landing-page image:
 
 - OpenTofu 1.8+ and an **encrypted remote state backend** (generated database,
   auth, and admin credentials are stored in state — restrict access).
-- Pullable images: `ghcr.io/blocksorg/governance-harness` (app) and, when
-  `enable_website = true`, `ghcr.io/blocksorg/governance-harness-website`
-  (landing page). Both are published by the repo's release workflow. For a
+- A pullable application image: `ghcr.io/blocksorg/governance-harness`. For a
   private registry, set `image_pull_secret_arn`.
 - A Route53 hosted zone if you use a domain.
 
@@ -56,12 +53,12 @@ tofu apply blue.tfplan
 ## Routing
 
 - **With a domain** (`domain_name` + `route53_zone_id`): an ACM certificate is
-  issued and DNS-validated. `:443` serves the **landing page** at the apex, with
-  host rules `app.<domain>` → dashboard, `api.<domain>` → control-api, and
+  issued and DNS-validated. `:443` serves the dashboard by default, with host
+  rules `app.<domain>` → dashboard, `api.<domain>` → control-api, and
   `inference.<domain>` → inference-proxy (when enabled). `:80` redirects to
-  `:443`. If `enable_website = false`, the apex/default serves the dashboard.
+  `:443`.
 - **Without a domain**: services are exposed over HTTP on separate ALB ports —
-  `:80` landing page, `:3000` dashboard, `:8080` control-api, `:8081`
+  `:80` and `:3000` dashboard, `:8080` control-api, and `:8081`
   inference-proxy. `control_api_url` becomes `http://<alb_dns>:8080`. The domain
   path is the recommended production configuration.
 

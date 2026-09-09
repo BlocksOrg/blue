@@ -1,8 +1,5 @@
 output "alb_dns_name" { value = aws_lb.this.dns_name }
 
-output "website_url" {
-  value = var.enable_website ? local.website_url : null
-}
 output "dashboard_url" { value = local.dashboard_url }
 output "control_api_url" { value = local.control_api_url }
 output "inference_proxy_url" {
@@ -15,7 +12,6 @@ output "ecs_cluster_arn" { value = aws_ecs_cluster.this.arn }
 output "service_names" {
   value = concat(
     [aws_ecs_service.control_api.name, aws_ecs_service.worker.name, aws_ecs_service.dashboard.name],
-    var.enable_website ? [aws_ecs_service.website[0].name] : [],
     local.enable_proxy ? [aws_ecs_service.inference_proxy[0].name] : [],
   )
 }

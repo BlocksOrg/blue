@@ -10,25 +10,6 @@ resource "aws_lb" "this" {
 # ---------------------------------------------------------------------------
 # Target groups (ip targets for Fargate awsvpc tasks)
 # ---------------------------------------------------------------------------
-resource "aws_lb_target_group" "website" {
-  count                = var.enable_website ? 1 : 0
-  name                 = substr("${var.name}-website", 0, 32)
-  port                 = 3000
-  protocol             = "HTTP"
-  vpc_id               = local.vpc_id
-  target_type          = "ip"
-  deregistration_delay = var.deregistration_delay_seconds
-  slow_start           = var.slow_start_seconds
-  health_check {
-    path                = "/health"
-    matcher             = "200"
-    healthy_threshold   = 3
-    unhealthy_threshold = 3
-    interval            = 15
-    timeout             = 5
-  }
-}
-
 resource "aws_lb_target_group" "dashboard" {
   name                 = substr("${var.name}-dashboard", 0, 32)
   port                 = 3000
@@ -83,11 +64,6 @@ resource "aws_lb_target_group" "inference_proxy" {
   }
 }
 
-locals {
-  # Apex/default target: the landing page when enabled, else the dashboard.
-  default_target_group_arn = var.enable_website ? aws_lb_target_group.website[0].arn : aws_lb_target_group.dashboard.arn
-}
-
 # ===========================================================================
 # Domain path: HTTPS with host-based routing, HTTP -> HTTPS redirect.
 # ===========================================================================
@@ -101,7 +77,7 @@ resource "aws_lb_listener" "https" {
 
   default_action {
     type             = "forward"
-    target_group_arn = local.default_target_group_arn
+    target_group_arn = aws_lb_target_group.dashboard.arn
   }
 }
 
@@ -169,7 +145,7 @@ resource "aws_lb_listener" "http_default" {
   protocol          = "HTTP"
   default_action {
     type             = "forward"
-    target_group_arn = local.default_target_group_arn
+    target_group_arn = aws_lb_target_group.dashboard.arn
   }
 }
 

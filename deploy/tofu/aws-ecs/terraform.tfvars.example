@@ -5,8 +5,8 @@ tags                  = { Environment = "production", Application = "blue" }
 
 # --- Minimal: new VPC, no domain (serves HTTP on the raw ALB DNS name) --------
 # Leaving vpc_id empty creates a VPC, public/private subnets, IGW, and a single
-# NAT gateway. Without a domain the ALB exposes: :80 website, :3000 dashboard,
-# :8080 control-api (and :8081 inference-proxy if enabled).
+# NAT gateway. Without a domain the ALB exposes the dashboard on :80 and :3000,
+# the control API on :8080, and the inference proxy on :8081 when enabled.
 
 # --- Reuse an existing VPC (account low on VPCs) ------------------------------
 # vpc_id             = "vpc-0123456789abcdef0"
@@ -14,15 +14,14 @@ tags                  = { Environment = "production", Application = "blue" }
 # private_subnet_ids = ["subnet-ccc", "subnet-ddd"]
 
 # --- Domain + TLS (recommended for production) --------------------------------
-# The apex serves the landing page; app.<domain> the dashboard; api.<domain>
-# the control-api. A Route53 hosted zone for the domain is required.
+# The apex and app.<domain> serve the dashboard; api.<domain> serves the control
+# API. A Route53 hosted zone for the domain is required.
 # domain_name     = "blue.example.com"
 # route53_zone_id = "Z0123456789ABCDEFGHIJ"
 # app_subdomain   = "app"
 # api_subdomain   = "api"
 
 # --- Component toggles --------------------------------------------------------
-# enable_website         = true
 # enable_redis           = true
 # enable_inference_proxy = false   # gateway mode; requires enable_redis = true
 
