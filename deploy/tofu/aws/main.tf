@@ -119,6 +119,14 @@ resource "aws_vpc_security_group_ingress_rule" "redis" {
   description                  = "Redis TLS from an approved Blue workload security group"
 }
 
+locals {
+  # Generated secret contract: length of the bootstrap admin password. Kept as a
+  # named local so it is a single source of truth and can be asserted by the CI
+  # "Verify generated secret contracts" check (which cannot read managed-resource
+  # attributes without state, but can evaluate a local).
+  bootstrap_admin_password_length = 48
+}
+
 resource "random_password" "database" {
   length  = 32
   special = false
@@ -128,7 +136,7 @@ resource "random_password" "auth" {
   special = false
 }
 resource "random_password" "bootstrap_admin" {
-  length  = 48
+  length  = local.bootstrap_admin_password_length
   special = false
 }
 resource "random_password" "redis_auth" {
