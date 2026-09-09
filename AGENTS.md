@@ -65,6 +65,8 @@ Examples: `feat/opencode-gateway`, `fix/control-api-stale-token`,
 Every PR references an issue (`Fixes #123`). Keep descriptions short and in your
 own words — no AI-generated walls of text.
 
+All PRs must be created in draft mode.
+
 ## Conventions that bite
 
 - **`gh-config` is the only writer of agent config files.** Never write agent
