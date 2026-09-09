@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { chmod, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { chmod, copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import path from "node:path";
 import { collect, prepareClient, prepareEmptyClient, readClientFile, runBareCliInPty, runCli, runCliWithInput, spawnCli, spawnCliInPty, waitForOutput } from "../support/cli.js";
 import { loginAsAdmin } from "../support/dashboard.js";
@@ -12,6 +13,41 @@ const canonicalProfiles: Record<string, string> = {
   kimi: "kimi-v0_0_0",
   opencode: "opencode-v0_0_0",
 };
+
+function oversizedGnuLongNameArchive(): Buffer {
+  const body = Buffer.alloc(64 * 1024 + 1, "a");
+  const header = Buffer.alloc(512);
+  header.write("././@LongLink", 0, "ascii");
+  header.write("0000600\0", 100, "ascii");
+  header.write("0000000\0", 108, "ascii");
+  header.write("0000000\0", 116, "ascii");
+  header.write(`${body.length.toString(8).padStart(11, "0")}\0`, 124, "ascii");
+  header.write("00000000000\0", 136, "ascii");
+  header.fill(" ", 148, 156);
+  header.write("L", 156, "ascii");
+  header.write("ustar ", 257, "ascii");
+  header.write(" \0", 263, "ascii");
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, "ascii");
+  const padding = Buffer.alloc((512 - (body.length % 512)) % 512);
+  return gzipSync(Buffer.concat([header, body, padding, Buffer.alloc(1024)]), { level: 9 });
+}
+
+function extensionPayload(document: any, packages: any[], baseRevision: string, packageAudiences: any = {}) {
+  const packageOverrides: Record<string, any> = {};
+  const mcp: Record<string, any> = {};
+  for (const [harness, policy] of Object.entries<any>(document.harnesses ?? {})) {
+    packageOverrides[harness] = policy.package_overrides ?? {};
+    mcp[harness] = policy.mcp ?? [];
+  }
+  return {
+    base_revision: baseRevision,
+    packages,
+    package_audiences: packageAudiences,
+    package_overrides: packageOverrides,
+    mcp,
+  };
+}
 
 test.describe.serial("Blue deployment journey", () => {
   let home: string;
@@ -201,6 +237,79 @@ test.describe.serial("Blue deployment journey", () => {
     expect(await readClientFile(home, ".codex/blue.config.toml")).toContain("gpt-e2e");
     await expect(stat(path.join(home, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
     await expect(stat(path.join(home, ".config", "blue", "runtime", "opencode", "opencode.json"))).rejects.toThrow();
+  });
+
+  test("@smoke hostile package sources fail closed and a clean package revision still applies", async ({ page }) => {
+    await loginAsAdmin(page);
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const originalResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(originalResponse.status(), await originalResponse.text()).toBe(200);
+    const original = await originalResponse.json();
+    const hostileHome = await prepareClient("hostile-package");
+    await copyFile(
+      path.join(home, ".config", "blue", "session.json"),
+      path.join(hostileHome, ".config", "blue", "session.json"),
+    );
+    const preferred = await runCli(hostileHome, ["agent", "codex"]);
+    expect(preferred.code, preferred.stderr).toBe(0);
+    const archivePath = path.join(hostileHome, "oversized-metadata.tar.gz");
+    const archive = oversizedGnuLongNameArchive();
+    await writeFile(archivePath, archive);
+    const adapter = { codex: { skills_dir: "payload" } };
+
+    try {
+      const privateSource = {
+        id: "private-source",
+        version: "1.0.0",
+        source_ref: "https://127.0.0.1/private.tar.gz",
+        sha256: "a".repeat(64),
+        adapters: adapter,
+      };
+      const privateUpdate = await page.request.put(`${control}/admin/governance-extensions`, {
+        data: extensionPayload(original.document, [privateSource], original.revision),
+      });
+      expect(privateUpdate.status(), await privateUpdate.text()).toBe(200);
+      const privateApply = await runCli(hostileHome, ["apply", "--yes"]);
+      expect(privateApply.code).not.toBe(0);
+      expect(`${privateApply.stdout}\n${privateApply.stderr}`).toMatch(/public (host|addresses)/i);
+
+      const afterPrivate = await privateUpdate.json();
+      const metadataSource = {
+        id: "oversized-metadata",
+        version: "1.0.0",
+        source_ref: `file://${archivePath}`,
+        sha256: createHash("sha256").update(archive).digest("hex"),
+        adapters: adapter,
+      };
+      const metadataUpdate = await page.request.put(`${control}/admin/governance-extensions`, {
+        data: extensionPayload(afterPrivate.document, [metadataSource], afterPrivate.revision),
+      });
+      expect(metadataUpdate.status(), await metadataUpdate.text()).toBe(200);
+      const metadataApply = await runCli(hostileHome, ["apply", "--yes"]);
+      expect(metadataApply.code).not.toBe(0);
+      expect(`${metadataApply.stdout}\n${metadataApply.stderr}`).toContain("archive metadata limit");
+      await expect(stat(path.join(hostileHome, ".codex", "blue.config.toml"))).rejects.toThrow();
+      const transactionRoot = path.join(hostileHome, ".blue-transactions");
+      expect(await readdir(transactionRoot).catch(() => [])).toHaveLength(0);
+    } finally {
+      const currentResponse = await page.request.get(`${control}/admin/governance-config`);
+      expect(currentResponse.status(), await currentResponse.text()).toBe(200);
+      const current = await currentResponse.json();
+      const restore = await page.request.put(`${control}/admin/governance-extensions`, {
+        data: extensionPayload(
+          original.document,
+          original.document.packages,
+          current.revision,
+          original.package_audiences,
+        ),
+      });
+      expect(restore.status(), await restore.text()).toBe(200);
+    }
+
+    const recovered = await runCli(hostileHome, ["apply", "--yes"]);
+    expect(recovered.code, `${recovered.stdout}\n${recovered.stderr}`).toBe(0);
+    expect(await readClientFile(hostileHome, ".codex/blue.config.toml")).toContain("gpt-e2e");
+    expect((await runCli(hostileHome, ["verify"])).code).toBe(0);
   });
 
   test("@smoke governance-only deployment does not attempt gateway provisioning", async ({ request }) => {

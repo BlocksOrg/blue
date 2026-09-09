@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use gh_common::{GhError, Harness};
 use gh_config::{
-    begin_revision_transaction, preflight_packages, preflight_packages_with_fetcher,
+    acquire_revision_locks, preflight_packages, preflight_packages_with_fetcher,
     resolve_compatibility, teardown_inactive_packages, write_harness_with_package_fetcher,
     write_harness_with_packages, AuthenticatedPackageFetcher, HarnessWrite, PackageFetcher,
     ProfileStatus, WriteOptions,
@@ -152,14 +152,14 @@ fn apply_once_with_inventory_and_optional_fetcher(
     }
 
     // Hold every required harness lock in stable key order before package
-    // state is read or any final implementation plan is produced. The outer
-    // snapshot spans every harness and both persisted state stores.
+    // state is read or any final implementation plan is produced. Do not take
+    // the rollback snapshot until every package preflight has succeeded.
     let contexts = candidates
         .iter()
         .map(|(_, _, context)| context.clone())
         .collect::<Vec<_>>();
-    let mut revision_transaction = match begin_revision_transaction(&contexts) {
-        Ok(transaction) => transaction,
+    let revision_locks = match acquire_revision_locks(&contexts) {
+        Ok(locks) => locks,
         Err(error) => {
             let message = error.to_string();
             return candidates
@@ -167,7 +167,7 @@ fn apply_once_with_inventory_and_optional_fetcher(
                 .map(|(harness, _, _)| HarnessReconcile {
                     harness,
                     result: Err(GhError::config(format!(
-                        "starting revision transaction: {message}"
+                        "acquiring revision locks: {message}"
                     ))),
                 })
                 .collect();
@@ -208,6 +208,22 @@ fn apply_once_with_inventory_and_optional_fetcher(
             .collect();
     }
 
+    let mut revision_transaction = match revision_locks.begin_transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            let message = error.to_string();
+            return candidates
+                .into_iter()
+                .map(|(harness, _, _)| HarnessReconcile {
+                    harness,
+                    result: Err(GhError::config(format!(
+                        "starting revision transaction: {message}"
+                    ))),
+                })
+                .collect();
+        }
+    };
+
     let mut out = Vec::new();
     for (harness, policy, context) in candidates {
         let result = match fetcher {
@@ -235,7 +251,15 @@ fn apply_once_with_inventory_and_optional_fetcher(
             .is_ok_and(|write| write.package_errors.is_empty())
     });
     if all_succeeded {
-        revision_transaction.commit();
+        if let Err(error) = revision_transaction.commit() {
+            let message = error.to_string();
+            for item in &mut out {
+                item.result = Err(GhError::config(format!(
+                    "committing revision transaction: {message}"
+                )));
+            }
+            return out;
+        }
         for write in out.iter().filter_map(|item| item.result.as_ref().ok()) {
             if !write.env.is_empty() {
                 publish_gui_env(&write.env);
@@ -374,6 +398,19 @@ fn run(cmd: &str, args: &[&str]) -> bool {
 mod tests {
     use super::*;
     use gh_harness::{HarnessInventory, HarnessInventoryEntry};
+    use gh_service::{ManagedPackage, PackageAdapter};
+
+    struct EditingFailingFetcher {
+        path: std::path::PathBuf,
+        replacement: Vec<u8>,
+    }
+
+    impl PackageFetcher for EditingFailingFetcher {
+        fn fetch(&self, _source_ref: &str, _artifact_id: Option<&str>) -> Result<Vec<u8>, GhError> {
+            std::fs::write(&self.path, &self.replacement).unwrap();
+            Err(GhError::other("injected package preflight failure"))
+        }
+    }
 
     fn config() -> GovernanceConfig {
         GovernanceConfig {
@@ -454,5 +491,138 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("revision preflight failed")));
+    }
+
+    #[test]
+    fn failed_package_preflight_child_helper() {
+        let Some(home) = std::env::var_os("BLUE_PREFLIGHT_ROLLBACK_TEST_HOME") else {
+            return;
+        };
+        let home = std::path::PathBuf::from(home);
+        let native = home.join(".codex/config.toml");
+        let concurrent_edit = b"model = \"concurrent-user-edit\"\n".to_vec();
+
+        let mut config = config();
+        config.allowed_harnesses = vec!["codex".into()];
+        config.packages = vec![ManagedPackage {
+            id: "failing-package".into(),
+            name: None,
+            version: "1.0.0".into(),
+            source_ref: "mock://failing-package".into(),
+            artifact_id: None,
+            sha256: "a".repeat(64),
+            platform_sources: Default::default(),
+            settings: Default::default(),
+            adapters: [(
+                "codex".into(),
+                PackageAdapter {
+                    skills_dir: Some("skills".into()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }];
+        let inventory = HarnessInventory {
+            entries: vec![HarnessInventoryEntry {
+                name: "codex".into(),
+                api_allowed: true,
+                client_supported: true,
+                installed: true,
+                path: Some(home.join("bin/codex")),
+                raw_version: Some("0.149.1".into()),
+                version: Some(semver::Version::new(0, 149, 1)),
+                compatibility_profile: None,
+                compatibility_deprecated: false,
+                compatibility_error: None,
+                compatibility_warning: None,
+                reconciled: false,
+            }],
+        };
+        let fetcher = EditingFailingFetcher {
+            path: native.clone(),
+            replacement: concurrent_edit.clone(),
+        };
+
+        let results = apply_once_with_inventory_and_fetcher(
+            &config,
+            WriteOptions::default(),
+            &inventory,
+            &fetcher,
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].result.is_err());
+        assert!(results[0]
+            .result
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("injected package preflight failure"));
+        assert_eq!(std::fs::read(&native).unwrap(), concurrent_edit);
+
+        let transaction_root = home.join(".blue-transactions");
+        assert!(
+            !transaction_root.exists()
+                || std::fs::read_dir(&transaction_root)
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "failed preflight must not create a transaction journal"
+        );
+        assert!(!home
+            .join(".config/blue/runtime/codex/compatibility-state.json")
+            .exists());
+        assert!(!home.join(".config/blue/package-state.json").exists());
+        assert!(!home.join(".config/blue/package-state/codex.json").exists());
+        assert!(!home.join(".config/blue/packages/.staging").exists());
+        assert!(no_transaction_staging_paths(&home));
+    }
+
+    fn no_transaction_staging_paths(path: &std::path::Path) -> bool {
+        if path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.contains(".blue-stage-")
+                || name.contains(".blue-write-")
+                || name.contains(".blue-remove-")
+        }) {
+            return false;
+        }
+        if path.is_dir() {
+            return std::fs::read_dir(path).unwrap().all(|entry| {
+                let path = entry.unwrap().path();
+                no_transaction_staging_paths(&path)
+            });
+        }
+        true
+    }
+
+    #[test]
+    fn failed_package_preflight_preserves_concurrent_native_edit_without_transaction_artifacts() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-preflight-rollback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let native = home.join(".codex/config.toml");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, b"model = \"original\"\n").unwrap();
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::failed_package_preflight_child_helper"])
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_CACHE_HOME")
+            .env("BLUE_PREFLIGHT_ROLLBACK_TEST_HOME", &home)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read(&native).unwrap(),
+            b"model = \"concurrent-user-edit\"\n"
+        );
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

@@ -9,9 +9,11 @@ pub mod implementations {
     pub use super::adapters::*;
 }
 mod compat;
+mod package_archive;
 mod packages;
 mod plan;
 pub mod session_bundle;
+mod transaction;
 mod util;
 
 use std::collections::BTreeMap;
@@ -20,6 +22,8 @@ use std::path::PathBuf;
 use gh_common::{paths, GhError, Harness};
 use gh_service::{GatewayConfig, HarnessPolicy, ManagedPackage};
 use serde::{Deserialize, Serialize};
+
+use transaction::FileTransaction;
 
 pub use compat::{
     resolve as resolve_compatibility, supported_install, validate_package_adapter_for_policy,
@@ -261,7 +265,7 @@ fn reconcile_prepared_at(
     let mut transaction = FileTransaction::begin(home, &plan)?;
     transaction.apply(&plan)?;
     commit_packages(package_write)?;
-    transaction.commit();
+    transaction.commit()?;
     Ok(report)
 }
 
@@ -325,13 +329,13 @@ fn remove_all_managed_configuration_at(home: &std::path::Path) -> Result<(), GhE
     };
     let mut transaction = FileTransaction::begin(home, &plan)?;
     transaction.apply(&plan)?;
-    transaction.commit();
+    transaction.commit()?;
     drop(locks);
     Ok(())
 }
 
 /// Validate each component without following links beneath the canonical home.
-fn validate_home_path(
+pub(crate) fn validate_home_path(
     home: &std::path::Path,
     path: &std::path::Path,
     allow_final_symlink: bool,
@@ -482,7 +486,7 @@ impl ReconcileLock {
                 path: path.clone(),
                 source,
             })?;
-        lock_file(&file, harness)?;
+        lock_file(&file, &format!("{} reconciliation", harness.key()))?;
         HELD_RECONCILE_LOCKS.with(|locks| {
             locks.borrow_mut().insert(harness.key().to_owned());
         });
@@ -494,226 +498,106 @@ impl ReconcileLock {
 }
 
 #[cfg(unix)]
-fn lock_file(file: &std::fs::File, harness: Harness) -> Result<(), GhError> {
+fn try_lock_file(file: &std::fs::File) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
+    // SAFETY: flock only observes the valid descriptor owned by `file`.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        Ok(true)
+    } else {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+        {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn try_lock_file(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let mut overlapped = unsafe { std::mem::zeroed::<OVERLAPPED>() };
+    // SAFETY: the handle is valid and overlapped points to writable storage for
+    // this synchronous, fail-immediately operation.
+    let result = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    };
+    if result != 0 {
+        Ok(true)
+    } else {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(code) if code == 33 || code == 158) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn try_lock_file(_file: &std::fs::File) -> std::io::Result<bool> {
+    Ok(true)
+}
+
+pub(crate) fn lock_file(file: &std::fs::File, label: &str) -> Result<(), GhError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        // SAFETY: flock only observes the valid descriptor owned by `file`.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
+        let acquired = try_lock_file(file)
+            .map_err(|error| GhError::config(format!("locking {label} lock failed: {error}")))?;
+        if acquired {
             return Ok(());
         }
-        let error = std::io::Error::last_os_error();
         if std::time::Instant::now() >= deadline {
             return Err(GhError::config(format!(
-                "timed out waiting for {} reconciliation lock: {error}",
-                harness.key()
+                "timed out waiting for {label} lock"
             )));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
-#[cfg(not(unix))]
-fn lock_file(_file: &std::fs::File, _harness: Harness) -> Result<(), GhError> {
-    Ok(())
+#[cfg(unix)]
+pub(crate) fn unlock_file(file: &std::fs::File) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor remains valid through this call.
+    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
 }
+
+#[cfg(windows)]
+pub(crate) fn unlock_file(file: &std::fs::File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let mut overlapped = unsafe { std::mem::zeroed::<OVERLAPPED>() };
+    // SAFETY: the handle and byte range match the successful lock operation.
+    let _ = unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) };
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn unlock_file(_file: &std::fs::File) {}
 
 impl Drop for ReconcileLock {
     fn drop(&mut self) {
         let Some(file) = self.file.as_ref() else {
             return;
         };
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // SAFETY: the descriptor is valid until this struct is dropped.
-            let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        unlock_file(file);
         HELD_RECONCILE_LOCKS.with(|locks| {
             locks.borrow_mut().remove(self.harness.key());
         });
-    }
-}
-
-struct FileTransaction {
-    root: PathBuf,
-    backup: PathBuf,
-    staging: PathBuf,
-    trash: PathBuf,
-    targets: Vec<(PathBuf, bool)>,
-    committed: bool,
-}
-impl FileTransaction {
-    fn begin(home: &std::path::Path, plan: &adapters::ReconcilePlan) -> Result<Self, GhError> {
-        let mut paths = plan
-            .writes
-            .iter()
-            .map(|write| &write.path)
-            .chain(&plan.remove_paths)
-            .chain(&plan.owned_paths)
-            .cloned()
-            .collect::<Vec<_>>();
-        paths.extend([
-            home.join(".config/blue/package-state.json"),
-            home.join(".config/blue/package-state"),
-            home.join(".config/blue/package-state-v4"),
-        ]);
-        Self::begin_paths(home, paths)
-    }
-
-    fn begin_paths(home: &std::path::Path, mut paths: Vec<PathBuf>) -> Result<Self, GhError> {
-        for path in &paths {
-            validate_home_path(home, path, true)?;
-        }
-        paths.sort();
-        paths.dedup();
-        let mut roots = Vec::<PathBuf>::new();
-        for path in paths {
-            if !roots.iter().any(|root| path.starts_with(root)) {
-                roots.push(path);
-            }
-        }
-        let mut paths = roots;
-        validate_home_path(home, &home.join(".config/blue/transactions"), false)?;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let root = home
-            .join(".config/blue/transactions")
-            .join(format!("{}-{nonce}", std::process::id()));
-        let backup = root.join("backup");
-        let staging = root.join("staging");
-        let trash = root.join("trash");
-        for path in [&backup, &staging, &trash] {
-            std::fs::create_dir_all(path).map_err(|source| GhError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        }
-        if !root.starts_with(home) {
-            return Err(GhError::config("transaction root escaped user home"));
-        }
-        /* All staging and trash entries live beside the governed files, so
-         * their final rename cannot cross a filesystem boundary. */
-        std::fs::metadata(&root).map_err(|source| GhError::Io {
-            path: root.clone(),
-            source,
-        })?;
-        paths.sort();
-        paths.dedup();
-        let mut targets = Vec::new();
-        for (index, path) in paths.into_iter().enumerate() {
-            let existed = std::fs::symlink_metadata(&path).is_ok();
-            if existed {
-                copy_tree(&path, &backup.join(index.to_string()))?;
-            }
-            targets.push((path, existed));
-        }
-        Ok(Self {
-            root,
-            backup,
-            staging,
-            trash,
-            targets,
-            committed: false,
-        })
-    }
-    fn apply(&mut self, plan: &adapters::ReconcilePlan) -> Result<(), GhError> {
-        self.apply_with_fault(plan, None)
-    }
-
-    fn apply_with_fault(
-        &mut self,
-        plan: &adapters::ReconcilePlan,
-        fail_after: Option<usize>,
-    ) -> Result<(), GhError> {
-        // Materialize every body before the first active path changes.
-        for (index, write) in plan.writes.iter().enumerate() {
-            let staged = self.staging.join(index.to_string());
-            std::fs::write(&staged, &write.body).map_err(|source| GhError::Io {
-                path: staged.clone(),
-                source,
-            })?;
-            #[cfg(unix)]
-            if let Some(mode) = write.mode {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode)).map_err(
-                    |source| GhError::Io {
-                        path: staged,
-                        source,
-                    },
-                )?;
-            }
-        }
-        let mut completed = 0usize;
-        let mut trashed = std::collections::BTreeSet::new();
-        for (index, path) in plan.remove_paths.iter().enumerate() {
-            if std::fs::symlink_metadata(path).is_ok() {
-                std::fs::rename(path, self.trash.join(format!("remove-{index}"))).map_err(
-                    |source| GhError::Io {
-                        path: path.clone(),
-                        source,
-                    },
-                )?;
-                trashed.insert(path.clone());
-            }
-            completed += 1;
-            if fail_after == Some(completed) {
-                return Err(GhError::other("injected reconciliation commit fault"));
-            }
-        }
-        for (index, write) in plan.writes.iter().enumerate() {
-            if let Some(parent) = write.path.parent() {
-                std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-            if write.path.exists() && !trashed.contains(&write.path) {
-                std::fs::rename(&write.path, self.trash.join(format!("write-{index}"))).map_err(
-                    |source| GhError::Io {
-                        path: write.path.clone(),
-                        source,
-                    },
-                )?;
-            }
-            std::fs::rename(self.staging.join(index.to_string()), &write.path).map_err(
-                |source| GhError::Io {
-                    path: write.path.clone(),
-                    source,
-                },
-            )?;
-            completed += 1;
-            if fail_after == Some(completed) {
-                return Err(GhError::other("injected reconciliation commit fault"));
-            }
-        }
-        Ok(())
-    }
-    fn commit(&mut self) {
-        self.committed = true;
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-    fn rollback(&self) -> Result<(), GhError> {
-        for (index, (path, existed)) in self.targets.iter().enumerate() {
-            if path.is_dir() && !path.is_symlink() {
-                std::fs::remove_dir_all(path).map_err(|source| GhError::Io {
-                    path: path.clone(),
-                    source,
-                })?;
-            } else if std::fs::symlink_metadata(path).is_ok() {
-                std::fs::remove_file(path).map_err(|source| GhError::Io {
-                    path: path.clone(),
-                    source,
-                })?;
-            }
-            if *existed {
-                copy_tree(&self.backup.join(index.to_string()), path)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -726,21 +610,77 @@ pub struct RevisionTransaction {
 }
 
 impl RevisionTransaction {
-    pub fn commit(&mut self) {
-        self.inner.commit();
+    pub fn commit(&mut self) -> Result<(), GhError> {
+        self.inner.commit()
     }
 }
 
-pub fn begin_revision_transaction(
-    contexts: &[HarnessContext],
-) -> Result<RevisionTransaction, GhError> {
-    let home = paths::home_dir()?;
-    begin_revision_transaction_at(&home, contexts)
+/// Revision-wide reconciliation locks acquired before package preflight.
+///
+/// This guard deliberately does not create a filesystem transaction. Dropping
+/// it only releases the harness locks, so a failed preflight cannot restore an
+/// earlier snapshot over edits made while preflight was running.
+pub struct RevisionLocks {
+    home: PathBuf,
+    contexts: Vec<HarnessContext>,
+    locks: Vec<ReconcileLock>,
 }
-fn begin_revision_transaction_at(
+
+impl RevisionLocks {
+    /// Begin the durable rollback transaction while retaining every revision
+    /// lock. Compatibility state is re-read here so targets reflect the state
+    /// immediately before active reconciliation begins.
+    pub fn begin_transaction(self) -> Result<RevisionTransaction, GhError> {
+        let Self {
+            home,
+            contexts,
+            locks,
+        } = self;
+        let mut affected = vec![
+            home.join(".config/blue/package-state.json"),
+            home.join(".config/blue/package-state"),
+        ];
+        let shared_state_paths = affected.len();
+        for context in &contexts {
+            let mut paths = context
+                .profile
+                .implementation
+                .paths(&home)
+                .transaction_targets();
+            paths.push(definition_state_path(&home, context.definition));
+            for path in &paths {
+                if affected
+                    .iter()
+                    .skip(shared_state_paths)
+                    .any(|existing| path.starts_with(existing) || existing.starts_with(path))
+                {
+                    return Err(GhError::config(format!(
+                        "cross-harness reconciliation path collision at {}",
+                        path.display()
+                    )));
+                }
+            }
+            affected.extend(paths);
+            let previous = load_definition_state_at(&home, context.definition)?;
+            affected.extend(previous.files);
+            affected.extend(previous.owned_paths);
+        }
+        Ok(RevisionTransaction {
+            inner: FileTransaction::begin_paths(&home, affected)?,
+            _locks: locks,
+        })
+    }
+}
+
+pub fn acquire_revision_locks(contexts: &[HarnessContext]) -> Result<RevisionLocks, GhError> {
+    let home = paths::home_dir()?;
+    acquire_revision_locks_at(&home, contexts)
+}
+
+fn acquire_revision_locks_at(
     home: &std::path::Path,
     contexts: &[HarnessContext],
-) -> Result<RevisionTransaction, GhError> {
+) -> Result<RevisionLocks, GhError> {
     let mut harnesses = contexts
         .iter()
         .map(|context| context.harness)
@@ -751,103 +691,12 @@ fn begin_revision_transaction_at(
         .into_iter()
         .map(|harness| ReconcileLock::acquire(home, harness))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut affected = vec![
-        home.join(".config/blue/package-state.json"),
-        home.join(".config/blue/package-state"),
-        home.join(".config/blue/package-state-v4"),
-    ];
-    for context in contexts {
-        let mut paths = context
-            .profile
-            .implementation
-            .paths(home)
-            .transaction_targets();
-        paths.push(definition_state_path(home, context.definition));
-        for path in &paths {
-            if affected
-                .iter()
-                .skip(3)
-                .any(|existing| path.starts_with(existing) || existing.starts_with(path))
-            {
-                return Err(GhError::config(format!(
-                    "cross-harness reconciliation path collision at {}",
-                    path.display()
-                )));
-            }
-        }
-        affected.extend(paths);
-        let previous = load_definition_state_at(home, context.definition)?;
-        affected.extend(previous.files);
-        affected.extend(previous.owned_paths);
-    }
-    Ok(RevisionTransaction {
-        inner: FileTransaction::begin_paths(home, affected)?,
-        _locks: locks,
+    Ok(RevisionLocks {
+        home: home.to_path_buf(),
+        contexts: contexts.to_vec(),
+        locks,
     })
 }
-impl Drop for FileTransaction {
-    fn drop(&mut self) {
-        if !self.committed {
-            if let Err(error) = self.rollback() {
-                tracing::error!(%error, backup = %self.backup.display(), "reconciliation rollback failed; backup retained");
-                return;
-            }
-        }
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-fn copy_tree(source: &std::path::Path, destination: &std::path::Path) -> Result<(), GhError> {
-    if source.is_symlink() {
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let target = std::fs::read_link(source).map_err(|error| GhError::Io {
-            path: source.to_path_buf(),
-            source: error,
-        })?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, destination).map_err(|source| GhError::Io {
-            path: destination.to_path_buf(),
-            source,
-        })?;
-        #[cfg(not(unix))]
-        return Err(GhError::config(
-            "symlink snapshots are unsupported on this platform",
-        ));
-    } else if source.is_dir() {
-        std::fs::create_dir_all(destination).map_err(|source_error| GhError::Io {
-            path: destination.to_path_buf(),
-            source: source_error,
-        })?;
-        for entry in std::fs::read_dir(source).map_err(|source_error| GhError::Io {
-            path: source.to_path_buf(),
-            source: source_error,
-        })? {
-            let entry = entry.map_err(|source_error| GhError::Io {
-                path: source.to_path_buf(),
-                source: source_error,
-            })?;
-            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-    } else {
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|source_error| GhError::Io {
-                path: parent.to_path_buf(),
-                source: source_error,
-            })?;
-        }
-        std::fs::copy(source, destination).map_err(|source_error| GhError::Io {
-            path: destination.to_path_buf(),
-            source: source_error,
-        })?;
-    }
-    Ok(())
-}
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CompatibilityState {
     #[serde(default = "compatibility_state_schema_version")]
@@ -1037,7 +886,7 @@ fn compatibility_state_write(
         path: state_path,
         body: serde_json::to_vec_pretty(&state)
             .map_err(|error| GhError::Serde(error.to_string()))?,
-        mode: None,
+        mode: Some(0o600),
     })
 }
 
@@ -1076,6 +925,285 @@ pub fn existing_config_files(
 mod transaction_tests {
     use super::*;
     use crate::adapters::HarnessImplementation;
+
+    #[test]
+    fn reconcile_lock_probe_child_helper() {
+        let Some(path) = std::env::var_os("BLUE_RECONCILE_LOCK_TEST_PATH") else {
+            return;
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        assert!(!try_lock_file(&file).unwrap());
+    }
+
+    #[test]
+    fn reconcile_lock_preserves_stable_path_and_cross_process_exclusion() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-reconcile-lock-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let _lock = ReconcileLock::acquire(&home, Harness::Codex).unwrap();
+        let path = home.join(".config/blue/locks/codex.lock");
+        assert!(path.is_file());
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transaction_tests::reconcile_lock_probe_child_helper",
+            ])
+            .env("BLUE_RECONCILE_LOCK_TEST_PATH", &path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(_lock);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn abrupt_transaction_child_helper() {
+        let Some(home) = std::env::var_os("BLUE_TRANSACTION_TEST_HOME") else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        let target = home.join("owned/config.txt");
+        let added = home.join("fresh/nested/new.txt");
+        let plan = adapters::ReconcilePlan {
+            writes: vec![
+                adapters::PlannedFile {
+                    path: target.clone(),
+                    body: b"new-complete-value".to_vec(),
+                    mode: Some(0o600),
+                },
+                adapters::PlannedFile {
+                    path: added,
+                    body: b"new-added-value".to_vec(),
+                    mode: Some(0o600),
+                },
+            ],
+            owned_paths: vec![home.join("owned"), home.join("fresh")],
+            ..Default::default()
+        };
+        if std::env::var_os("BLUE_TRANSACTION_TEST_NESTED").is_some() {
+            let outer =
+                FileTransaction::begin_paths(&home, vec![target.clone(), home.join("fresh")])
+                    .unwrap();
+            let mut inner = FileTransaction::begin(&home, &plan).unwrap();
+            inner.apply(&plan).unwrap();
+            inner.commit().unwrap();
+            std::mem::forget((inner, outer));
+        } else {
+            let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+            transaction.apply(&plan).unwrap();
+            transaction.commit().unwrap();
+            std::mem::forget(transaction);
+        }
+        panic!("configured transaction crash point was not reached");
+    }
+
+    #[test]
+    fn next_transaction_recovers_every_abrupt_single_and_nested_phase() {
+        let phases = [
+            "journal_persisted",
+            "staging_directory_created",
+            "first_prepared_file",
+            "first_target_replacement",
+            "committed_journal_persisted",
+        ];
+        for nested in [false, true] {
+            for phase in phases {
+                let home = std::env::temp_dir().join(format!(
+                    "blue-transaction-recovery-{}-{nested}-{phase}",
+                    std::process::id(),
+                ));
+                let target = home.join("owned/config.txt");
+                let added = home.join("fresh/nested/new.txt");
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(&target, "old-complete-value").unwrap();
+                let executable = std::env::current_exe().unwrap();
+                let mut child = std::process::Command::new(executable);
+                child
+                    .args([
+                        "--exact",
+                        "transaction_tests::abrupt_transaction_child_helper",
+                    ])
+                    .env("BLUE_TRANSACTION_TEST_HOME", &home)
+                    .env("BLUE_TRANSACTION_CRASH_AT", phase);
+                if nested {
+                    child
+                        .env("BLUE_TRANSACTION_TEST_NESTED", "1")
+                        .env("BLUE_TRANSACTION_CRASH_DEPTH", "2");
+                }
+                assert!(!child.status().unwrap().success(), "{nested} {phase}");
+
+                {
+                    let _recovery =
+                        FileTransaction::begin_paths(&home, vec![target.clone()]).unwrap();
+                    let committed = !nested && phase == "committed_journal_persisted";
+                    assert_eq!(
+                        std::fs::read_to_string(&target).unwrap(),
+                        if committed {
+                            "new-complete-value"
+                        } else {
+                            "old-complete-value"
+                        },
+                        "{nested} {phase}",
+                    );
+                    assert_eq!(added.exists(), committed, "{nested} {phase}");
+                }
+                let leaked = walk_paths(&home)
+                    .into_iter()
+                    .filter(|path| {
+                        path.file_name().is_some_and(|name| {
+                            let name = name.to_string_lossy();
+                            name.contains(".blue-stage-")
+                                || name.contains(".blue-write-")
+                                || name.contains(".blue-remove-")
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    leaked.is_empty(),
+                    "leaked paths after {nested} {phase}: {leaked:?}"
+                );
+                if !nested && phase == "committed_journal_persisted" {
+                    assert_eq!(
+                        std::fs::read_to_string(&target).unwrap(),
+                        "new-complete-value"
+                    );
+                    assert_eq!(std::fs::read_to_string(&added).unwrap(), "new-added-value");
+                } else {
+                    assert_eq!(
+                        std::fs::read_to_string(&target).unwrap(),
+                        "old-complete-value"
+                    );
+                    assert!(!added.exists());
+                    assert!(!home.join("fresh").exists());
+                }
+                let _ = std::fs::remove_dir_all(home);
+            }
+        }
+    }
+
+    fn walk_paths(root: &std::path::Path) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return paths;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            paths.push(path.clone());
+            if path.is_dir() && !path.is_symlink() {
+                paths.extend(walk_paths(&path));
+            }
+        }
+        paths
+    }
+
+    #[test]
+    fn transaction_enforces_owner_only_planned_mode() {
+        let home = std::env::temp_dir().join(format!("blue-mode-{}", std::process::id()));
+        let target = home.join("managed/config.json");
+        let mut plan = adapters::ReconcilePlan {
+            writes: vec![adapters::PlannedFile {
+                path: target.clone(),
+                body: b"{}".to_vec(),
+                mode: Some(0o644),
+            }],
+            ..Default::default()
+        };
+        let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+        let error = transaction.apply(&plan).unwrap_err().to_string();
+        assert!(error.contains("must use 0600"), "{error}");
+        drop(transaction);
+
+        plan.writes[0].mode = Some(0o600);
+        let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+        transaction.apply(&plan).unwrap();
+        transaction.commit().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn committed_cleanup_failure_retains_journal_and_retries_on_recovery() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-cleanup-retry-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let target = home.join("managed/config.json");
+        let plan = adapters::ReconcilePlan {
+            writes: vec![adapters::PlannedFile {
+                path: target.clone(),
+                body: b"new".to_vec(),
+                mode: Some(0o600),
+            }],
+            ..Default::default()
+        };
+        {
+            let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+            transaction.apply(&plan).unwrap();
+            assert!(transaction.commit_with_cleanup_fault().is_err());
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(home.join(".blue-transactions"))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        {
+            let _recovery = FileTransaction::begin_paths(&home, vec![target.clone()]).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(home.join(".blue-transactions"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn rollback_preserves_concurrent_content_in_transaction_created_directories() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-concurrent-directory-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let target = home.join("fresh/nested/config.json");
+        let concurrent = home.join("fresh/concurrent.txt");
+        let plan = adapters::ReconcilePlan {
+            writes: vec![adapters::PlannedFile {
+                path: target.clone(),
+                body: b"managed".to_vec(),
+                mode: Some(0o600),
+            }],
+            ..Default::default()
+        };
+        {
+            let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+            transaction.apply(&plan).unwrap();
+            std::fs::write(&concurrent, "unrelated").unwrap();
+        }
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_to_string(&concurrent).unwrap(), "unrelated");
+        assert!(!home.join("fresh/nested").exists());
+        let _ = std::fs::remove_dir_all(home);
+    }
 
     #[test]
     fn uncommitted_transaction_restores_existing_and_removes_new_outputs() {
@@ -1289,12 +1417,12 @@ mod transaction_tests {
                     adapters::PlannedFile {
                         path: existing.clone(),
                         body: b"new-config".to_vec(),
-                        mode: None,
+                        mode: Some(0o600),
                     },
                     adapters::PlannedFile {
                         path: added.clone(),
                         body: b"new-file".to_vec(),
-                        mode: None,
+                        mode: Some(0o600),
                     },
                 ],
                 remove_paths: vec![removed.clone()],
@@ -1333,12 +1461,12 @@ mod transaction_tests {
                 adapters::PlannedFile {
                     path: current.clone(),
                     body: b"new-current".to_vec(),
-                    mode: None,
+                    mode: Some(0o600),
                 },
                 adapters::PlannedFile {
                     path: state.clone(),
                     body: b"new-state".to_vec(),
-                    mode: None,
+                    mode: Some(0o600),
                 },
             ],
             remove_paths: vec![stale.clone()],

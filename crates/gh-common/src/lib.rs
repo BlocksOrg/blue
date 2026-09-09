@@ -10,9 +10,13 @@ pub mod atomic;
 pub mod client_config;
 pub mod error;
 pub mod harness;
+pub mod network;
 pub mod paths;
 
-pub use atomic::{write_atomic, write_config_atomic};
+pub use atomic::{
+    create_owner_only_dir, prepare_atomic, prepare_atomic_in, write_atomic, write_config_atomic,
+    PreparedAtomicWrite,
+};
 pub use client_config::{BlueToml, IdentityConfig, ModeConfig, ServiceConfig};
 pub use error::{GhError, Result};
 pub use harness::{harness_registry, ComponentRules, Harness, HarnessMetadata, InstallInvocation};

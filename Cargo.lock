@@ -1571,11 +1571,13 @@ dependencies = [
 name = "gh-common"
 version = "0.1.0"
 dependencies = [
+ "rand 0.8.8",
  "semver",
  "serde",
  "thiserror 1.0.69",
  "toml",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1588,6 +1590,7 @@ dependencies = [
  "gh-service",
  "hex",
  "libc",
+ "rand 0.8.8",
  "reqwest",
  "semver",
  "serde",
@@ -1597,6 +1600,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

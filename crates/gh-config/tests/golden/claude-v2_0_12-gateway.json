@@ -45,7 +45,7 @@
     },
     {
       "body": "# Example\n\nA managed skill.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/claude/standalone-skills-plugin/skills/example/SKILL.md"
     }
   ]

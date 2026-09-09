@@ -15,7 +15,14 @@ use gh_service::{HarnessPolicy, ManagedPackage, PackageAdapter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::package_archive::{extract_safe, secure_create_dir_all, sync_directory};
 use crate::HarnessContext;
+
+#[cfg(test)]
+use crate::package_archive::{
+    entry_count_within_budget, expanded_size_within_budget, ExtractionLimits, EXTRACTION_LIMITS,
+    MAX_ARCHIVE_ENTRIES, MAX_EXPANDED_BYTES, MAX_FILE_BYTES,
+};
 
 #[derive(Debug, Default)]
 pub(crate) struct PreparedPackages {
@@ -101,6 +108,50 @@ struct InactivePackage {
 }
 
 const INACTIVE_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
+const MAX_PACKAGE_BYTES: u64 = 100 * 1024 * 1024;
+
+struct StagingDirectory {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingDirectory {
+    fn create(parent: &Path, id: &str) -> Result<Self, GhError> {
+        use rand::RngCore as _;
+        secure_create_dir_all(parent)?;
+        for _ in 0..16 {
+            let mut nonce = [0_u8; 16];
+            rand::rngs::OsRng
+                .try_fill_bytes(&mut nonce)
+                .map_err(|error| GhError::other(format!("generating staging name: {error}")))?;
+            let path = parent.join(format!("{id}-{}", hex::encode(nonce)));
+            match gh_common::create_owner_only_dir(&path) {
+                Ok(()) => {
+                    return Ok(Self { path, armed: true });
+                }
+                Err(GhError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    continue
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(GhError::other("package staging name attempts exhausted"))
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
 
 const fn package_state_schema_version() -> u32 {
     4
@@ -948,38 +999,26 @@ fn install_and_resolve(
                 package.id, sha256
             )));
         }
-        let staging = base
-            .join(".staging")
-            .join(format!("{}-{}", package.id, std::process::id()));
-        if staging.exists() {
-            std::fs::remove_dir_all(&staging).map_err(|source| GhError::Io {
-                path: staging.clone(),
-                source,
-            })?;
-        }
-        std::fs::create_dir_all(&staging).map_err(|source| GhError::Io {
-            path: staging.clone(),
-            source,
-        })?;
-        extract_safe(&bytes, &staging, &package.id)?;
-        validate_adapter_paths(adapter, &staging)?;
-        let tree = tree_sha256(&staging)?;
+        let mut staging = StagingDirectory::create(&base.join(".staging"), &package.id)?;
+        extract_safe(&bytes, &staging.path, &package.id)?;
+        validate_adapter_paths(adapter, &staging.path)?;
+        let tree = tree_sha256(&staging.path)?;
         if let Some(parent) = root.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+            secure_create_dir_all(parent)?;
         }
-        if root.exists() {
-            std::fs::remove_dir_all(&root).map_err(|source| GhError::Io {
-                path: root.clone(),
-                source,
-            })?;
+        match std::fs::rename(&staging.path, &root) {
+            Ok(()) => {
+                staging.disarm();
+                sync_directory(root.parent().expect("package root has parent"))?;
+            }
+            Err(_) if root.is_dir() && tree_sha256(&root).ok().as_deref() == Some(&tree) => {}
+            Err(source) => {
+                return Err(GhError::Io {
+                    path: root.clone(),
+                    source,
+                })
+            }
         }
-        std::fs::rename(&staging, &root).map_err(|source| GhError::Io {
-            path: root.clone(),
-            source,
-        })?;
         let record = InstalledPackage {
             version: package.version.clone(),
             sha256: digest,
@@ -1160,70 +1199,68 @@ pub(crate) fn checked_join(root: &Path, relative: &str) -> Result<PathBuf, GhErr
     Ok(root.join(path))
 }
 
-fn extract_safe(bytes: &[u8], dest: &Path, id: &str) -> Result<(), GhError> {
-    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
-    let mut archive = tar::Archive::new(decoder);
-    for entry in archive
-        .entries()
-        .map_err(|error| GhError::other(format!("reading package `{id}`: {error}")))?
-    {
-        let mut entry = entry
-            .map_err(|error| GhError::other(format!("reading package `{id}` entry: {error}")))?;
-        let relative = entry
-            .path()
-            .map_err(|error| GhError::other(format!("reading package `{id}` path: {error}")))?;
-        let relative_text = relative.to_string_lossy();
-        let target = checked_join(dest, &relative_text)?;
-        let kind = entry.header().entry_type();
-        // GitHub codeload archives include a harmless POSIX global metadata
-        // header. `tar` applies local PAX metadata while iterating entries;
-        // global metadata has no filesystem payload and should be ignored.
-        if kind.is_pax_global_extensions() {
-            continue;
+fn fetch_bytes(source_ref: &str) -> Result<Vec<u8>, GhError> {
+    let http_source = source_ref
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
+    let https_source = source_ref
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+    if http_source || https_source {
+        let url = reqwest::Url::parse(source_ref)
+            .map_err(|error| GhError::config(format!("invalid package URL: {error}")))?;
+        if url.scheme() != "https" {
+            return Err(GhError::config("public package sources must use HTTPS"));
         }
-        if kind.is_symlink() || kind.is_hard_link() || !(kind.is_file() || kind.is_dir()) {
-            return Err(GhError::config(format!(
-                "package `{id}` contains unsupported link or special entry `{relative_text}`"
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(GhError::config(
+                "public package URLs must not contain credentials",
+            ));
+        }
+        if url.fragment().is_some() {
+            return Err(GhError::config(
+                "public package URLs must not contain fragments",
+            ));
+        }
+        let source_label = package_url_label(&url);
+        let host = url
+            .host_str()
+            .ok_or_else(|| GhError::config("package URL has no host"))?;
+        let port = url.port_or_known_default().unwrap_or(443);
+        let address_host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        let addresses = if let Ok(address) = address_host.parse::<std::net::IpAddr>() {
+            vec![std::net::SocketAddr::new(address, port)]
+        } else {
+            std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+                .map_err(|error| GhError::service(format!("resolving package host: {error}")))?
+                .collect::<Vec<_>>()
+        };
+        if !gh_common::network::all_addresses_are_public(&addresses) {
+            return Err(GhError::service(
+                "package URL must resolve only to public addresses",
+            ));
+        }
+        let client = public_package_client(host, &addresses, true)?;
+        let response = client
+            .get(url)
+            .send()
+            .map_err(|error| {
+                GhError::service(format!(
+                    "fetching package {source_label} directly (environment proxies and redirects are unsupported): {}",
+                    request_error_kind(&error)
+                ))
+            })?;
+        if response.status().is_redirection() {
+            return Err(GhError::service(format!(
+                "package {source_label} redirected; public package redirects and environment proxies are unsupported"
             )));
         }
-        if kind.is_dir() {
-            std::fs::create_dir_all(&target).map_err(|source| GhError::Io {
-                path: target,
-                source,
-            })?;
-        } else {
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-            let mut file = File::create(&target).map_err(|source| GhError::Io {
-                path: target.clone(),
-                source,
-            })?;
-            std::io::copy(&mut entry, &mut file).map_err(|source| GhError::Io {
-                path: target,
-                source,
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn fetch_bytes(source_ref: &str) -> Result<Vec<u8>, GhError> {
-    const MAX_PACKAGE_BYTES: u64 = 100 * 1024 * 1024;
-    if source_ref.starts_with("http://") || source_ref.starts_with("https://") {
-        let response = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .map_err(|error| GhError::service(format!("building package client: {error}")))?
-            .get(source_ref)
-            .send()
-            .map_err(|error| GhError::service(format!("fetching package {source_ref}: {error}")))?;
         if !response.status().is_success() {
             return Err(GhError::service(format!(
-                "fetching package {source_ref}: HTTP {}",
+                "fetching package {source_label}: HTTP {}",
                 response.status()
             )));
         }
@@ -1232,17 +1269,19 @@ fn fetch_bytes(source_ref: &str) -> Result<Vec<u8>, GhError> {
             .is_some_and(|length| length > MAX_PACKAGE_BYTES)
         {
             return Err(GhError::service(format!(
-                "package {source_ref} exceeds the 100 MiB limit"
+                "package {source_label} exceeds the 100 MiB limit"
             )));
         }
         let mut bytes = Vec::new();
         response
             .take(MAX_PACKAGE_BYTES + 1)
             .read_to_end(&mut bytes)
-            .map_err(|error| GhError::service(format!("reading package {source_ref}: {error}")))?;
+            .map_err(|error| {
+                GhError::service(format!("reading package {source_label}: {error}"))
+            })?;
         if bytes.len() as u64 > MAX_PACKAGE_BYTES {
             return Err(GhError::service(format!(
-                "package {source_ref} exceeds the 100 MiB limit"
+                "package {source_label} exceeds the 100 MiB limit"
             )));
         }
         Ok(bytes)
@@ -1252,7 +1291,53 @@ fn fetch_bytes(source_ref: &str) -> Result<Vec<u8>, GhError> {
     }
 }
 
+fn package_url_label(url: &reqwest::Url) -> String {
+    let mut redacted = url.clone();
+    redacted.set_query(None);
+    redacted.set_fragment(None);
+    redacted.to_string()
+}
+
+fn request_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request timed out"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_body() {
+        "response body failed"
+    } else if error.is_decode() {
+        "response decoding failed"
+    } else {
+        "request failed"
+    }
+}
+
+fn public_package_client(
+    host: &str,
+    addresses: &[std::net::SocketAddr],
+    https_only: bool,
+) -> Result<reqwest::blocking::Client, GhError> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .https_only(https_only)
+        .resolve_to_addrs(host, addresses)
+        .build()
+        .map_err(|error| GhError::service(format!("building direct package client: {error}")))
+}
+
 fn tree_sha256(root: &Path) -> Result<String, GhError> {
+    let metadata = std::fs::symlink_metadata(root).map_err(|source| GhError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(GhError::config(format!(
+            "managed package root is not a regular directory: {}",
+            root.display()
+        )));
+    }
     let mut paths = Vec::new();
     collect_files(root, root, &mut paths)?;
     paths.sort();
@@ -1471,7 +1556,13 @@ fn make_executable(path: &Path) -> Result<(), GhError> {
     std::fs::set_permissions(path, permissions).map_err(|source| GhError::Io {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    std::fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| GhError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 #[cfg(not(unix))]
@@ -1489,6 +1580,50 @@ fn make_executable(path: &Path) -> Result<(), GhError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SPACE_PROBES: AtomicUsize = AtomicUsize::new(0);
+
+    fn encoded_files(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, body) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive.append_data(&mut header, path, *body).unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn test_limits() -> ExtractionLimits {
+        ExtractionLimits {
+            expanded_bytes: 4,
+            file_bytes: 3,
+            entries: 2,
+            path_components: 2,
+            path_bytes: 16,
+        }
+    }
+
+    fn ample_space(_path: &Path) -> Result<Option<u64>, GhError> {
+        Ok(Some(u64::MAX))
+    }
+
+    fn unavailable_space_probe(_path: &Path) -> Result<Option<u64>, GhError> {
+        Err(GhError::other("space probe unavailable"))
+    }
+
+    fn no_space(_path: &Path) -> Result<Option<u64>, GhError> {
+        Ok(Some(0))
+    }
+
+    fn three_bytes_once(_path: &Path) -> Result<Option<u64>, GhError> {
+        SPACE_PROBES.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(3))
+    }
 
     #[test]
     fn rejects_unsafe_component_paths() {
@@ -1496,6 +1631,256 @@ mod tests {
         assert!(checked_join(&root, "../outside").is_err());
         assert!(checked_join(&root, "/outside").is_err());
         assert!(checked_join(&root, "skills/review").is_ok());
+    }
+
+    #[test]
+    fn rejects_insecure_public_package_urls() {
+        assert!(fetch_bytes("http://packages.example/archive.tar.gz").is_err());
+        assert!(fetch_bytes("HTTP://packages.example/archive.tar.gz").is_err());
+        let credential_error = fetch_bytes("https://secret@packages.example/archive.tar.gz")
+            .unwrap_err()
+            .to_string();
+        assert!(credential_error.contains("must not contain credentials"));
+        assert!(!credential_error.contains("secret"));
+        assert!(fetch_bytes("https://packages.example/archive.tar.gz#fragment").is_err());
+        let labeled = package_url_label(
+            &reqwest::Url::parse("https://packages.example/archive.tar.gz?token=secret").unwrap(),
+        );
+        assert_eq!(labeled, "https://packages.example/archive.tar.gz");
+    }
+
+    #[test]
+    fn pinned_connector_child_helper() {
+        let Some(address) = std::env::var_os("BLUE_PINNED_CONNECTOR_TEST_ADDRESS") else {
+            return;
+        };
+        let address = address.to_string_lossy().parse().unwrap();
+        let response = public_package_client("package.invalid", &[address], false)
+            .unwrap()
+            .get("http://package.invalid/archive.tar.gz")
+            .send()
+            .unwrap();
+        assert_eq!(response.bytes().unwrap().as_ref(), b"pinned");
+    }
+
+    #[test]
+    fn connector_uses_the_pinned_address_instead_of_proxy_or_dns() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(executable)
+            .args(["--exact", "packages::tests::pinned_connector_child_helper"])
+            .env("BLUE_PINNED_CONNECTOR_TEST_ADDRESS", address.to_string())
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "")
+            .spawn()
+            .unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npinned")
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn extraction_budgets_accept_boundaries_and_reject_each_overflow() {
+        assert!(entry_count_within_budget(
+            MAX_ARCHIVE_ENTRIES,
+            EXTRACTION_LIMITS
+        ));
+        assert!(!entry_count_within_budget(
+            MAX_ARCHIVE_ENTRIES + 1,
+            EXTRACTION_LIMITS
+        ));
+        assert!(expanded_size_within_budget(
+            0,
+            MAX_FILE_BYTES,
+            EXTRACTION_LIMITS
+        ));
+        assert!(!expanded_size_within_budget(
+            0,
+            MAX_FILE_BYTES + 1,
+            EXTRACTION_LIMITS
+        ));
+        assert!(expanded_size_within_budget(
+            MAX_EXPANDED_BYTES - MAX_FILE_BYTES,
+            MAX_FILE_BYTES,
+            EXTRACTION_LIMITS
+        ));
+        assert!(!expanded_size_within_budget(
+            MAX_EXPANDED_BYTES - MAX_FILE_BYTES + 1,
+            MAX_FILE_BYTES,
+            EXTRACTION_LIMITS
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_extended_path_metadata_before_normal_tar_parsing() {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut archive = tar::Builder::new(encoder);
+        let body = vec![b'a'; crate::package_archive::MAX_METADATA_ENTRY_BYTES as usize + 1];
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNULongName);
+        header.set_size(body.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "././@LongLink", &body[..])
+            .unwrap();
+        let bytes = archive.into_inner().unwrap().finish().unwrap();
+        let root =
+            std::env::temp_dir().join(format!("gh-package-metadata-limit-{}", std::process::id()));
+        let error = extract_safe(&bytes, &root, "test").unwrap_err().to_string();
+        assert!(error.contains("metadata limit"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn streamed_extraction_enforces_each_budget_and_advisory_space_probe() {
+        let root =
+            std::env::temp_dir().join(format!("gh-package-stream-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let limits = test_limits();
+
+        let at_boundaries = encoded_files(&[("a", b"123"), ("b", b"4")]);
+        crate::package_archive::extract_safe_with_limits(
+            &at_boundaries,
+            &root.join("ok"),
+            "test",
+            limits,
+            unavailable_space_probe,
+        )
+        .unwrap();
+
+        let too_many = encoded_files(&[("a", b"1"), ("b", b"1"), ("c", b"1")]);
+        assert!(crate::package_archive::extract_safe_with_limits(
+            &too_many,
+            &root.join("entries"),
+            "test",
+            limits,
+            ample_space,
+        )
+        .is_err());
+        let file_too_large = encoded_files(&[("a", b"1234")]);
+        assert!(crate::package_archive::extract_safe_with_limits(
+            &file_too_large,
+            &root.join("file"),
+            "test",
+            limits,
+            ample_space,
+        )
+        .is_err());
+        let total_too_large = encoded_files(&[("a", b"123"), ("b", b"45")]);
+        assert!(crate::package_archive::extract_safe_with_limits(
+            &total_too_large,
+            &root.join("total"),
+            "test",
+            limits,
+            ample_space,
+        )
+        .is_err());
+        let too_deep = encoded_files(&[("a/b/c", b"1")]);
+        assert!(crate::package_archive::extract_safe_with_limits(
+            &too_deep,
+            &root.join("depth"),
+            "test",
+            limits,
+            ample_space,
+        )
+        .is_err());
+        let too_long = encoded_files(&[("abcdefghijklmnopq", b"1")]);
+        assert!(crate::package_archive::extract_safe_with_limits(
+            &too_long,
+            &root.join("path"),
+            "test",
+            limits,
+            ample_space,
+        )
+        .is_err());
+        assert!(crate::package_archive::extract_safe_with_limits(
+            &encoded_files(&[("a", b"1")]),
+            &root.join("space"),
+            "test",
+            limits,
+            no_space,
+        )
+        .is_err());
+
+        SPACE_PROBES.store(0, Ordering::SeqCst);
+        let aggregate_space = encoded_files(&[("a", b"12"), ("b", b"34")]);
+        assert!(crate::package_archive::extract_safe_with_limits(
+            &aggregate_space,
+            &root.join("aggregate-space"),
+            "test",
+            limits,
+            three_bytes_once,
+        )
+        .is_err());
+        assert_eq!(SPACE_PROBES.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn truncated_declared_body_fails_and_operation_staging_is_removed() {
+        use std::io::Read;
+
+        let valid = encoded_files(&[("payload", b"123")]);
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&valid[..])
+            .read_to_end(&mut raw)
+            .unwrap();
+        raw.truncate(513);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let truncated = encoder.finish().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "gh-package-truncated-staging-{}",
+            std::process::id()
+        ));
+        let staging_path;
+        {
+            let staging = StagingDirectory::create(&root, "test").unwrap();
+            staging_path = staging.path.clone();
+            assert!(extract_safe(&truncated, &staging.path, "test").is_err());
+        }
+        assert!(!staging_path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_hardlinks_devices_and_fifos() {
+        for kind in [
+            tar::EntryType::Link,
+            tar::EntryType::Char,
+            tar::EntryType::Block,
+            tar::EntryType::Fifo,
+        ] {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_size(0);
+            header.set_mode(0o600);
+            if kind == tar::EntryType::Link {
+                header.set_link_name("target").unwrap();
+            }
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "unsafe", std::io::empty())
+                .unwrap();
+            let bytes = archive.into_inner().unwrap().finish().unwrap();
+            let root = std::env::temp_dir().join(format!(
+                "gh-package-special-{}-{}",
+                std::process::id(),
+                kind.as_byte()
+            ));
+            assert!(extract_safe(&bytes, &root, "test").is_err());
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -1626,6 +2011,56 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_deep_and_nonportable_archive_paths() {
+        fn encoded(paths: &[String]) -> Vec<u8> {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            for path in paths {
+                let body = b"x";
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive.append_data(&mut header, path, &body[..]).unwrap();
+            }
+            archive.into_inner().unwrap().finish().unwrap()
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("gh-package-path-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let duplicate = encoded(&["same.txt".into(), "same.txt".into()]);
+        let duplicate_error = extract_safe(&duplicate, &root.join("duplicate"), "test")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            duplicate_error.contains("duplicate path"),
+            "{duplicate_error}"
+        );
+        let deep = encoded(&[(0..33).map(|_| "x").collect::<Vec<_>>().join("/")]);
+        assert!(extract_safe(&deep, &root.join("deep"), "test").is_err());
+        let portable = encoded(&["folder\\payload".into()]);
+        assert!(extract_safe(&portable, &root.join("portable"), "test").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_existing_and_broken_symlink_staging_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("gh-package-staging-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        symlink(root.join("missing"), root.join("broken")).unwrap();
+        assert!(secure_create_dir_all(&root.join("broken/child")).is_err());
+        std::fs::create_dir(root.join("outside")).unwrap();
+        symlink(root.join("outside"), root.join("linked")).unwrap();
+        assert!(secure_create_dir_all(&root.join("linked/child")).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn installs_verified_package_and_detects_local_drift() {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut archive = tar::Builder::new(encoder);
@@ -1636,6 +2071,14 @@ mod tests {
         header.set_cksum();
         archive
             .append_data(&mut header, "plugin/.codex-plugin/plugin.json", &body[..])
+            .unwrap();
+        let helper = b"#!/bin/sh\nexit 0\n";
+        let mut helper_header = tar::Header::new_gnu();
+        helper_header.set_size(helper.len() as u64);
+        helper_header.set_mode(0o777);
+        helper_header.set_cksum();
+        archive
+            .append_data(&mut helper_header, "bin/review-helper", &helper[..])
             .unwrap();
         let encoder = archive.into_inner().unwrap();
         let bytes = encoder.finish().unwrap();
@@ -1666,6 +2109,16 @@ mod tests {
         };
         let adapter = PackageAdapter {
             plugin_dir: Some("plugin".into()),
+            helpers: [(
+                "review-helper".into(),
+                gh_service::PlatformAsset {
+                    paths: [("default".into(), "bin/review-helper".into())]
+                        .into_iter()
+                        .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
             ..Default::default()
         };
         let (record, activation) = install_and_resolve(
@@ -1686,6 +2139,23 @@ mod tests {
             .join("plugin/.codex-plugin/plugin.json")
             .is_file());
         assert_eq!(activation.launch_args[0], "--plugin-dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let plugin_mode =
+                std::fs::metadata(record.root.join("plugin/.codex-plugin/plugin.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+            let helper_mode = std::fs::metadata(record.root.join("bin/review-helper"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(plugin_mode, 0o600);
+            assert_eq!(helper_mode, 0o700);
+        }
         std::fs::write(
             record.root.join("plugin/.codex-plugin/plugin.json"),
             "changed",
@@ -1706,6 +2176,118 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("modified locally"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn adopts_a_complete_package_published_before_its_marker() {
+        let manifest = br#"{"name":"recovery-kit","version":"1.0.0"}"#;
+        let bytes = encoded_files(&[("plugin/.codex-plugin/plugin.json", manifest)]);
+        let digest = hex::encode(Sha256::digest(&bytes));
+        let root = std::env::temp_dir().join(format!(
+            "gh-package-publish-recovery-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let base = root.join("store");
+        let content = base.join("recovery-kit").join(&digest).join("content");
+        extract_safe(&bytes, &content, "recovery-kit").unwrap();
+        let marker = content.parent().unwrap().join("package.json");
+        assert!(!marker.exists());
+        let source = root.join("recovery-kit.tar.gz");
+        std::fs::write(&source, &bytes).unwrap();
+        let package = ManagedPackage {
+            id: "recovery-kit".into(),
+            name: None,
+            version: "1.0.0".into(),
+            source_ref: source.display().to_string(),
+            artifact_id: None,
+            sha256: digest,
+            platform_sources: Default::default(),
+            settings: Default::default(),
+            adapters: Default::default(),
+        };
+        let adapter = PackageAdapter {
+            plugin_dir: Some("plugin".into()),
+            ..Default::default()
+        };
+        let (record, _) = install_and_resolve(
+            &base,
+            Harness::Claude,
+            &package,
+            &adapter,
+            &gh_service::PackageAdapterInterval {
+                introduced: semver::Version::new(0, 0, 0),
+                before: None,
+            },
+            &crate::adapters::claude::v2_0_12::IMPLEMENTATION,
+            &DirectPackageFetcher,
+        )
+        .unwrap();
+        assert_eq!(record.root, content);
+        assert!(marker.is_file());
+        assert_eq!(std::fs::read_dir(base.join(".staging")).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_identical_installs_publish_one_tree_without_staging_leaks() {
+        let manifest = br#"{"name":"race-kit","version":"1.0.0"}"#;
+        let bytes = encoded_files(&[("plugin/.codex-plugin/plugin.json", manifest)]);
+        let root = std::env::temp_dir().join(format!("gh-package-race-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("race-kit.tar.gz");
+        std::fs::write(&source, &bytes).unwrap();
+        let package = std::sync::Arc::new(ManagedPackage {
+            id: "race-kit".into(),
+            name: None,
+            version: "1.0.0".into(),
+            source_ref: source.display().to_string(),
+            artifact_id: None,
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            platform_sources: Default::default(),
+            settings: Default::default(),
+            adapters: Default::default(),
+        });
+        let adapter = std::sync::Arc::new(PackageAdapter {
+            plugin_dir: Some("plugin".into()),
+            ..Default::default()
+        });
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let base = root.join("store");
+                let package = std::sync::Arc::clone(&package);
+                let adapter = std::sync::Arc::clone(&adapter);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    install_and_resolve(
+                        &base,
+                        Harness::Claude,
+                        &package,
+                        &adapter,
+                        &gh_service::PackageAdapterInterval {
+                            introduced: semver::Version::new(0, 0, 0),
+                            before: None,
+                        },
+                        &crate::adapters::claude::v2_0_12::IMPLEMENTATION,
+                        &DirectPackageFetcher,
+                    )
+                    .map(|(record, _)| record.root)
+                })
+            })
+            .collect::<Vec<_>>();
+        let installed = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert!(installed.windows(2).all(|roots| roots[0] == roots[1]));
+        assert!(installed[0]
+            .join("plugin/.codex-plugin/plugin.json")
+            .is_file());
+        let staging = root.join("store/.staging");
+        assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
 
