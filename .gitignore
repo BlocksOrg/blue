@@ -10,6 +10,7 @@
 /deploy/.env
 session.json
 governance-config.json
+/scratch/
 /tests/e2e/artifacts/*
 /tests/e2e-slim/artifacts/*
 /tests/e2e-slim/target
