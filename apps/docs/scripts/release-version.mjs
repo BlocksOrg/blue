@@ -1,6 +1,7 @@
 import { cp, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkReleaseSnapshot, releasedNavigation } from "./check-release-snapshot.mjs";
 
 const version = process.argv[2];
 if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
@@ -49,7 +50,8 @@ await rewriteLinks(releaseDir);
 await mkdir(resolve(docsRoot, "openapi"), { recursive: true });
 await copyFile(resolve(root, "deploy/contract/governance.openapi.yaml"), resolve(docsRoot, `openapi/${version}.yaml`));
 
-const stable = JSON.parse(JSON.stringify(next).replaceAll('"Next"', `"${version}"`).replaceAll("next/", `${version}/`).replaceAll("openapi/next.yaml", `openapi/${version}.yaml`));
+const stable = releasedNavigation(next, version);
 config.navigation.versions = [stable, next, ...config.navigation.versions.filter((entry) => entry.version !== "Next")];
 await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+await checkReleaseSnapshot(version, root);
 console.log(`Created immutable documentation snapshot ${version}.`);
