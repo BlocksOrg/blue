@@ -40,3 +40,14 @@ output "public_subnet_ids" { value = local.public_subnet_ids }
 output "acm_certificate_arn" {
   value = local.enable_domain ? aws_acm_certificate.this[0].arn : null
 }
+
+# Repository variables for .github/workflows/website-deploy.yml.
+output "github_actions_role_arn" {
+  value       = local.enable_github_oidc ? aws_iam_role.github_actions[0].arn : null
+  description = "AWS_ROLE_ARN for the GitHub Actions deploy workflow."
+}
+
+output "website_service_name" {
+  value       = var.enable_website ? aws_ecs_service.website[0].name : null
+  description = "ECS_SERVICE for the GitHub Actions deploy workflow (ECS_CLUSTER is ecs_cluster_name)."
+}

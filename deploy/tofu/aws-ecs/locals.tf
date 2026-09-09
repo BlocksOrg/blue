@@ -1,4 +1,10 @@
 locals {
+  # Applied to every taggable resource through the provider's default_tags.
+  tags = {
+    Application = var.name
+    Environment = var.environment
+  }
+
   create_vpc    = var.vpc_id == ""
   enable_domain = var.domain_name != ""
   enable_proxy  = var.enable_inference_proxy
