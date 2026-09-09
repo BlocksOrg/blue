@@ -24,6 +24,12 @@ variable "image" {
   description = "Blue application image (control-api, dashboard, inference-proxy, migrate)"
 }
 
+variable "website_image" {
+  type        = string
+  default     = "ghcr.io/blocksorg/governance-harness-website:latest"
+  description = "Separate landing-page (website) image"
+}
+
 variable "image_pull_secret_arn" {
   type        = string
   default     = ""
@@ -73,7 +79,7 @@ variable "private_subnet_ids" {
 variable "domain_name" {
   type        = string
   default     = ""
-  description = "Base domain for Blue services. Empty means HTTP on the raw ALB DNS name."
+  description = "Apex domain served by the website/landing page. Empty means HTTP on the raw ALB DNS name."
 }
 
 variable "route53_zone_id" {
@@ -106,6 +112,11 @@ variable "ingress_cidrs" {
 # ---------------------------------------------------------------------------
 # Component toggles
 # ---------------------------------------------------------------------------
+variable "enable_website" {
+  type    = bool
+  default = true
+}
+
 variable "enable_redis" {
   type    = bool
   default = true
@@ -133,7 +144,7 @@ variable "blue_config_yaml" {
 
 variable "docs_url" {
   type    = string
-  default = "https://docs.bluee.sh"
+  default = "https://docs.blocks.team"
 }
 
 variable "gateway_type" {
@@ -183,6 +194,19 @@ variable "worker_cpu" {
 variable "worker_memory" {
   type    = number
   default = 512
+}
+
+variable "website_cpu" {
+  type    = number
+  default = 256
+}
+variable "website_memory" {
+  type    = number
+  default = 512
+}
+variable "website_desired_count" {
+  type    = number
+  default = 2
 }
 
 variable "inference_proxy_cpu" {

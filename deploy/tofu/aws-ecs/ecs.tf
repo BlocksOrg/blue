@@ -75,6 +75,12 @@ resource "aws_cloudwatch_log_group" "dashboard" {
   retention_in_days = var.log_retention_days
   kms_key_id        = aws_kms_key.blue.arn
 }
+resource "aws_cloudwatch_log_group" "website" {
+  count             = var.enable_website ? 1 : 0
+  name              = "/ecs/${var.name}/website"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = aws_kms_key.blue.arn
+}
 resource "aws_cloudwatch_log_group" "inference_proxy" {
   count             = local.enable_proxy ? 1 : 0
   name              = "/ecs/${var.name}/inference-proxy"
@@ -258,6 +264,38 @@ resource "aws_ecs_task_definition" "dashboard" {
 }
 
 # ---------------------------------------------------------------------------
+# website (landing) task definition — separate static image, no secrets
+# ---------------------------------------------------------------------------
+resource "aws_ecs_task_definition" "website" {
+  count                    = var.enable_website ? 1 : 0
+  family                   = "${var.name}-website"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.website_cpu
+  memory                   = var.website_memory
+  execution_role_arn       = aws_iam_role.execution.arn
+
+  container_definitions = jsonencode([
+    {
+      name                  = "website"
+      image                 = var.website_image
+      essential             = true
+      repositoryCredentials = local.repository_credentials
+      stopTimeout           = var.stop_timeout_seconds
+      portMappings          = [{ containerPort = 3000, protocol = "tcp" }]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.website[0].name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "website"
+        }
+      }
+    },
+  ])
+}
+
+# ---------------------------------------------------------------------------
 # inference-proxy task definition (optional)
 # ---------------------------------------------------------------------------
 resource "aws_ecs_task_definition" "inference_proxy" {
@@ -383,6 +421,39 @@ resource "aws_ecs_service" "dashboard" {
   load_balancer {
     target_group_arn = aws_lb_target_group.dashboard.arn
     container_name   = "dashboard"
+    container_port   = 3000
+  }
+
+  depends_on = [aws_lb.this]
+}
+
+resource "aws_ecs_service" "website" {
+  count                              = var.enable_website ? 1 : 0
+  name                               = "${var.name}-website"
+  cluster                            = aws_ecs_cluster.this.id
+  task_definition                    = aws_ecs_task_definition.website[0].arn
+  desired_count                      = var.website_desired_count
+  launch_type                        = "FARGATE"
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  health_check_grace_period_seconds  = var.health_check_grace_period_seconds
+  wait_for_steady_state              = var.wait_for_steady_state
+  force_new_deployment               = true
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  network_configuration {
+    subnets          = local.private_subnet_ids
+    security_groups  = [aws_security_group.service.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.website[0].arn
+    container_name   = "website"
     container_port   = 3000
   }
 

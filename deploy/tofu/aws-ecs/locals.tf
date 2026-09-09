@@ -19,6 +19,7 @@ locals {
 
   # Public URLs. With a domain, hostnames route through HTTPS; without one,
   # services are exposed on distinct ALB ports over HTTP.
+  website_url         = local.enable_domain ? "https://${var.domain_name}" : "http://${aws_lb.this.dns_name}"
   dashboard_url       = local.enable_domain ? "https://${var.app_subdomain}.${var.domain_name}" : "http://${aws_lb.this.dns_name}:3000"
   control_api_url     = local.enable_domain ? "https://${var.api_subdomain}.${var.domain_name}" : "http://${aws_lb.this.dns_name}:8080"
   inference_proxy_url = local.enable_domain ? "https://${var.inference_subdomain}.${var.domain_name}" : "http://${aws_lb.this.dns_name}:8081"
