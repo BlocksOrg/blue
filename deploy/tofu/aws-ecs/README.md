@@ -100,6 +100,19 @@ those containers at startup (a gateway block is included only when
 gateway provisioner block for production gateway mode — via the
 `blue_config_yaml` variable.
 
+Better Auth runs in the dashboard container, so the control-api's session and
+JWKS lookups are server-to-server calls back to the dashboard. There is no
+internal DNS record for it (the Cloud Map namespace is provisioned only with
+the inference proxy), so those hops go out through NAT and back in via the
+public ALB — the same path the inference proxy already uses for its OAuth token
+hop. Narrowing `ingress_cidrs` to an office range therefore breaks the
+control-api's own session checks, because the request arrives from the NAT
+gateway's address.
+
+`identity.mode` is fixed to `password`. An IdP-managed workspace needs a SCIM
+bearer token plus the dashboard's `HARNESS_OIDC_*` provider settings, which
+this module has no inputs for; supply the whole config via `blue_config_yaml`.
+
 ## Secrets in state
 
 All generated credentials (database, auth, bootstrap admin, Redis auth, and —

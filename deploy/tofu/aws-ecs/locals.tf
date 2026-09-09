@@ -50,10 +50,23 @@ locals {
     HARNESS_RUN_BACKGROUND_JOBS = "false"
     HARNESS_INTERNAL_LISTEN     = "0.0.0.0:8082"
     BETTER_AUTH_URL             = local.dashboard_url
-    HARNESS_AUTH_PUBLIC_URL     = local.dashboard_url
     CONTROL_API_PUBLIC_URL      = local.control_api_url
     CONTROL_API_URL             = local.control_api_url
     DOCS_URL                    = var.docs_url
+
+    # Better Auth lives in the dashboard. The session and JWKS hops are
+    # server-to-server, but ECS publishes no internal DNS record for the
+    # dashboard (the Cloud Map namespace exists only with the inference
+    # proxy), so they ride the public ALB like the proxy's token hop below.
+    # `audience` must equal the dashboard's CONTROL_API_PUBLIC_URL, which is
+    # the OAuth resource identifier it mints access tokens for.
+    HARNESS_AUTH_PUBLIC_URL  = local.dashboard_url
+    HARNESS_AUTH_SESSION_URL = "${local.dashboard_url}/api/auth/get-session"
+    HARNESS_AUTH_JWKS_URL    = "${local.dashboard_url}/api/auth/jwks"
+    HARNESS_AUTH_ISSUER      = "${local.dashboard_url}/api/auth"
+    HARNESS_AUTH_AUDIENCE    = local.control_api_url
+    HARNESS_OAUTH_CLIENT_ID  = var.oauth_client_id
+    HARNESS_AUTH_MODE        = "password"
     }, local.enable_proxy ? {
     HARNESS_GATEWAY_TYPE               = var.gateway_type
     HARNESS_INTERNAL_TRANSPORT_MODE    = "insecure-http"
@@ -77,6 +90,7 @@ locals {
     CONTROL_API_PUBLIC_URL            = local.control_api_url
     BETTER_AUTH_URL                   = local.dashboard_url
     HARNESS_AUTH_PUBLIC_URL           = local.dashboard_url
+    HARNESS_OAUTH_CLIENT_ID           = var.oauth_client_id
     HARNESS_INFERENCE_PROXY_CLIENT_ID = var.inference_proxy_client_id
     DOCS_URL                          = var.docs_url
   }
