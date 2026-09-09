@@ -95,34 +95,10 @@ services:
       HARNESS_OIDC_ISSUER: ${HARNESS_OIDC_ISSUER:-}
       HARNESS_OIDC_CLIENT_ID: ${HARNESS_OIDC_CLIENT_ID:-}
       HARNESS_OIDC_CLIENT_SECRET: ${HARNESS_OIDC_CLIENT_SECRET:-}
-      DOCS_URL: ${HARNESS_DOCS_URL:-http://127.0.0.1:3001}
+      DOCS_URL: ${HARNESS_DOCS_URL:-https://docs.bluee.sh}
     ports: ["3000:3000"]
     depends_on:
       control-api: { condition: service_started }
-      docs: { condition: service_healthy }
-
-  docs:
-    build:
-      context: ../apps/docs
-    ports: ["3001:3000"]
-    volumes: ["mintlify-cache:/root/.mintlify"]
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 60s
-
-  website:
-    build:
-      context: ../apps/website
-    ports: ["3002:3000"]
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
 
   postgres-control:
     image: postgres:16
@@ -216,4 +192,3 @@ volumes:
   postgres-control-data:
   postgres-litellm-data:
   minio-data:
-  mintlify-cache:

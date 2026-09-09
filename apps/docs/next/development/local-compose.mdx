@@ -26,8 +26,6 @@ instead and can silently select the password-mode defaults.
 | Service | Local address | Purpose |
 | --- | --- | --- |
 | Dashboard | `http://127.0.0.1:3000` | Login and administration UI |
-| Documentation | `http://127.0.0.1:3001` | Local Mintlify documentation site |
-| Website | `http://127.0.0.1:3002` | Public website preview |
 | Control API | `http://127.0.0.1:8080` | Policy, gateway, client, and session API |
 | PostgreSQL | `127.0.0.1:5433` | Authentication and control-plane state |
 | MinIO API | `http://127.0.0.1:9000` | Raw-session object storage |
@@ -44,10 +42,10 @@ MINIO_ROOT_PASSWORD=replace-local-storage-password
 # Version label displayed beside the dashboard logo; release builds inject this into the image.
 BLUE_DEPLOYMENT_VERSION=0.1.0
 # Optional: override the dashboard sidebar documentation destination.
-HARNESS_DOCS_URL=http://127.0.0.1:3001
+HARNESS_DOCS_URL=https://docs.bluee.sh
 ```
 
-The dashboard's **Documentation** sidebar link opens the Compose-hosted docs service by default. The `mintlify-cache` named volume retains the downloaded local-preview runtime between container recreations.
+The dashboard's **Documentation** sidebar link opens the centrally hosted documentation by default.
 
 The version beside the dashboard logo identifies the self-hosted deployment image. It is intentionally independent from the centrally distributed `blue` metaharness version shown by `blue version`.
 
@@ -121,4 +119,4 @@ cd deploy
 docker compose down
 ```
 
-Named volumes retain PostgreSQL state, MinIO data, and the Mintlify preview cache. Adding `--volumes` deletes local state and should be used only when a full reset is intended.
+Named volumes retain PostgreSQL and MinIO data. Adding `--volumes` deletes local state and should be used only when a full reset is intended.
