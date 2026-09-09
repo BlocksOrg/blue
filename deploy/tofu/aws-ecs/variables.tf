@@ -158,6 +158,14 @@ variable "inference_proxy_client_id" {
   default = "blue-inference-proxy"
 }
 
+# The public CLI's OAuth client id. The dashboard seeds the client under this
+# id and the control-api advertises it in its discovery document, so both
+# containers are given the same value.
+variable "oauth_client_id" {
+  type    = string
+  default = "blue-cli"
+}
+
 # ---------------------------------------------------------------------------
 # Sizing (Fargate valid CPU/memory combinations)
 # ---------------------------------------------------------------------------

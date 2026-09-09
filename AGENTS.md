@@ -30,6 +30,7 @@ services/    control-api (serves governance config) + inference-proxy (gateway m
 apps/        dashboard (Next.js) + docs (Mintlify)
 deploy/      compose, Helm, OpenTofu, example configs, versioned OpenAPI contract
 tests/e2e/   hermetic deploy + cross-service journeys
+scratch/     git-ignored; throwaway local files go here, never at the repo root
 ```
 
 ## Build & check
@@ -63,6 +64,8 @@ Examples: `feat/opencode-gateway`, `fix/control-api-stale-token`,
 
 Every PR references an issue (`Fixes #123`). Keep descriptions short and in your
 own words — no AI-generated walls of text.
+
+All PRs must be created in draft mode.
 
 ## Conventions that bite
 

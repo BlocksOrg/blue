@@ -10,6 +10,14 @@
 /deploy/.env
 session.json
 governance-config.json
+/scratch/
 /tests/e2e/artifacts/*
 /tests/e2e-slim/artifacts/*
 /tests/e2e-slim/target
+
+# OpenTofu/Terraform local state and per-environment vars
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+terraform.tfvars
+!terraform.tfvars.example
