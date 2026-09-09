@@ -64,28 +64,33 @@ resource "aws_cloudwatch_log_group" "control_api" {
   name              = "/ecs/${var.name}/control-api"
   retention_in_days = var.log_retention_days
   kms_key_id        = aws_kms_key.blue.arn
+  depends_on        = [aws_kms_key_policy.blue]
 }
 resource "aws_cloudwatch_log_group" "worker" {
   name              = "/ecs/${var.name}/worker"
   retention_in_days = var.log_retention_days
   kms_key_id        = aws_kms_key.blue.arn
+  depends_on        = [aws_kms_key_policy.blue]
 }
 resource "aws_cloudwatch_log_group" "dashboard" {
   name              = "/ecs/${var.name}/dashboard"
   retention_in_days = var.log_retention_days
   kms_key_id        = aws_kms_key.blue.arn
+  depends_on        = [aws_kms_key_policy.blue]
 }
 resource "aws_cloudwatch_log_group" "website" {
   count             = var.enable_website ? 1 : 0
   name              = "/ecs/${var.name}/website"
   retention_in_days = var.log_retention_days
   kms_key_id        = aws_kms_key.blue.arn
+  depends_on        = [aws_kms_key_policy.blue]
 }
 resource "aws_cloudwatch_log_group" "inference_proxy" {
   count             = local.enable_proxy ? 1 : 0
   name              = "/ecs/${var.name}/inference-proxy"
   retention_in_days = var.log_retention_days
   kms_key_id        = aws_kms_key.blue.arn
+  depends_on        = [aws_kms_key_policy.blue]
 }
 
 # ---------------------------------------------------------------------------
