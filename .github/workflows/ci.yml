@@ -79,6 +79,7 @@ jobs:
 
   packaging:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
@@ -153,7 +154,9 @@ jobs:
       - run: tofu -chdir=deploy/tofu/aws init -backend=false
       - run: tofu -chdir=deploy/tofu/aws validate
       - name: Verify generated secret contracts
-        run: test "$(printf 'random_password.bootstrap_admin.length\n' | tofu -chdir=deploy/tofu/aws console)" = 48
+        run: |
+          test "$(printf 'random_password.bootstrap_admin.length\n' \
+            | tofu -chdir=deploy/tofu/aws console -input=false -var-file=terraform.tfvars.example)" = 48
       - run: scripts/package-deployment.sh "v${{ steps.version.outputs.version }}" /tmp/blue-dist
       - run: tar -tzf "/tmp/blue-dist/blue-deployment-v${{ steps.version.outputs.version }}.tar.gz"
 
