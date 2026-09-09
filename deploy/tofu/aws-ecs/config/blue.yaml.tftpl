@@ -23,8 +23,10 @@ control_api:
 
   identity:
     mode: os.environ/HARNESS_AUTH_MODE
-    scim_bearer_token: os.environ/HARNESS_SCIM_BEARER_TOKEN
-    group_role_mappings: os.environ/HARNESS_SCIM_GROUP_ROLE_MAPPINGS
+    # Password mode is what this module wires end to end. An IdP-managed
+    # workspace (mode: oidc) additionally needs a SCIM bearer token here and
+    # the dashboard's HARNESS_OIDC_* provider settings, neither of which the
+    # module has inputs for — supply the whole file via blue_config_yaml.
 
   blob_storage:
     provider: s3

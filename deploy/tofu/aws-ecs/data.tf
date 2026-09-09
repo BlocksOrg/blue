@@ -24,3 +24,5 @@ resource "terraform_data" "validations" {
     }
   }
 }
+
+data "aws_partition" "current" {}
