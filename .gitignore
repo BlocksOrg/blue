@@ -1,0 +1,15 @@
+/target
+**/node_modules
+**/.next
+*.tsbuildinfo
+**/*.rs.bk
+*.pdb
+**/.terraform/
+*.tfplan
+# Local dev state
+/deploy/.env
+session.json
+governance-config.json
+/tests/e2e/artifacts/*
+/tests/e2e-slim/artifacts/*
+/tests/e2e-slim/target

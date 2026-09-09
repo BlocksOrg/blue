@@ -1,0 +1,30 @@
+aws_region            = "us-west-2"
+name                  = "blue"
+bootstrap_admin_email = "operator@example.com"
+tags                  = { Environment = "production", Application = "blue" }
+
+# --- Minimal: new VPC, no domain (serves HTTP on the raw ALB DNS name) --------
+# Leaving vpc_id empty creates a VPC, public/private subnets, IGW, and a single
+# NAT gateway. Without a domain the ALB exposes: :80 website, :3000 dashboard,
+# :8080 control-api (and :8081 inference-proxy if enabled).
+
+# --- Reuse an existing VPC (account low on VPCs) ------------------------------
+# vpc_id             = "vpc-0123456789abcdef0"
+# public_subnet_ids  = ["subnet-aaa", "subnet-bbb"]
+# private_subnet_ids = ["subnet-ccc", "subnet-ddd"]
+
+# --- Domain + TLS (recommended for production) --------------------------------
+# The apex serves the landing page; app.<domain> the dashboard; api.<domain>
+# the control-api. A Route53 hosted zone for the domain is required.
+# domain_name     = "blue.example.com"
+# route53_zone_id = "Z0123456789ABCDEFGHIJ"
+# app_subdomain   = "app"
+# api_subdomain   = "api"
+
+# --- Component toggles --------------------------------------------------------
+# enable_website         = true
+# enable_redis           = true
+# enable_inference_proxy = false   # gateway mode; requires enable_redis = true
+
+# --- Private image (Secrets Manager registry credentials) ---------------------
+# image_pull_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:ghcr-xxxx"

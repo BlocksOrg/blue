@@ -1,0 +1,27 @@
+# Example CLIENT config — copy to $XDG_CONFIG_HOME/blue/blue.toml
+# (usually ~/.config/blue/blue.toml).
+#
+# This file is deliberately tiny: it only selects the service URL and how to
+# authenticate. Everything else (allowed harnesses, managed config, gateway
+# routing) is governed by the service, never the client.
+
+[service]
+# The single service URL your operator provisioned. Leave `url` empty and set
+# `config_file` instead to run against a local file (dev/testing).
+url = "https://harness.acme.com"
+# config_file = "/etc/blue/blue.yaml"
+
+[identity]
+# The reference service uses RFC 8628 device authorization. `issuer` is the
+# Better Auth base path; the access token is audience-bound to [service].url.
+mode = "oidc"
+issuer = "https://harness.acme.com/api/auth/"
+client_id = "blue-cli"
+scopes = ["openid", "profile", "email", "offline_access", "governance:read", "session:write", "client-status:write"]
+
+[mode]
+# Force governance-only for local dev. This can only ever DOWNGRADE — it can
+# never enable gateway mode (the server declares that).
+force_governance_only = false
+# Enforced deployment: also write Claude's un-overridable managed-settings.json.
+enforced = false

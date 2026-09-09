@@ -1,0 +1,184 @@
+replicaCount: 1 # development compatibility only; production components use replicas below
+
+image:
+  repository: ghcr.io/blocksorg/governance-harness
+  pullPolicy: IfNotPresent
+  tag: ""
+  digest: ""
+imagePullSecrets: []
+
+blue:
+  # Production enables immutable-image and externally-managed-secret gates.
+  # Use values-evaluation.yaml only for non-production evaluation clusters.
+  production: true
+  enableInferenceProxy: false
+  # Required when enableInferenceProxy is true. Must match gateway.type in the
+  # mounted Blue configuration; the chart injects it into both services.
+  gatewayType: ""
+  # OAuth client id the inference proxy presents to the Control API for M2M
+  # auth. The dashboard seeds a confidential client with this id, and the
+  # Control API pins the token subject to it. The matching client secret must be
+  # supplied as HARNESS_PROXY_OAUTH_CLIENT_SECRET via `existingSecret` (shared by
+  # the dashboard and inference-proxy pods).
+  inferenceProxyClientId: blue-inference-proxy
+  internalTransport:
+    # mtls (recommended/default) or insecure-http (trusted private networks only).
+    mode: mtls
+    # Server Secret: ca.crt, tls.crt, tls.key. Client Secret: ca.crt and
+    # client.pem (certificate followed by its private key).
+    serverSecret: ""
+    clientSecret: ""
+  existingSecret: ""
+  config:
+    existingConfigMap: ""
+    key: blue.yaml
+    mountPath: /etc/blue/blue.yaml
+  provisionerExecutable:
+    enabled: false
+    image:
+      repository: ""
+      digest: ""
+      pullPolicy: IfNotPresent
+    executableSha256: ""
+  publicUrls:
+    dashboard: https://blue.example.com
+    controlApi: https://api.blue.example.com
+    docs: https://docs.example.com
+    inferenceProxy: https://inference.blue.example.com
+  env: {}
+
+components:
+  controlApi:
+    replicas: 3
+    maxReplicas: 12
+  dashboard:
+    replicas: 2
+  inferenceProxy:
+    replicas: 4
+    maxReplicas: 30
+    maxInFlightPerPod: 7500
+  worker:
+    replicas: 1
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+
+service:
+  type: ClusterIP
+  ports:
+    dashboard: 3000
+    controlApi: 8080
+    inferenceProxy: 8081
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  proxyHost: inference.blue.example.com
+  hosts:
+    - host: blue.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          port: dashboard
+    - host: api.blue.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          port: control-api
+  tls: []
+
+resources:
+  controlApi:
+    requests: { cpu: 500m, memory: 512Mi }
+    limits: { cpu: 1, memory: 1Gi }
+  dashboard:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 768Mi }
+  inferenceProxy:
+    requests: { cpu: 1, memory: 1Gi }
+    limits: { cpu: 2, memory: 2Gi }
+  worker:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: 1, memory: 1Gi }
+
+startupProbe:
+  failureThreshold: 30
+  periodSeconds: 10
+livenessProbe:
+  periodSeconds: 30
+  timeoutSeconds: 10
+readinessProbe:
+  periodSeconds: 10
+  timeoutSeconds: 5
+
+autoscaling:
+  enabled: true
+  minReplicas: 4
+  maxReplicas: 30
+  targetCPUUtilizationPercentage: 75
+  targetActiveStreamsPerProxy: 5000
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+migrations:
+  enabled: true
+  activeDeadlineSeconds: 600
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+networkPolicy:
+  enabled: true
+  ingressController:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ingress-nginx
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: ingress-nginx
+  monitoring:
+    enabled: false
+    namespaceSelector: {}
+    podSelector: {}
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # Standard NetworkPolicy cannot match DNS names. Populate these with the
+  # narrow cluster/VPC CIDRs for managed dependencies and approved HTTPS hosts.
+  databaseCidrs: []
+  databasePort: 5432
+  redisCidrs: []
+  redisPort: 6379
+  externalHttpsCidrs: []
+  extraEgress: []

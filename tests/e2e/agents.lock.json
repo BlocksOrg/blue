@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "agents": {
+    "codex": {
+      "package": "@openai/codex",
+      "version": "0.151.0",
+      "integrity": "sha512-mhtWmOZRdmWD1jPbLDnQb59BsaVP/V+lXe/OFNR9ZcLZU0UCiBwn98Fcav1ss7sDIlHkuqj6nWd44IPeXoOhJA==",
+      "profile": "codex-v0_145_0",
+      "arguments": ["exec", "--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--json", "Return BLUE_CERT_OK and do not edit files."],
+      "capabilities": ["gateway", "revision", "mcp", "packages", "skills", "plugins", "hooks", "session_upload", "session_start", "session_resume"]
+    },
+    "claude": {
+      "package": "@anthropic-ai/claude-code",
+      "version": "2.1.252",
+      "integrity": "sha512-ftoO0eLOZyEDrA3KDd7QZH5qdvToiTcoip3YdGGx8wzH4R9YUwHO+5VG01JDRn8u7MrRcXkf7FvbMYezEt0VyQ==",
+      "profile": "claude-v2_0_12",
+      "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files.", "--output-format", "json"],
+      "capabilities": ["gateway", "revision", "mcp", "packages", "skills", "plugins", "hooks", "session_upload", "session_start", "session_resume"]
+    },
+    "kimi": {
+      "package": "@moonshot-ai/kimi-code",
+      "version": "0.39.1",
+      "integrity": "sha512-prxUZEhr4hFTnPtm3JLEpE3+1jFH9HvCpkAGFy4WErFHX0Ax7+7KdEgplOC+lm7IGv1cZLU6HdqT6con1IFbdQ==",
+      "profile": "kimi-v0_0_0",
+      "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files."],
+      "capabilities": ["gateway", "revision", "mcp", "packages", "skills", "agents", "hooks", "session_upload", "session_start", "session_resume"]
+    },
+    "opencode": {
+      "package": "opencode-ai",
+      "version": "1.18.25",
+      "integrity": "sha512-pS4RKJ9eKwU7Dp5G5pdj1rhMnpG5APixXzfTKNoFqv9aFVI36Rnza2jESvKifxyPZlsA65MQB03WCArY0EK6mg==",
+      "profile": "opencode-v0_0_0",
+      "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."],
+      "capabilities": ["gateway", "revision", "mcp", "packages", "skills", "agents", "plugins", "hooks", "session_upload", "session_start", "session_resume"]
+    }
+  }
+}

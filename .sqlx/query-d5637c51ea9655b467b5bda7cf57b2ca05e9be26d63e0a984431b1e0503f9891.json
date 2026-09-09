@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into auth.\"user\" (id,name,email,\"emailVerified\",\"createdAt\",\"updatedAt\",\"organizationId\",\"governanceRole\",banned,\"banReason\") values ($1,$2,$3,true,now(),now(),$4,'member',$5,$6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d5637c51ea9655b467b5bda7cf57b2ca05e9be26d63e0a984431b1e0503f9891"
+}

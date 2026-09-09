@@ -1,0 +1,5 @@
+# Overlay for session capture. Merge with blue.yaml by setting
+# BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.capture.yaml.
+governance:
+  session_upload:
+    presign_url: http://127.0.0.1:8080/session-uploads/presign

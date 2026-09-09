@@ -1,0 +1,278 @@
+---
+title: "Custom gateway provisioners"
+description: "Deploy a digest-pinned executable gateway provisioner."
+icon: "gears"
+---
+
+Custom provisioners are deployment-trusted executables. Blue invokes the configured absolute path directly, with no arguments and the Control API environment. The file must be a regular executable, and its lowercase SHA-256 pin is verified at startup. A shebang selects the interpreter; that interpreter and every imported dependency must exist in the Control API image.
+
+## Configuration
+
+```yaml
+gateway:
+  provisioner:
+    type: organization-gateway
+    executable_path: /var/run/blue/provisioner/provisioner
+    executable_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    policy_revision: organization-gateway-v1
+    reconcile_ttl_seconds: 86400
+    timeout_seconds: 15
+    max_concurrency: 8
+```
+
+Helm can copy the executable from a separately pinned artifact image:
+
+```yaml
+blue:
+  provisionerExecutable:
+    enabled: true
+    image:
+      repository: ghcr.io/acme/blue-provisioner
+      digest: sha256:REPLACE_WITH_IMAGE_DIGEST
+      pullPolicy: IfNotPresent
+    executableSha256: REPLACE_WITH_FILE_SHA256
+```
+
+The artifact image must contain `/executable/provisioner`. The init container verifies it, installs it at `/var/run/blue/provisioner/provisioner` with mode `0555`, and mounts it read-only.
+
+## Implement the executable
+
+The executable reads one request from stdin and writes one response to stdout. Blue passes no command-line arguments.
+
+```python provisioner.py
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+def respond(payload, exit_code=0):
+    json.dump(payload, sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+    raise SystemExit(exit_code)
+
+class ProvisionerError(Exception):
+    def __init__(self, code, message):
+        self.code = code
+        self.message = message
+
+def required_env(name):
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ProvisionerError("invalid_config", f"{name} is required")
+    return value
+
+BASE_URL = required_env("HARNESS_GATEWAY_URL").rstrip("/")
+ADMIN_KEY = required_env("HARNESS_LITELLM_ADMIN_KEY")
+MODELS = [value for value in os.environ.get("LITELLM_MODELS", "").split(",") if value]
+
+def litellm(method, path, body=None, query=None):
+    url = f"{BASE_URL}/{path.lstrip('/')}"
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    encoded = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(url, data=encoded, method=method, headers={
+        "Authorization": f"Bearer {ADMIN_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        # Do not include the upstream body: it can contain credentials.
+        if path == "/key/info" and error.code == 404:
+            raise ProvisionerError("credential_invalid", "LiteLLM key was deleted")
+        raise ProvisionerError("rejected", f"LiteLLM returned HTTP {error.code}")
+    except (urllib.error.URLError, TimeoutError):
+        raise ProvisionerError("unavailable", "LiteLLM request failed")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ProvisionerError("rejected", "LiteLLM returned invalid JSON")
+
+def find_user(email):
+    payload = litellm("GET", "/user/list", query={
+        "user_email": email,
+        "page_size": 100,
+    })
+    users = [user for user in payload.get("users", [])
+             if user.get("user_email", "").casefold() == email.casefold()]
+    if not users:
+        raise ProvisionerError("account_missing", email)
+    if len(users) != 1:
+        raise ProvisionerError("conflict", f"multiple LiteLLM users match {email}")
+    user = users[0]
+    if not user.get("user_id"):
+        raise ProvisionerError("rejected", "LiteLLM user has no user_id")
+    teams = [team.get("team_id", team.get("id"))
+             for team in user.get("teams", [])]
+    return user["user_id"], [team for team in teams if team]
+
+def ensure(request):
+    identity = request["identity"]
+    user_id, teams = find_user(identity["email"])
+    alias = f"blue:{identity['email'].strip().lower()}"
+    previous = request.get("previous")
+    metadata = {
+        "managed_by": "blue",
+        "owner_email": identity["email"].strip().lower(),
+        "provisioner": "organization-litellm",
+    }
+    key_policy = {
+        "user_id": user_id,
+        "key_alias": alias,
+        "models": MODELS,
+        "metadata": metadata,
+    }
+
+    # Reconcile an existing virtual key without returning plaintext again.
+    if previous:
+        current = litellm("GET", "/key/info", query={"key": previous["external_id"]})
+        if current.get("info", {}).get("blocked") is True:
+            raise ProvisionerError("credential_invalid", "LiteLLM key was blocked")
+        litellm("POST", "/key/update", {
+            **key_policy,
+            "key": previous["external_id"],
+        })
+        return {
+            "credential": None,
+            "external_id": previous["external_id"],
+            "alias": alias,
+            "metadata": {"team_ids": teams, "models": MODELS},
+            "expires_at": None,
+        }
+
+    generated = litellm("POST", "/key/generate", {
+        **key_policy,
+        "key_type": "llm_api",
+    })
+    credential = generated.get("key")
+    if not credential:
+        raise ProvisionerError("rejected", "LiteLLM generated no key")
+    # LiteLLM commonly returns the stored token/hash separately. Fall back to
+    # a SHA-256 identifier so plaintext is never persisted as external_id.
+    external_id = generated.get("token") or hashlib.sha256(
+        credential.encode()
+    ).hexdigest()
+    return {
+        "credential": credential,
+        "external_id": external_id,
+        "alias": alias,
+        "metadata": {"team_ids": teams, "models": MODELS},
+        "expires_at": generated.get("expires"),
+    }
+
+def revoke(request):
+    litellm("POST", "/key/delete", {"keys": [request["external_id"]]})
+    return {"revoked": True}
+
+try:
+    envelope = json.load(sys.stdin)
+    if envelope.get("protocol_version") != 1:
+        raise ProvisionerError("invalid_config", "unsupported protocol version")
+    operation = envelope.get("operation")
+    if operation == "ensure":
+        result = ensure(envelope["request"])
+    elif operation == "revoke":
+        result = revoke(envelope["request"])
+    else:
+        raise ProvisionerError("invalid_config", "unsupported operation")
+    respond({"protocol_version": 1, "status": "success", "result": result})
+except ProvisionerError as error:
+    respond({"protocol_version": 1, "status": "error", "error": {
+        "code": error.code, "message": error.message
+    }}, 1)
+except (KeyError, TypeError, json.JSONDecodeError):
+    respond({"protocol_version": 1, "status": "error", "error": {
+        "code": "invalid_config", "message": "invalid provisioner request"
+    }}, 1)
+```
+
+This policy requires an existing LiteLLM user with the same email as the Blue identity. Set `LITELLM_MODELS` to a comma-separated model allowlist, or leave it empty to let LiteLLM apply its defaults. Extend `key_policy` with `team_id`, budgets, rate limits, or duration when your organization requires them.
+
+<Warning>
+Never print credentials, request stdin, or successful response JSON to logs. Stdout belongs exclusively to the protocol. Keep stderr diagnostics free of identities, credentials, and upstream response bodies.
+</Warning>
+
+Exercise the LiteLLM HTTP flow against a non-production gateway before building the artifact. The ensure request below calls `/user/list` and `/key/generate`; use the returned `external_id` in a revoke request to call `/key/delete`.
+
+```bash
+chmod 0555 provisioner.py
+export HARNESS_GATEWAY_URL=https://litellm.staging.example.com
+export HARNESS_LITELLM_ADMIN_KEY=REDACTED
+export LITELLM_MODELS=gpt-5.4,gpt-5.6-sol
+printf '%s' '{"protocol_version":1,"operation":"ensure","request":{"identity":{"id":"user-id","email":"user@example.com","organization_id":"org-id","groups":[]},"reason":"missing","previous":null}}' | ./provisioner.py
+```
+
+## JSON protocol
+
+For ensure, stdin contains exactly one request:
+
+```json
+{"protocol_version":1,"operation":"ensure","request":{"identity":{"id":"user-id","email":"user@example.com","organization_id":"org-id","groups":[]},"reason":"missing","previous":null}}
+```
+
+`reason` is `missing`, `configuration_changed`, `reconciliation_due`, or `credential_invalidated`. When present, `previous` contains `external_id`, `alias`, and `metadata`. Return `credential_invalid` when a previous key is confirmed deleted or blocked; Blue clears the stale encrypted credential and performs at most one bounded replacement attempt. Revoke uses operation `revoke` and a request containing `identity` and `external_id`.
+
+A successful ensure returns:
+
+```json
+{"protocol_version":1,"status":"success","result":{"credential":"sk-new","external_id":"key-id","alias":"user@example.com","metadata":{},"expires_at":"2026-12-01T00:00:00Z"}}
+```
+
+`credential` may be null only when retaining the existing encrypted credential. `expires_at` is optional and, when supplied, must be RFC 3339. A successful revoke result is `{"revoked":true}`.
+
+Errors use a non-zero exit and this envelope:
+
+```json
+{"protocol_version":1,"status":"error","error":{"code":"unavailable","message":"gateway request timed out"}}
+```
+
+Codes are `invalid_config`, `account_missing`, `conflict`, `credential_invalid`, `unavailable`, and `rejected`. Exit zero is valid only with a success envelope; every non-zero status (including shell `exit -1`, observed as 255 on Unix) is valid only with an error envelope. Empty, malformed, multiple, oversized, or protocol-mismatched stdout is treated as an unavailable host error.
+
+Stdout is reserved for the protocol. Blue never logs request stdin or successful stdout because they can contain credentials. Bounded stderr is available only as sanitized server diagnostics and is never returned to API or CLI clients. Timed-out children are terminated and reaped.
+
+Blue serializes lifecycle work per user. Effective provisioner concurrency is `min(max_concurrency, max(database_max_connections / 2, 1))`, with `max_concurrency` defaulting to `8`; gateway provisioning refuses to start when the control database pool has fewer than two connections. Invalid-key replacement is attempted once per trigger, uses persisted exponential cooldown, and stops automatic retries after five consecutive failures.
+
+Failed ensure messages are persisted in `provisioning_error` and returned through existing API and CLI error responses. No partial result is stored. Reconciliation remains retryable, so the next governed launch or personalized configuration fetch runs ensure again before inference.
+
+## Build and verify the artifact
+
+The artifact image supplies the pinned file to Helm; the executable runs inside the Control API container. For this Python example, install Python 3 in your deployed Control API image. Any imported third-party packages must be installed there as well. This example uses only Python's standard library.
+
+```dockerfile
+FROM busybox:1.37.0-musl
+COPY --chown=1000:1000 provisioner.py /executable/provisioner
+RUN chmod 0555 /executable/provisioner
+USER 1000:1000
+```
+
+For example, extend the Control API runtime image separately:
+
+```dockerfile
+FROM ghcr.io/blocksorg/governance-harness@sha256:REPLACE_WITH_BLUE_IMAGE_DIGEST
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+USER node
+```
+
+```bash
+docker build -t ghcr.io/acme/blue-provisioner:v1 .
+docker run --rm --entrypoint sha256sum ghcr.io/acme/blue-provisioner:v1 /executable/provisioner
+docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/acme/blue-provisioner:v1
+```
+
+Pin the file digest in both `gateway.provisioner.executable_sha256` and `blue.provisionerExecutable.executableSha256`. Pin the OCI digest under `blue.provisionerExecutable.image.digest`.
+
+## Retry and troubleshooting behavior
+
+| Symptom | Result and next action |
+| --- | --- |
+| Executable fails startup validation | Control API startup fails. Check the absolute path, regular-file type, execute bit, lowercase digest, and policy revision. |
+| Ensure returns a typed error | Blue records the public message without storing partial output. Correct the cause and retry the governed launch or configuration fetch. |
+| Process exceeds `timeout_seconds` | Blue terminates and reaps it, reports `unavailable`, and leaves reconciliation eligible for retry. |
+| Exit status and envelope disagree | Blue reports an `unavailable` host error. Exit zero only for success; use non-zero only for error. |
+| Credential is `null` for a new user | Blue rejects the result. Null is valid only when the previous encrypted credential is retained. |

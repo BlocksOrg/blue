@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,subject,email,role,active,status,protected,provisioning_source,created_at,updated_at FROM users WHERE organization_id=$1 AND ($2::text IS NULL OR lower(email) LIKE $2 ESCAPE E'\\\\' OR lower(subject) LIKE $2 ESCAPE E'\\\\') AND ($3::text IS NULL OR role=$3) AND ($4::text IS NULL OR status=$4) AND ($5::text IS NULL OR provisioning_source=$5) ORDER BY lower(email) LIMIT $6 OFFSET $7",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "subject",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "protected",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "provisioning_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0696a331283f903f9a17c7aa844cae5a76fbf35a113e9f798c51d43a667e03ee"
+}

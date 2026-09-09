@@ -1,0 +1,100 @@
+{
+  "exceptions": [
+    {
+      "scanner": "checkov",
+      "identifier": "CKV2_AWS_30",
+      "owner": "platform-security",
+      "rationale": "Statement-level PostgreSQL query logging can record credentials and governed session content; this module deliberately exports engine logs without forcing unsafe statement capture.",
+      "compensating_control": "RDS PostgreSQL and upgrade logs are exported to CloudWatch, Performance Insights is enabled with the deployment KMS key, and application audit records cover privileged changes.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV2_AWS_57",
+      "owner": "platform-security",
+      "rationale": "The runtime secret contains coordinated database and Redis connection URLs; generic Secrets Manager rotation would change credentials without atomically updating the backing services and Kubernetes consumers.",
+      "compensating_control": "The secret is KMS-encrypted, limited to the workload identity, never returned as an output, and the production runbook requires exercised manual credential rotation.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV2_AWS_64",
+      "owner": "platform-security",
+      "rationale": "The module relies on AWS KMS's secure default account-root key policy so workload grants remain in IAM and do not duplicate principals in a static key policy.",
+      "compensating_control": "Key rotation and a 30-day deletion window are enabled; the IRSA policy grants only encrypt, decrypt, and data-key operations on this key.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV_AWS_18",
+      "owner": "platform-security",
+      "rationale": "A generic module cannot safely select the account's centralized access-log destination without creating recursive logging buckets or crossing the operator's audit boundary.",
+      "compensating_control": "Both buckets block public access, require KMS encryption, are versioned, and are accessible only through the least-privilege workload role; operators retain account-level CloudTrail ownership.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV2_AWS_62",
+      "owner": "platform-security",
+      "rationale": "Blue has no S3 event consumer, so enabling notifications would add an unused destination and delivery failure path.",
+      "compensating_control": "Versioning, retention lifecycle rules, KMS encryption, public-access blocking, and scoped IAM permissions protect both buckets independently of notifications.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV_AWS_144",
+      "owner": "platform-security",
+      "rationale": "Cross-region replication requires an operator-selected recovery region, destination key, residency approval, and replication role that cannot be chosen safely by this single-region starter module.",
+      "compensating_control": "Objects are KMS-encrypted and versioned, noncurrent versions follow explicit retention, PostgreSQL and Redis are Multi-AZ, and the readiness gate requires object-restore evidence.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV_K8S_21",
+      "owner": "platform-security",
+      "rationale": "Helm resources intentionally inherit the release namespace instead of hard-coding one, so a static manifest render labels them as default even though the production install procedure uses a dedicated namespace.",
+      "compensating_control": "The prerequisite chart installs namespace-wide default-deny policy before the application chart, and the runbook installs both releases explicitly into the operator-selected Blue namespace.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV_K8S_38",
+      "owner": "platform-security",
+      "rationale": "The shared service account token remains available because AWS IRSA and other projected-token workload identity implementations require it for S3 and KMS access.",
+      "compensating_control": "The service account has no Kubernetes RBAC grants; cloud access is constrained by its least-privilege IRSA role and network egress policy.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV_K8S_22",
+      "owner": "platform-security",
+      "rationale": "The combined image supports runtime package/provisioner staging and Next.js cache paths whose complete writable-path set depends on enabled features; forcing a read-only root generically can cause availability regressions.",
+      "compensating_control": "Containers run as UID 10001 with all Linux capabilities dropped, privilege escalation disabled, seccomp RuntimeDefault, digest-pinned production images, and no host filesystem mounts.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "checkov",
+      "identifier": "CKV_K8S_35",
+      "owner": "platform-security",
+      "rationale": "Blue and Better Auth consume runtime credentials through established environment-variable contracts; switching individual keys to files requires coordinated application support.",
+      "compensating_control": "Secrets are referenced from an existing Kubernetes Secret, never rendered into the chart, required keys fail closed at startup, and network policies constrain every consuming workload.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "gitleaks",
+      "identifier": "3d99b9e2bb91bf50c5ad3c11dbc26cc45c7d1951:tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem:private-key:1",
+      "owner": "platform-security",
+      "rationale": "This is the first historical fingerprint of a deliberately public deterministic JWT signing key used only by the hermetic e2e-slim fixture.",
+      "compensating_control": "The key is confined to test fixtures, is not referenced by deployment manifests, and production startup requires externally supplied secrets.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "gitleaks",
+      "identifier": "b30e2bb8801af65024733b25914ccba2b38549f5:tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem:private-key:1",
+      "owner": "platform-security",
+      "rationale": "This is the second historical fingerprint of the same deliberately public deterministic JWT signing key used only by the hermetic e2e-slim fixture.",
+      "compensating_control": "The key is confined to test fixtures, is not referenced by deployment manifests, and production startup requires externally supplied secrets.",
+      "expires": "2026-12-05"
+    }
+  ]
+}

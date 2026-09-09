@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM captured_session_grants WHERE captured_session_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc2fcdae3b1b176cdc5cc2e3535699467b7c8123f982d30c80b4405916e9cba3"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update public.gateway_key_selections set source_key_hash=$2,source_key_alias=$3,proxy_key_alias=$3,updated_at=now() where user_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8a44e2ac4cb6531e363e358d8578bac60871147200bf080a8b8c3d909aea1edb"
+}

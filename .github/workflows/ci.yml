@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://harness:harness@127.0.0.1:5432/governance
+      SQLX_OFFLINE: "true"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: harness
+          POSTGRES_PASSWORD: harness
+          POSTGRES_DB: governance
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U harness -d governance"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - run: cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features rustls,postgres
+      - run: cargo sqlx migrate run --source services/control-api/migrations
+      - run: cargo sqlx prepare --check --workspace -- --all-targets --all-features
+      - run: scripts/check-sqlx-queries.sh
+      - run: scripts/check-migration-classifications.sh
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      - run: cargo test -p control-api --features postgres-tests
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/dashboard
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/dashboard/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+
+  website:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/website
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/website/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - run: sh -n scripts/install.sh scripts/test-install.sh scripts/package-deployment.sh scripts/check-release-version.sh deploy/consumer/provisioner.sh
+      - run: scripts/test-install.sh
+      - run: bash -n deploy/blue-entrypoint.sh deploy/blue-healthcheck.sh
+      - run: |
+          docker compose -f deploy/docker-compose.yml config > /tmp/blue-compose-governance.yaml
+          grep -q 'BLUE_CONFIG_OVERLAY_FILES: ""' /tmp/blue-compose-governance.yaml
+          if grep -q '^  inference-proxy:' /tmp/blue-compose-governance.yaml; then
+            echo "default Compose mode unexpectedly includes inference-proxy" >&2
+            exit 1
+          fi
+          BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.capture.yaml \
+            docker compose -f deploy/docker-compose.yml config > /tmp/blue-compose-capture.yaml
+          grep -q 'BLUE_CONFIG_OVERLAY_FILES: /etc/blue/blue.capture.yaml' /tmp/blue-compose-capture.yaml
+          if grep -q '^  inference-proxy:' /tmp/blue-compose-capture.yaml; then
+            echo "capture-only Compose mode unexpectedly includes inference-proxy" >&2
+            exit 1
+          fi
+          COMPOSE_PROFILES=gateway \
+            BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.gateway.yaml \
+            docker compose -f deploy/docker-compose.yml config > /tmp/blue-compose-gateway.yaml
+          grep -q 'HARNESS_GATEWAY_URL:' /tmp/blue-compose-gateway.yaml
+          grep -q 'BLUE_CONFIG_OVERLAY_FILES: /etc/blue/blue.gateway.yaml' /tmp/blue-compose-gateway.yaml
+          grep -q '^  inference-proxy:' /tmp/blue-compose-gateway.yaml
+          COMPOSE_PROFILES=gateway \
+            BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.gateway.yaml,/etc/blue/blue.capture.yaml \
+            docker compose -f deploy/docker-compose.yml config > /tmp/blue-compose-gateway-capture.yaml
+          grep -q 'BLUE_CONFIG_OVERLAY_FILES: /etc/blue/blue.gateway.yaml,/etc/blue/blue.capture.yaml' /tmp/blue-compose-gateway-capture.yaml
+          grep -q '^  inference-proxy:' /tmp/blue-compose-gateway-capture.yaml
+          if grep -q 'HARNESS_LITELLM_BASE_URL:' /tmp/blue-compose-gateway.yaml; then
+            echo "Compose still injects the deprecated HARNESS_LITELLM_BASE_URL" >&2
+            exit 1
+          fi
+      - id: version
+        run: |
+          version="$(sed -n '/\[workspace.package\]/,/^$/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          scripts/check-release-version.sh "v$version"
+      - run: scripts/verify-deployment.sh
+      - run: helm template blue deploy/helm -f deploy/helm/values-evaluation.yaml > /tmp/blue-manifests.yaml
+      - run: |
+          helm template blue deploy/helm \
+            -f deploy/helm/values-evaluation.yaml \
+            --set blue.enableInferenceProxy=true \
+            --set blue.gatewayType=litellm \
+            --set blue.internalTransport.mode=insecure-http \
+            > /tmp/blue-gateway-manifests.yaml
+          if helm lint deploy/helm \
+            -f deploy/helm/values-evaluation.yaml \
+            --set blue.enableInferenceProxy=true \
+            --set blue.internalTransport.mode=insecure-http; then
+            echo "enabled inference proxy without blue.gatewayType unexpectedly passed validation" >&2
+            exit 1
+          fi
+      - run: |
+          helm template blue deploy/helm \
+            -f deploy/helm/values-evaluation.yaml \
+            --set blue.provisionerExecutable.enabled=true \
+            --set blue.provisionerExecutable.image.repository=ghcr.io/example/provisioner \
+            --set blue.provisionerExecutable.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set blue.provisionerExecutable.executableSha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            > /tmp/blue-provisioner-manifests.yaml
+          if helm lint deploy/helm -f deploy/helm/values-evaluation.yaml --set blue.provisionerExecutable.enabled=true; then
+            echo "enabled provisioner without immutable digests unexpectedly passed validation" >&2
+            exit 1
+          fi
+      - run: tofu fmt -check -recursive deploy/tofu/aws
+      - run: tofu -chdir=deploy/tofu/aws init -backend=false
+      - run: tofu -chdir=deploy/tofu/aws validate
+      - name: Verify generated secret contracts
+        run: test "$(printf 'random_password.bootstrap_admin.length\n' | tofu -chdir=deploy/tofu/aws console)" = 48
+      - run: scripts/package-deployment.sh "v${{ steps.version.outputs.version }}" /tmp/blue-dist
+      - run: tar -tzf "/tmp/blue-dist/blue-deployment-v${{ steps.version.outputs.version }}.tar.gz"
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: version
+        run: |
+          version="$(sed -n '/\[workspace.package\]/,/^$/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: false
+          load: true
+          tags: blue:test
+          build-args: BLUE_DEPLOYMENT_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker run --rm --entrypoint /bin/sh blue:test -c 'test -x /usr/local/bin/control-api && test -x /usr/local/bin/inference-proxy && test -f /opt/blue/dashboard/server.js'

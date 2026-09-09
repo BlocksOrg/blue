@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"user\" set name=$1,email=$2,\"emailVerified\"=true,\"organizationId\"=$3,\"governanceRole\"='member',banned=$4,\"banReason\"=$5,\"updatedAt\"=now() where id=$6",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e22cb60f501023b54fe23a088624986624a1607895c518a8ce2ffc4a0dc2a907"
+}

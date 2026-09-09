@@ -1,0 +1,22 @@
+{
+  "openapi": {
+    "default_test": "contract-surface.spec.ts verifies route presence and authentication boundaries for every operationId",
+    "excluded": []
+  },
+  "cli": {
+    "commands": ["version", "help", "setup", "login", "logout", "doctor", "agent", "status", "verify", "reset", "run", "config", "gateway", "apply", "daemon", "shim", "session-upload", "external-subcommand"],
+    "test": "journey.spec.ts"
+  },
+  "harnesses": {
+    "keys": ["codex", "claude", "kimi", "opencode"],
+    "test": "journey.spec.ts",
+    "native_certification": "tests/e2e-slim/tests/agent_certification.rs",
+    "lock": "agents.lock.json"
+  },
+  "dashboard": {
+    "routes": ["/login", "/accept-invitation", "/device/[token]", "/sessions", "/sessions/[id]", "/clients", "/gateway", "/extensions", "/harnesses", "/members"],
+    "test": "journey.spec.ts",
+    "filtering_test": "zz-dashboard-filtering.spec.ts",
+    "excluded": []
+  }
+}

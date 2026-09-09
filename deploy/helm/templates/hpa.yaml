@@ -1,0 +1,35 @@
+{{- if and .Values.autoscaling.enabled .Values.blue.enableInferenceProxy }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "blue.fullname" . }}-inference-proxy
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "blue.fullname" . }}-inference-proxy }
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }} }
+    - type: Pods
+      pods:
+        metric: { name: gateway_proxy_active_streams }
+        target: { type: AverageValue, averageValue: {{ .Values.autoscaling.targetActiveStreamsPerProxy | quote }} }
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "blue.fullname" . }}-control-api
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "blue.fullname" . }}-control-api }
+  minReplicas: {{ .Values.components.controlApi.replicas }}
+  maxReplicas: {{ .Values.components.controlApi.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }} }
+{{- end }}

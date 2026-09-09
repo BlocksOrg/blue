@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into auth.\"member\" (id,\"organizationId\",\"userId\",role,\"createdAt\") select $1,$2,$3,'member',now() where not exists (select 1 from auth.\"member\" where \"organizationId\"=$2 and \"userId\"=$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "88934270597d7008ef9ecb9bb9a42453912c3ed0abcc7c9f9c1e07f2fad92c94"
+}

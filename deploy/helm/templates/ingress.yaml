@@ -1,0 +1,45 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "blue.fullname" . }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "blue.fullname" $ }}-{{ if eq .port "dashboard" }}dashboard{{ else if eq .port "control-api" }}control-api{{ else }}inference-proxy{{ end }}
+                port: { name: {{ .port }} }
+          {{- end }}
+    {{- end }}
+    {{- if and .Values.blue.enableInferenceProxy .Values.ingress.proxyHost }}
+    - host: {{ .Values.ingress.proxyHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "blue.fullname" . }}-inference-proxy
+                port: { name: inference }
+    {{- end }}
+{{- end }}

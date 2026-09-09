@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE session_artifacts SET status='superseded' WHERE captured_session_id=$1 AND status='complete' AND id<>$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ecaf5f819440a15ea2d28f444a01cf2d66d70a4e0bbabf05b60ff2092434454b"
+}

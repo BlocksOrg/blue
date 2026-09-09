@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into public.gateway_key_selections(user_id,gateway_email,source_models,provisioning_error,credential_state,recovery_attempts,next_recovery_at) values($1,$2,'[]'::jsonb,$3,'error',1,now() + interval '30 seconds') on conflict(user_id) do update set provisioning_error=$3,credential_state=case when gateway_key_selections.invalidation_reason is not null then 'invalid' else 'error' end,recovery_attempts=gateway_key_selections.recovery_attempts+1,next_recovery_at=now() + make_interval(secs => least(3600,30 * (1 << least(gateway_key_selections.recovery_attempts,7))) * (0.8 + random() * 0.4)),recovery_lease_until=null,updated_at=now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dc22a1a0964b5cf02f05accbecc4b3cad3680cbf0af9506d6b4ccf6fbf2ac148"
+}

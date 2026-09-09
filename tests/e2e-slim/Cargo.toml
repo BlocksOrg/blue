@@ -1,0 +1,59 @@
+# Standalone workspace — deliberately NOT a member of the root Cargo workspace.
+#
+# Keeping this test harness out of the root workspace means its test-only
+# dependencies (postgres, assert_cmd, tempfile, …) never enter the deployment
+# image's `cargo chef` recipe. Docker keys the cook layer on recipe.json's bytes,
+# so if these deps were in the root workspace, adding/bumping one would change
+# recipe.json and force the control-api image to recompile every dependency from
+# scratch. As its own workspace, this crate's deps are invisible to that build,
+# and both the full and slim images stay cache-stable.
+#
+# Consequences: `cargo <build|test|clippy> --workspace` at the repo root does not
+# cover this crate; build/lint/test it via its own manifest (as tests/e2e-slim/run.sh
+# does). It has no path dependency on any workspace crate — it drives the prebuilt
+# `blue` binary via the E2E_SLIM_BLUE_BIN env var — so nothing is lost by detaching.
+[workspace]
+
+[package]
+name = "e2e-slim"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# This crate is a host-side end-to-end harness, not a library or binary anyone
+# links. It exposes shared support in `src/lib.rs` and one integration test per
+# journey under `tests/`. Every test self-skips (early return) when the stack
+# environment (`E2E_SLIM_CONTROL_API_URL`) is unset, so a bare `cargo test` here
+# stays green without the compose stack up.
+
+[lib]
+doctest = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+jsonwebtoken = "9"
+uuid = { version = "1", features = ["v4"] }
+time = "0.3"
+postgres = "0.19"
+tempfile = "3"
+# assert_cmd is a normal (not dev) dependency because `src/lib.rs` hands tests a
+# preconfigured `assert_cmd::Command` for the `blue` binary.
+assert_cmd = "2"
+# Session uploads are `blue-session-bundle-v1` archives (gzip tar + manifest);
+# the harness unpacks them so tests can assert on the captured artifacts without
+# taking a path dependency on gh-config.
+flate2 = "1"
+tar = "0.4"
+
+[dev-dependencies]
+predicates = "3"
+toml = "0.8"
+
+# `build.rs` generates one nextest case per `(agent, version)` matrix cell from
+# the committed JSON. This dep stays out of the deployment image's cargo-chef
+# recipe because this crate is its own workspace (see the header note above).
+[build-dependencies]
+serde_json = "1"

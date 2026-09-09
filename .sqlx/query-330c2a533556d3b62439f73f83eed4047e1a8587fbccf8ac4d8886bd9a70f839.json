@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select exists(select 1 from auth.\"member\" m join auth.\"user\" u on u.id=m.\"userId\" where m.\"organizationId\"=$1 and lower(u.email)=lower($2)) as \"exists!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "330c2a533556d3b62439f73f83eed4047e1a8587fbccf8ac4d8886bd9a70f839"
+}

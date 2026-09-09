@@ -1,0 +1,123 @@
+# Gateway-enabled Blue config for the `e2e-slim` gateway path (docker-compose.gateway.yml).
+#
+# This is governance-only-slim.yaml PLUS a real top-level `gateway:` block, so
+# control-api delivers a personalized gateway config to the client and `blue run`
+# drives real inference through the inference-proxy -> LiteLLM -> OpenRouter.
+# Everything else (auth via the committed test JWKS, blob storage, the managed
+# `example` skill package, the e2e-remote MCP server) is identical to the
+# governance-only config; only the gateway wiring is added.
+#
+# The gateway job is opt-in / secret-gated (needs OPENROUTER_API_KEY); the
+# default slim job keeps using governance-only-slim.yaml with no secret.
+
+control_api:
+  listen: 0.0.0.0:8080
+  database_url: os.environ/HARNESS_DATABASE_URL
+  bootstrap:
+    organization_slug: e2e
+    organization_name: Blue E2E
+    admin_subject: e2e-admin
+    admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL
+  auth:
+    jwks_url: os.environ/HARNESS_AUTH_JWKS_URL
+    issuer: os.environ/HARNESS_AUTH_ISSUER
+    audience: os.environ/HARNESS_AUTH_AUDIENCE
+    client_id: blue-cli
+  identity:
+    mode: password
+  blob_storage:
+    provider: s3
+    bucket: raw-sessions
+    region: us-east-1
+    endpoint: http://minio:9000
+    public_endpoint: http://127.0.0.1:9000
+    force_path_style: true
+    presign_ttl_seconds: 300
+    retention_days: 30
+    auth:
+      mode: iam
+  gateway_request_logs:
+    retention_days: 30
+
+# Real gateway. `type: litellm` flips control-api into gateway mode (it then
+# delivers a `gateway` block to the client and provisions per-user virtual keys).
+gateway:
+  type: litellm
+  # In-network LiteLLM base URL.
+  url: http://litellm:4000
+  # Host-published: `blue run` executes the agent on the host, so the proxy_url
+  # control-api injects into the delivered config must be reachable from there.
+  inference_proxy_url: http://127.0.0.1:8081
+  inference_proxy_health_url: http://127.0.0.1:8081
+  internal_allowed_client_id: blue-inference-proxy
+  secret_encryption:
+    provider: environment
+    key: os.environ/HARNESS_GATEWAY_ENCRYPTION_KEY
+  provisioner:
+    # Test-only executable provisioner (fixtures/litellm-provisioner.mjs),
+    # exercising the executable-provisioner protocol end-to-end against the
+    # REAL LiteLLM: it creates the user's LiteLLM account on demand and mints
+    # a real virtual key. run.sh hashes the script into the SHA-256 env var;
+    # the compose overlay mounts it at the pinned path.
+    type: e2e-slim-litellm
+    executable_path: /etc/blue/litellm-provisioner
+    executable_sha256: os.environ/HARNESS_PROVISIONER_EXECUTABLE_SHA256
+    policy_revision: e2e-slim-executable-v1
+    reconcile_ttl_seconds: 60
+    timeout_seconds: 15
+
+governance:
+  revision: "e2e-slim-gateway-1"
+  contract_version: 2
+  required_capabilities:
+    - adapter_intervals
+    - compiled_harness_registry
+    - transactional_reconcile
+    - versioned_state
+  minimum_client_version: "0.1.0"
+  ttl_seconds: 5
+  allowed_harnesses: [codex, claude, kimi, opencode]
+  packages:
+    - &e2e_package
+      id: e2e-skill
+      name: E2E Skill
+      version: "1.0.0"
+      source_ref: file:///tmp/blue-e2e/e2e-package.tar.gz
+      sha256: f84937b7e4221f795d8603b954cff846c266276fe2bc38e8e98c9812f4c1593f
+      adapters:
+        codex:
+          skills_dir: e2e-package/codex-plugin/skills
+        claude:
+          skills_dir: e2e-package/claude-plugin/skills
+        kimi:
+          skills_dir: &skills e2e-package/skills
+        opencode:
+          skills_dir: *skills
+  session_upload:
+    presign_url: http://127.0.0.1:8080/session-uploads/presign
+  harnesses:
+    codex:
+      managed_config:
+        model: gpt-5.6-terra
+        reasoning_effort: low
+        approval_policy: never
+        sandbox_mode: workspace-write
+      mcp: &e2e_mcp
+        - name: e2e-remote
+          command: node
+          args: ["/tmp/blue-e2e/mcp-server.mjs"]
+    claude:
+      version_requirement: ">=2.0.12, <2.1.253"
+      managed_config:
+        model: claude-sonnet-5
+        auto_approve: true
+      mcp: *e2e_mcp
+    kimi:
+      managed_config:
+        model: kimi-k2.6
+        auto_approve: true
+      mcp: *e2e_mcp
+    opencode:
+      managed_config:
+        model: gpt-5.6-terra
+      mcp: *e2e_mcp

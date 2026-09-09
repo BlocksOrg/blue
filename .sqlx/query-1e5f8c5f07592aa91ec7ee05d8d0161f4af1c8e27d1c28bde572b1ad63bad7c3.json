@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select u.id as \"id!\",u.email as \"email!\" from gateway_request_logs l join users u on u.id=l.user_id where l.organization_id=$1 and l.expires_at>now() and ($2::uuid is null or l.user_id=$2) and ($3::text is null or lower(u.email) like $3 escape E'\\\\') group by u.id,u.email order by (u.id=$4) desc,u.email limit 10",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1e5f8c5f07592aa91ec7ee05d8d0161f4af1c8e27d1c28bde572b1ad63bad7c3"
+}

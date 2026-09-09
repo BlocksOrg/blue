@@ -1,0 +1,20 @@
+[package]
+name = "gh-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gh-common = { workspace = true }
+gh-config = { workspace = true }
+serde = { workspace = true }
+portable-pty = { workspace = true }
+tracing = { workspace = true }
+semver = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = { workspace = true }

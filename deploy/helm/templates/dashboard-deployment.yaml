@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "blue.fullname" . }}-dashboard
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  replicas: {{ .Values.components.dashboard.replicas }}
+  selector:
+    matchLabels:
+      {{- include "blue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: dashboard
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: dashboard
+    spec:
+      serviceAccountName: {{ include "blue.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dashboard
+          image: {{ include "blue.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["dashboard"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - { name: BLUE_HEALTHCHECK_COMPONENT, value: dashboard }
+            - { name: BLUE_ENVIRONMENT, value: production }
+            - { name: BLUE_GATEWAY_ENABLED, value: {{ .Values.blue.enableInferenceProxy | quote }} }
+            - name: CONTROL_API_URL
+              value: http://{{ include "blue.fullname" . }}-control-api:{{ .Values.service.ports.controlApi }}
+            - { name: CONTROL_API_PUBLIC_URL, value: {{ .Values.blue.publicUrls.controlApi | quote }} }
+            - { name: BETTER_AUTH_URL, value: {{ .Values.blue.publicUrls.dashboard | quote }} }
+            - { name: HARNESS_AUTH_PUBLIC_URL, value: {{ .Values.blue.publicUrls.dashboard | quote }} }
+            # Confidential OAuth client seeded for the inference proxy's M2M auth.
+            # HARNESS_PROXY_OAUTH_CLIENT_SECRET is supplied via `blue.existingSecret`.
+            - { name: HARNESS_INFERENCE_PROXY_CLIENT_ID, value: {{ .Values.blue.inferenceProxyClientId | quote }} }
+            - { name: DOCS_URL, value: {{ .Values.blue.publicUrls.docs | quote }} }
+            {{- range $name := list "HARNESS_DATABASE_URL" "BETTER_AUTH_SECRET" "HARNESS_BOOTSTRAP_ADMIN_PASSWORD" }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.blue.existingSecret | quote }}, key: {{ $name }}, optional: false }
+            {{- end }}
+            {{- if .Values.blue.enableInferenceProxy }}
+            - name: HARNESS_PROXY_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_PROXY_OAUTH_CLIENT_SECRET, optional: false }
+            {{- end }}
+            {{- range $name, $value := .Values.blue.env }}
+            - { name: {{ $name }}, value: {{ $value | quote }} }
+            {{- end }}
+          envFrom: [{ secretRef: { name: {{ .Values.blue.existingSecret }} } }]
+          ports: [{ name: dashboard, containerPort: 3000 }]
+          readinessProbe: { httpGet: { path: /api/health, port: dashboard }, periodSeconds: 10, timeoutSeconds: 5 }
+          livenessProbe: { httpGet: { path: /api/health, port: dashboard }, periodSeconds: 30, timeoutSeconds: 10 }
+          resources:
+            {{- toYaml .Values.resources.dashboard | nindent 12 }}

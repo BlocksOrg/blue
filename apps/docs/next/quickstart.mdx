@@ -1,0 +1,163 @@
+---
+title: "Quickstart"
+description: "Deploy Blue on your infrastructure, sign in as an administrator, and launch your first governed coding agent."
+icon: "rocket"
+---
+
+This guide takes you from a Blue release to a governed agent launch without choosing an infrastructure platform for you. Blue runs as standard container workloads backed by PostgreSQL and S3-compatible storage. You can use the provided Helm chart, deploy the containers with another scheduler, or evaluate the system with Docker Compose.
+
+The first deployment uses governance-only mode. Developers keep their native provider credentials while Blue manages agent policy and extensions. You can add an organization-operated inference gateway later.
+
+## Prerequisites
+
+Every deployment needs:
+
+- PostgreSQL and two S3-compatible buckets: one for immutable package artifacts and one for session objects
+- Public HTTPS origins for the dashboard and Control API
+- Secret delivery for database, authentication, and storage credentials
+- A platform that can run the Blue container image and provide private service-to-service networking
+- At least one supported coding-agent CLI, configured with native provider credentials, for the final workstation test
+
+<Steps>
+  <Step title="Download a release">
+    Choose a [GitHub Release](https://github.com/BlocksOrg/blue/releases), then download and verify its deployment bundle:
+
+    ```bash
+    VERSION=0.1.0
+    curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/blue-deployment-v${VERSION}.tar.gz"
+    curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/SHA256SUMS"
+    grep "blue-deployment-v${VERSION}.tar.gz" SHA256SUMS | shasum -a 256 -c -
+    tar -xzf "blue-deployment-v${VERSION}.tar.gz"
+    cd "blue-deployment-${VERSION}"
+    ```
+
+    The bundle contains a starter `blue.yaml`, the Helm chart, an AWS OpenTofu module, and optional gateway-provisioner examples. Deploy the stock Blue image by immutable digest; package a custom provisioner separately if gateway mode requires one.
+  </Step>
+
+  <Step title="Choose how to run the services">
+    The application contract is the same on every platform. Your TechOps team owns placement, networking, secret delivery, scaling, and rollout policy.
+
+    <Columns cols={3}>
+      <Card title="Kubernetes and Helm" icon="boxes-stacked" href="/next/deployment/production">
+        Use the maintained chart and optional AWS OpenTofu starter as a reference production implementation.
+      </Card>
+      <Card title="Your platform" icon="server" href="/next/deployment/runtime-contract">
+        Map the image commands, ports, health checks, configuration, and dependencies onto ECS, Nomad, VMs, or another scheduler.
+      </Card>
+      <Card title="Local evaluation" icon="docker" href="/next/development/local-compose">
+        Run the reference stack with Docker Compose before designing a production deployment.
+      </Card>
+    </Columns>
+
+    <Warning>
+      Docker Compose includes development credentials and trusted-network settings. Use it to evaluate Blue, not as an unchanged production template.
+    </Warning>
+  </Step>
+
+  <Step title="Provide the common deployment contract">
+    Whichever platform you choose, deploy these governance-only workloads:
+
+    | Workload | Image command | Exposure | Scaling |
+    | --- | --- | --- | --- |
+    | Dashboard | `dashboard` | Public HTTPS, container port `3000` | Replicated |
+    | Control API | `control-api` | Public HTTPS on `8080` | Replicated with background jobs disabled |
+    | Worker | `control-api` | Private health endpoint only | Exactly one with background jobs enabled |
+
+    Mount `blue.yaml` read-only at `/etc/blue/blue.yaml`, deliver runtime secrets as environment variables, and connect every workload to the same PostgreSQL database. Give the Control API and worker access to both object-storage buckets. Keep credentials out of the image and configuration file.
+
+    Follow the [Deployment contract](/next/deployment/runtime-contract) for the complete process, port, health-check, networking, and lifecycle requirements.
+  </Step>
+
+  <Step title="Configure policy, identity, and storage">
+    Start from the bundle's governance-only `blue/blue.yaml`. Replace the organization and public-domain placeholders, configure internal dashboard authentication URLs, and select the allowed harnesses. Add the optional top-level `gateway` section or `governance.session_upload` only when enabling that feature.
+
+    At minimum, supply:
+
+    | Area | Required values |
+    | --- | --- |
+    | Database | `HARNESS_DATABASE_URL` |
+    | Authentication | Public dashboard and API URLs, issuer, audience, OAuth client ID, persistent `BETTER_AUTH_SECRET`, and bootstrap administrator credentials |
+    | Storage | Session bucket, package-artifact bucket, region, optional S3 endpoints, and workload identity or credentials |
+    | Policy | Initial revision, minimum client version, allowed harnesses, and managed settings |
+
+    Use [Configure blue.yaml](/next/deployment/blue-yaml) for the full schema, value precedence, and secret-reference rules. The mounted file is a deployment baseline; administrators can publish later policy revisions from the dashboard.
+  </Step>
+
+  <Step title="Start and verify the services">
+    Start PostgreSQL and object storage first, then the dashboard, Control API, and singleton worker. Configure your load balancer or reverse proxy to terminate TLS and route the two public origins.
+
+    Verify the public endpoints using your own domains:
+
+    ```bash
+    curl --fail-with-body https://api.blue.example.com/health
+    curl --fail-with-body https://blue.example.com/api/health
+    ```
+
+    The Control API should return `ok`, and the dashboard health endpoint should succeed. Also verify that the Control API readiness check can reach PostgreSQL and that the worker remains healthy. Platform-specific rollout checks belong in your deployment implementation.
+  </Step>
+
+  <Step title="Sign in as the bootstrap administrator">
+    Open the dashboard origin and sign in with the bootstrap email and password from your secret system. Confirm that the dashboard shows the expected organization, allowed harnesses, and initial policy.
+
+    Invite another user from **Members**, or continue with the bootstrap administrator for the first workstation test. See [Manage users and invitations](/next/admin/user-management) or [Identity provisioning](/next/admin/identity-provisioning) for managed OIDC and SCIM.
+  </Step>
+
+  <Step title="Install the workstation CLI">
+    On a workstation with Codex, Claude, Kimi, or OpenCode already on `PATH`, install Blue:
+
+    <CodeGroup>
+    ```bash macOS and Linux
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BlocksOrg/blue/releases/latest/download/install.sh | sh
+    ```
+
+    ```powershell Windows PowerShell
+    irm https://github.com/BlocksOrg/blue/releases/latest/download/install.ps1 | iex
+    ```
+    </CodeGroup>
+
+    The installer downloads the matching release asset, verifies it against `SHA256SUMS`, and installs `blue` in your user path. Set `BLUE_VERSION=0.1.0` to pin a specific release.
+  </Step>
+
+  <Step title="Connect and launch an agent">
+    Connect to the public Control API, authenticate, and choose an installed harness:
+
+    ```bash
+    blue setup
+    blue doctor
+    blue agent codex
+    blue apply
+    blue status
+    blue verify
+    blue codex
+    ```
+
+    Enter `https://api.blue.example.com` when `blue setup` asks for the deployment origin. Replace `codex` with `claude`, `kimi`, or `opencode` as needed. Running bare `blue` launches your preferred eligible agent.
+  </Step>
+</Steps>
+
+<Check>
+  The public health endpoints succeed, the dashboard accepts an administrator login, `blue status` reports matching desired and applied revisions, and the native agent opens under the deployed policy.
+</Check>
+
+## Optional: enable gateway mode
+
+Gateway mode adds the inference proxy, an organization-operated LiteLLM gateway, credential provisioning and encryption, private resolver traffic, and per-user pseudotokens. It does not change the core dashboard, Control API, worker, PostgreSQL, or object-storage contract.
+
+Follow [Bring your own gateway](/next/concepts/gateway-mode) for the routing model, [Gateway access](/next/admin/gateway-access) for operator configuration, and the [Deployment contract](/next/deployment/runtime-contract#optional-inference-proxy) for the additional workload requirements.
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Deployment contract" icon="list-check" href="/next/deployment/runtime-contract">
+    Translate Blue's workload and service requirements to your platform.
+  </Card>
+  <Card title="Kubernetes reference" icon="boxes-stacked" href="/next/deployment/production">
+    Use the maintained Helm chart and AWS infrastructure starter.
+  </Card>
+  <Card title="Managed extensions" icon="package" href="/next/admin/managed-packages">
+    Publish digest-pinned skills, plugins, hooks, helpers, and MCP servers.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/next/cli/troubleshooting">
+    Diagnose authentication, compatibility, reconciliation, and gateway failures.
+  </Card>
+</Columns>

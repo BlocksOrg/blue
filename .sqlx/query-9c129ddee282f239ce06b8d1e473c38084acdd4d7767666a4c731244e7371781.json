@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO governance_config_revisions (organization_id,revision,yaml,document,created_by,origin) VALUES ($1,$2,$3,$4,NULL,'deployment')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9c129ddee282f239ce06b8d1e473c38084acdd4d7767666a4c731244e7371781"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update login_credentials set revoked_at=coalesce(revoked_at,now()) where user_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "958b31f21b511d46b6eae9557109d9cf590443e0c8b366dfac594df34f30369d"
+}

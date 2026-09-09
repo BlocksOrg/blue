@@ -1,0 +1,138 @@
+---
+title: "Governance configuration"
+description: "Reference the organization policy fields delivered to Blue clients."
+icon: "file-code"
+---
+
+This is the complete policy delivered to clients. The mounted deployment YAML supplies the baseline; the Control API merges dashboard-published packages, package overrides, and MCP servers into new revisions without overwriting saved conflicts. Unknown managed-config keys are preserved for forward compatibility, while top-level contract fields are validated.
+
+```yaml
+revision: "organization-managed"
+contract_version: 2
+required_capabilities: [adapter_intervals, compiled_harness_registry, transactional_reconcile, versioned_state]
+ttl_seconds: 300
+required: true
+allowed_harnesses: [codex, claude, kimi, opencode]
+minimum_client_version: "0.1.0"
+
+session_upload:
+  presign_url: https://control.example.com/session-uploads/presign
+
+telemetry:
+  sink_url: https://control.example.com/telemetry
+
+gateway:
+  type: litellm
+  auth_style: bearer
+
+packages:
+  - id: organization-toolkit
+    name: Organization Toolkit
+    version: "1.0.0"
+    source_ref: https://artifacts.example.com/agent-packages/toolkit-1.0.0.tar.gz
+    sha256: "64-character-lowercase-sha256-digest"
+    platform_sources:
+      linux-x86_64:
+        source_ref: https://artifacts.example.com/agent-packages/toolkit-linux-x86_64.tar.gz
+        sha256: "64-character-lowercase-sha256-digest"
+    settings:
+      mode: standard
+    adapters:
+      codex:
+        plugin_dir: toolkit
+      claude:
+        plugin_dir: toolkit
+      kimi:
+        skills_dir: toolkit/skills
+
+harnesses:
+  codex:
+    version_requirement: ">=0.149.0, <0.150.0"
+    package_overrides:
+      organization-toolkit:
+        enabled: true
+        settings:
+          mode: strict
+    managed_config:
+      model: gpt-5.6-sol
+      reasoning_effort: medium
+      fast_mode: false
+      approval_policy: never
+      sandbox_mode: workspace-write
+    mcp:
+      - name: source-control
+        url: https://mcp.example.com/api
+        transport: streamable-http
+        env: { MCP_REGION: us-west-2 }
+        disabled: false
+```
+
+## Top-level fields
+
+| Field | Meaning |
+| --- | --- |
+| `revision` | Immutable server revision returned to clients. The server replaces editor input with its stored revision identifier. |
+| `contract_version` | Governance wire contract used for capability negotiation. |
+| `required_capabilities` | Client features required before this document may replace the cache. |
+| `ttl_seconds` | Cache lifetime before a client checks for a newer revision. |
+| `required` | When enabled, clients fail closed without fresh configuration. |
+| `allowed_harnesses` | Harness names permitted by policy. |
+| `harnesses` | Per-harness policy keyed by supported harness name. |
+| `minimum_client_version` | Operator-visible rollout floor; it does not replace capability enforcement. |
+| `packages` | Organization-selected, immutable extension packages and their harness adapters. |
+| `gateway` | Global inference routing policy applied to every allowed coding agent. |
+| `session_upload` | Global portable-session capture policy; compatible profiles upload integrity-checked bundles while older clients remain accepted as non-resumable raw artifacts. |
+| `telemetry` | Optional metadata event destination containing `sink_url`. |
+
+## Harness policy
+
+`managed_config` contains model and harness-specific settings. `mcp` is additive. `package_overrides` may enable or disable an organization package and provide adapter settings; it cannot replace the source, version, or digest. `minimum_client_version` remains visible to operators, while `required_capabilities` is the enforcement mechanism for contract features.
+
+Managed Codex launches default to `approval_policy: on-request`, preserving native approval prompts while the configured sandbox remains active. An explicit `approval_policy` remains authoritative. The provider-neutral `auto_approve: true` selects `never` only when no explicit Codex approval policy is present; `auto_approve: false` and an absent value both select `on-request`.
+
+When upgrading, configurations that explicitly set `approval_policy`,
+`auto_approve`, or `required` keep that choice. A deployment that previously
+relied on Codex's omitted approval setting must add `approval_policy: never` or
+`auto_approve: true` if unattended execution is intentional. New production
+baselines set `required: true`; use an explicit `required: false` only when
+launching from stale cached governance during a control-plane outage is an
+accepted risk.
+
+The presence of top-level `gateway` enables gateway mode for every allowed coding agent and connects Blue to an upstream gateway operated by your organization. Blue does not bundle that gateway. `litellm` is the first and currently only supported type. The Control API injects `proxy_url` and the authenticated user's `pseudotoken`; each agent inherits its model from its own `managed_config`, or leaves model selection to the agent when none is managed. `auth_style` remains on the wire for compatibility, but `bearer` is the only supported client-to-proxy value.
+
+## Managed packages
+
+Harness policies may declare a semver `version_requirement`. Blue parses the installed CLI's native version output and fails before changing files or launching when the version is missing, unparsable, or outside that range. Package adapters may add ordered `variants` with inclusive `introduced` and optional exclusive `before` boundaries; the top-level adapter fields are the fallback layout. See [Harness version compatibility](/next/concepts/harness-version-compatibility) for interval migration and lifecycle behavior.
+
+Packages can contain skills, hooks, agent definitions, plugins, and helper executables. Every archive is pinned by SHA-256 and declares explicit archive-relative adapters rather than running an installer script.
+
+| Adapter field | Meaning |
+| --- | --- |
+| `introduced` | Inclusive harness-version lower bound where the package adapter is available; defaults to `0.0.0`. |
+| `before` | Optional exclusive harness-version upper bound for adapter availability. |
+| `plugin_dir` | Agent-native plugin root. Claude receives it through `--plugin-dir`; Codex registers it in the governed profile. |
+| `skills_dir` | Exact skill folder containing `SKILL.md`, or a directory containing several skill folders. |
+| `agents_dir` | Directory containing agent/subagent Markdown definitions. |
+| `hooks_file` | Agent-native hook fragment included in the governed runtime overlay. |
+| `plugins` | Agent-native plugin module paths, primarily for OpenCode. |
+| `helpers` | Executables keyed by command name and `os-architecture` package path. |
+| `variants` | Ordered, non-overlapping layout intervals contained within adapter availability. Each selected variant replaces the fallback component fields. |
+
+Adapter availability describes whether the package supports a harness release;
+variants describe how its archive layout changes across supported releases. A
+variant-only adapter must cover its full availability range without gaps. When
+fallback component fields exist, unmatched points inside availability use that
+fallback. Governance publication rejects a package whose availability does not
+cover the organization policy for an enabled harness.
+
+Package-level `platform_sources` maps exact `os-architecture` keys to alternate source, artifact ID, and digest triples. Package-level `settings` supplies defaults that per-harness overrides can replace.
+
+Package paths must be relative, remain inside the verified archive, and exist on the selected platform. Links and special archive entries are rejected. Package settings are exposed to the governed child as `HARNESS_PACKAGE_<ID>_SETTINGS` JSON.
+
+Each MCP server has a `name` and either a stdio `command` (plus optional `args` and `env`) or a remote `url` (plus optional `transport`). Set `disabled: true` to retain a definition without activating it.
+
+Standalone skills can live anywhere in an archive and do not require a native plugin root. Blue generates harness-owned activation metadata for Codex and Claude. Codex and Claude agents or hooks still use the native package root named by `plugin_dir`. Kimi can load standalone agent directories and a TOML hook fragment. OpenCode hooks are plugin modules listed under `plugins`.
+
+The dashboard can inspect `github:owner/repository@ref` for a public GitHub repository, a public HTTPS archive, or a deployment-managed GitHub/Bitbucket connection. Public GitHub refs resolve to immutable codeload URLs; clients download public sources directly and verify their exact digest. Managed repositories are resolved to an immutable commit and mirrored into organization-scoped object storage. Governance contains an `artifact_id` and exact digest; clients use their existing harness session to request a fresh short-lived download and never receive repository credentials.
+
+Removing a package disables it for subsequent governed launches. Unmodified owned content is deleted; locally changed content is moved to quarantine and reported as drift.

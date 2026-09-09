@@ -1,0 +1,52 @@
+[package]
+name = "control-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["builtin-litellm"]
+builtin-litellm = ["gh-gateway-provisioner/litellm"]
+postgres-tests = []
+
+[[bin]]
+name = "control-api"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+gh-service = { workspace = true }
+gh-common = { workspace = true }
+gh-config = { workspace = true }
+gh-gateway = { workspace = true }
+axum = { workspace = true }
+axum-server = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+semver = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+time = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+base64 = { workspace = true }
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }
+aws-sdk-kms = { workspace = true }
+gh-gateway-provisioner = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+flate2 = "1"
+tar = "0.4"

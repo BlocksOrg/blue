@@ -1,0 +1,136 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id,s.user_id,u.email AS user_email,s.harness,s.compatibility_profile,s.native_session_id,s.cwd,s.artifact_format,s.resumable,s.title,s.summary,s.source_captured_at,s.repository_root,s.repository_remote,s.sharing_mode,s.updated_at, a.status AS \"artifact_status?\",a.size_bytes AS \"size_bytes?\",a.content_type AS \"content_type?\",a.retention_expires_at AS \"retention_expires_at?\" FROM captured_sessions s JOIN users u ON u.id=s.user_id LEFT JOIN session_artifacts a ON a.id=s.current_artifact_id WHERE s.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "harness",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "compatibility_profile",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "native_session_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "cwd",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "artifact_format",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "resumable",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "source_captured_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "repository_root",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "repository_remote",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "sharing_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "artifact_status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "size_bytes?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 18,
+        "name": "content_type?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 19,
+        "name": "retention_expires_at?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "0b59c8e8eb9d549397a4cceee9f1dd18d19eb768285bad367ea399ef76b19c35"
+}

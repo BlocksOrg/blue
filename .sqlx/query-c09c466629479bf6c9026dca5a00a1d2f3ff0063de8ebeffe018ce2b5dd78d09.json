@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select count(*) as \"count!\" from auth.\"invitation\" i where i.\"organizationId\"=$1 and ($2::bool=false or i.status='pending') and ($3::text is null or lower(i.email) like $3 escape E'\\\\') and ($4::text is null or i.role=$4)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c09c466629479bf6c9026dca5a00a1d2f3ff0063de8ebeffe018ce2b5dd78d09"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update public.gateway_key_selections set credential_state='recovering',recovery_lease_until=now() + interval '2 minutes',updated_at=now() where user_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7194be4127e787ea7a9b453c8faf0e2581edf35515428005600d7f9682e883c4"
+}

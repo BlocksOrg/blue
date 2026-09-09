@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select source_key_hash from public.gateway_key_selections where user_id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_key_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "cabcc4db8680cb1f146f5f7f23a40dfedaf25577ac732ff78c3a9aaf39ee9937"
+}

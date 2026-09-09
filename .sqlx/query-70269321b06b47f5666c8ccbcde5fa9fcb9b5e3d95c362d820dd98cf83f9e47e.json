@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select l.profile_id as \"id!\",max(l.profile_name) as name from gateway_request_logs l where l.organization_id=$1 and l.expires_at>now() and ($2::uuid is null or l.user_id=$2) and l.profile_id is not null group by l.profile_id order by coalesce(max(l.profile_name),l.profile_id)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "70269321b06b47f5666c8ccbcde5fa9fcb9b5e3d95c362d820dd98cf83f9e47e"
+}

@@ -1,0 +1,110 @@
+# Slim governance-only Blue config for the `e2e-slim` suite.
+#
+# Derived from tests/e2e/fixtures/governance-only-blue.yaml, trimmed to what a
+# control-api-only, gateway-disabled deployment needs:
+#   * NO top-level `gateway:` block (governance-only path).
+#   * blob storage split across an in-network endpoint (control-api's own S3
+#     client) and a host-published public endpoint (presigned URLs the host test
+#     runner must reach) — see HARNESS_BLOB_* env in docker-compose.yml.
+#   * session_upload.presign_url is host-published so the detached upload worker
+#     (which runs on the host) can reach it.
+#   * one managed `example` skill package (reused from tests/e2e/fixtures/package
+#     via a host-local file:// tarball that run.sh decodes to /tmp/blue-e2e) so
+#     the config-level "managed skill is wired into every agent" assertion runs
+#     without a gateway. No new hard dependency — package install is client-side.
+#
+# Auth values (issuer/audience/jwks) are injected via HARNESS_AUTH_* env in the
+# compose file so they stay byte-identical to the constants the Rust minter uses.
+
+control_api:
+  listen: 0.0.0.0:8080
+  database_url: os.environ/HARNESS_DATABASE_URL
+  bootstrap:
+    organization_slug: e2e
+    organization_name: Blue E2E
+    admin_subject: e2e-admin
+    admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL
+  auth:
+    jwks_url: os.environ/HARNESS_AUTH_JWKS_URL
+    issuer: os.environ/HARNESS_AUTH_ISSUER
+    audience: os.environ/HARNESS_AUTH_AUDIENCE
+    client_id: blue-cli
+  identity:
+    mode: password
+  blob_storage:
+    provider: s3
+    bucket: raw-sessions
+    region: us-east-1
+    # control-api's own S3 client stays in-network.
+    endpoint: http://minio:9000
+    # Presigned URLs must be reachable from the host test runner.
+    public_endpoint: http://127.0.0.1:9000
+    force_path_style: true
+    presign_ttl_seconds: 300
+    retention_days: 30
+    auth:
+      mode: iam
+
+# Deliberately no top-level `gateway:` block: this is the governance-only stack.
+governance:
+  revision: "e2e-slim-1"
+  contract_version: 2
+  required_capabilities:
+    - adapter_intervals
+    - compiled_harness_registry
+    - transactional_reconcile
+    - versioned_state
+  minimum_client_version: "0.1.0"
+  ttl_seconds: 5
+  allowed_harnesses: [codex, claude, kimi, opencode]
+  # Reuses the tests/e2e `example` skill package. `blue apply` (client-side) fetches
+  # this tarball from the host path run.sh decodes it to, so it works on the
+  # governance-only path with no gateway. skills-only adapters: we assert only that
+  # the managed skill lands in each agent's runtime config.
+  packages:
+    - &e2e_package
+      id: e2e-skill
+      name: E2E Skill
+      version: "1.0.0"
+      source_ref: file:///tmp/blue-e2e/e2e-package.tar.gz
+      sha256: f84937b7e4221f795d8603b954cff846c266276fe2bc38e8e98c9812f4c1593f
+      adapters:
+        codex:
+          skills_dir: e2e-package/codex-plugin/skills
+        claude:
+          skills_dir: e2e-package/claude-plugin/skills
+        kimi:
+          skills_dir: &skills e2e-package/skills
+        opencode:
+          skills_dir: *skills
+  session_upload:
+    # Host-published so the detached `blue session-upload` worker can reach it.
+    presign_url: http://127.0.0.1:8080/session-uploads/presign
+  harnesses:
+    codex:
+      managed_config:
+        model: gpt-5.6-terra
+        reasoning_effort: low
+        approval_policy: never
+        sandbox_mode: workspace-write
+      mcp: &e2e_mcp
+        - name: e2e-remote
+          command: node
+          # Host-absolute: `blue run` launches MCP servers on the host, so run.sh
+          # copies mcp-server.mjs here. `blue apply` only records this path.
+          args: ["/tmp/blue-e2e/mcp-server.mjs"]
+    claude:
+      version_requirement: ">=2.0.12, <2.1.253"
+      managed_config:
+        model: claude-sonnet-5
+        auto_approve: true
+      mcp: *e2e_mcp
+    kimi:
+      managed_config:
+        model: kimi-k2.6
+        auto_approve: true
+      mcp: *e2e_mcp
+    opencode:
+      managed_config:
+        model: gpt-5.6-terra
+      mcp: *e2e_mcp

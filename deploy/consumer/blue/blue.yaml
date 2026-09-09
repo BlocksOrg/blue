@@ -1,0 +1,69 @@
+control_api:
+  listen: 0.0.0.0:8080
+  database_url: os.environ/HARNESS_DATABASE_URL
+  bootstrap:
+    organization_slug: os.environ/HARNESS_BOOTSTRAP_ORG_ID
+    organization_name: os.environ/HARNESS_BOOTSTRAP_ORG_NAME
+    admin_subject: admin
+    admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL
+  auth:
+    public_url: os.environ/HARNESS_AUTH_PUBLIC_URL
+    session_url: http://127.0.0.1:3000/api/auth/get-session
+    jwks_url: http://127.0.0.1:3000/api/auth/jwks
+    issuer: os.environ/HARNESS_AUTH_ISSUER
+    audience: os.environ/HARNESS_AUTH_AUDIENCE
+    client_id: os.environ/HARNESS_OAUTH_CLIENT_ID
+  identity:
+    mode: os.environ/HARNESS_AUTH_MODE
+    scim_bearer_token: os.environ/HARNESS_SCIM_BEARER_TOKEN
+    group_role_mappings: os.environ/HARNESS_SCIM_GROUP_ROLE_MAPPINGS
+  blob_storage:
+    provider: s3
+    bucket: os.environ/HARNESS_BLOB_BUCKET
+    region: os.environ/HARNESS_BLOB_REGION
+    presign_ttl_seconds: 300
+    retention_days: 30
+    auth:
+      mode: iam
+  package_artifacts:
+    bucket: os.environ/HARNESS_PACKAGE_BUCKET
+
+# Custom gateway provisioning is opt-in. Implement the executable and add its administrator credentials to the runtime Secret named
+# by blue.existingSecret, enable blue.enableInferenceProxy in values.yaml, then
+# uncomment this block. Pin both the image and executable SHA-256 digests.
+# gateway:
+#   type: litellm
+#   url: os.environ/HARNESS_GATEWAY_URL
+#   inference_proxy_url: os.environ/HARNESS_INFERENCE_PROXY_URL
+#   inference_proxy_health_url: os.environ/HARNESS_INFERENCE_PROXY_HEALTH_URL
+#   # OAuth client id the inference proxy presents; defaults to blue-inference-proxy.
+#   internal_allowed_client_id: blue-inference-proxy
+#   secret_encryption:
+#     provider: aws-kms
+#     key_id: os.environ/HARNESS_GATEWAY_KMS_KEY_ID
+#   provisioner:
+#     type: organization-litellm-team
+#     executable_path: /var/run/blue/provisioner/provisioner
+#     executable_sha256: REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256
+#     policy_revision: organization-litellm-team-v1
+#     reconcile_ttl_seconds: 86400
+#     max_concurrency: 8
+#     timeout_seconds: 15
+
+governance:
+  revision: "2026-08-30.1"
+  contract_version: 2
+  required_capabilities:
+    - adapter_intervals
+    - compiled_harness_registry
+    - transactional_reconcile
+    - versioned_state
+  minimum_client_version: "0.1.0"
+  ttl_seconds: 300
+  required: true
+  allowed_harnesses: [codex, claude, kimi, opencode]
+  harnesses:
+    codex: { managed_config: {} }
+    claude: { managed_config: {} }
+    kimi: { managed_config: {} }
+    opencode: { managed_config: {} }

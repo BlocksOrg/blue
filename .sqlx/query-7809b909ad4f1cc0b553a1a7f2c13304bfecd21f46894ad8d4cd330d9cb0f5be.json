@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into public.client_status (id,organization_id,user_id,instance_id,hostname,client_version,platform,architecture,config_revision,applied,files_ok,harnesses,packages,error,revision_matches,status_reasons) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) on conflict (user_id,instance_id) do update set hostname=excluded.hostname,client_version=excluded.client_version, platform=excluded.platform,architecture=excluded.architecture,config_revision=excluded.config_revision, applied=excluded.applied,files_ok=excluded.files_ok,harnesses=excluded.harnesses,packages=excluded.packages, error=excluded.error,revision_matches=excluded.revision_matches,status_reasons=excluded.status_reasons,last_seen_at=now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Bool",
+        "Jsonb",
+        "Jsonb",
+        "Text",
+        "Bool",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7809b909ad4f1cc0b553a1a7f2c13304bfecd21f46894ad8d4cd330d9cb0f5be"
+}

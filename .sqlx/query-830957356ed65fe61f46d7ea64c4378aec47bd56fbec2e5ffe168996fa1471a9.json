@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from public.gateway_cache_events where created_at < now() - interval '24 hours'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "830957356ed65fe61f46d7ea64c4378aec47bd56fbec2e5ffe168996fa1471a9"
+}

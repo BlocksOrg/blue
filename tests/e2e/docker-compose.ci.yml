@@ -1,0 +1,26 @@
+services:
+  blue-base:
+    build:
+      cache_from:
+        - type=gha,scope=blue-e2e-deployment
+      cache_to:
+        - type=gha,mode=max,scope=blue-e2e-deployment
+
+  blue-rust:
+    build:
+      cache_from:
+        - type=gha,scope=blue-e2e-deployment
+
+  blue:
+    build:
+      cache_from:
+        - type=gha,scope=blue-e2e-custom
+      cache_to:
+        - type=gha,mode=max,scope=blue-e2e-custom
+
+  runner:
+    build:
+      cache_from:
+        - type=gha,scope=blue-e2e-runner-common
+      cache_to:
+        - type=gha,mode=max,scope=blue-e2e-runner-common

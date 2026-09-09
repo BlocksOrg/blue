@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into scim_groups(id,organization_id,external_id,display_name) values($1,$2,$3,$4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "85522eccb93e7d3dbc6de78fd3af19659f7fb041f6bc0e129cb9760e6f9658c2"
+}

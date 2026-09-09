@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE captured_sessions SET sharing_mode=$2 WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "875d04c68bf8af41d0a34fccf1dbfb53d083a075d80a1a28c80ff9693acc936a"
+}

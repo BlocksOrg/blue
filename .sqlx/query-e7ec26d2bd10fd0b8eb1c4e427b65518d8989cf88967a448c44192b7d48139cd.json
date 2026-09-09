@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE session_artifacts SET status='complete',completed_at=now(), retention_expires_at=$2 WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e7ec26d2bd10fd0b8eb1c4e427b65518d8989cf88967a448c44192b7d48139cd"
+}

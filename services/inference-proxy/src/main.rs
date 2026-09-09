@@ -1,0 +1,2163 @@
+//! Streaming inference proxy for gateway mode.
+//!
+//! Pseudotoken resolutions are cached briefly and invalidated through the
+//! Control API event stream. Request metadata is delivered in bounded batches.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::body::Body;
+use axum::extract::{Extension, State};
+use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, Uri};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
+use uuid::Uuid;
+
+#[derive(Clone)]
+struct Mapping {
+    upstream_credential: String,
+    user: String,
+    user_id: Option<String>,
+    organization_id: Option<String>,
+    profile_id: Option<String>,
+    profile_name: Option<String>,
+    credential_version: Option<String>,
+    credential_expires_at: Option<OffsetDateTime>,
+}
+
+struct CacheEntry {
+    mapping: Mapping,
+    expires_at: Instant,
+}
+
+struct CredentialCache {
+    entries: HashMap<String, CacheEntry>,
+    order: VecDeque<String>,
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl CredentialCache {
+    fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+            ttl,
+        }
+    }
+
+    fn get(&mut self, digest: &str) -> Option<Mapping> {
+        let valid = self.entries.get(digest).is_some_and(|entry| {
+            entry.expires_at > Instant::now()
+                && entry
+                    .mapping
+                    .credential_expires_at
+                    .is_none_or(|expires| expires > OffsetDateTime::now_utc())
+        });
+        if !valid {
+            self.entries.remove(digest);
+            return None;
+        }
+        self.order.retain(|key| key != digest);
+        self.order.push_back(digest.to_owned());
+        self.entries.get(digest).map(|entry| entry.mapping.clone())
+    }
+
+    fn insert(&mut self, digest: String, mapping: Mapping) {
+        self.order.retain(|key| key != &digest);
+        self.order.push_back(digest.clone());
+        self.entries.insert(
+            digest,
+            CacheEntry {
+                mapping,
+                expires_at: Instant::now() + self.ttl,
+            },
+        );
+        while self.entries.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn invalidate(&mut self, digest: Option<&str>, user_id: &str) {
+        if let Some(digest) = digest {
+            self.entries.remove(digest);
+            self.order.retain(|key| key != digest);
+        }
+        self.entries
+            .retain(|_, entry| entry.mapping.user_id.as_deref() != Some(user_id));
+        self.order.retain(|key| self.entries.contains_key(key));
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
+#[derive(Default)]
+struct Metrics {
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    resolver_errors: AtomicU64,
+    rate_limited: AtomicU64,
+    log_dropped: AtomicU64,
+    active_streams: AtomicU64,
+    oauth_token_fetches: AtomicU64,
+    oauth_token_fetch_errors: AtomicU64,
+    tls_reload_successes: AtomicU64,
+    tls_reload_errors: AtomicU64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InternalTransportMode {
+    Mtls,
+    InsecureHttp,
+}
+
+impl InternalTransportMode {
+    fn from_env() -> Self {
+        match std::env::var("HARNESS_INTERNAL_TRANSPORT_MODE")
+            .unwrap_or_else(|_| "mtls".into())
+            .as_str()
+        {
+            "mtls" => Self::Mtls,
+            "insecure-http" => Self::InsecureHttp,
+            value => panic!(
+                "HARNESS_INTERNAL_TRANSPORT_MODE must be `mtls` or `insecure-http`, got `{value}`"
+            ),
+        }
+    }
+}
+
+/// Static configuration for the OAuth2 client-credentials (M2M) flow the proxy
+/// uses to authenticate to the Control API's internal gateway endpoints.
+#[derive(Clone)]
+struct OauthConfig {
+    token_url: String,
+    client_id: String,
+    client_secret: String,
+    scope: String,
+    /// The Control API audience, sent as the RFC 8707 `resource` parameter so
+    /// better-auth mints a token whose `aud` matches what the Control API checks.
+    resource: String,
+    /// Refresh this many seconds before expiry. When unset the proxy refreshes
+    /// at ~80% of the token's lifetime.
+    refresh_skew: Option<Duration>,
+}
+
+/// An in-process cached service token. `refresh_at` is when the background
+/// worker / hot path proactively re-fetches; `exp` is the hard expiry after
+/// which the token must not be used.
+struct CachedServiceToken {
+    token: String,
+    refresh_at: Instant,
+    exp: Instant,
+}
+
+struct RateWindow {
+    updated: Instant,
+    tokens: f64,
+}
+
+type RequestPermit = Arc<OwnedSemaphorePermit>;
+
+struct AppState {
+    gateway: &'static dyn gh_gateway::GatewayAdapter,
+    upstream_credential_header: HeaderName,
+    upstream_base: String,
+    map: HashMap<String, Mapping>,
+    static_key: Option<String>,
+    resolver_url: Option<String>,
+    event_url: Option<String>,
+    oauth: Option<OauthConfig>,
+    service_token: RwLock<Option<CachedServiceToken>>,
+    token_refresh_lock: tokio::sync::Mutex<()>,
+    upstream_client: reqwest::Client,
+    oauth_client: reqwest::Client,
+    control_client: RwLock<reqwest::Client>,
+    resolver_timeout: Duration,
+    cache: Mutex<CredentialCache>,
+    resolution_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    rates: Mutex<HashMap<String, RateWindow>>,
+    per_token_rps: u64,
+    per_token_burst: u64,
+    resolver_permits: Arc<Semaphore>,
+    request_permits: Arc<Semaphore>,
+    max_body_bytes: usize,
+    log_tx: mpsc::Sender<RequestLogEvent>,
+    invalidation_tx: mpsc::Sender<InvalidCredentialReport>,
+    metrics: Metrics,
+    ready: AtomicBool,
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+fn env_u64(name: &str, default: u64) -> u64 {
+    env_usize(name, default as usize) as u64
+}
+
+fn select_gateway_adapter(
+    kind: Option<&str>,
+) -> Result<&'static dyn gh_gateway::GatewayAdapter, String> {
+    let kind = kind
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "HARNESS_GATEWAY_TYPE is required".to_owned())?;
+    gh_gateway::gateway_adapter(kind).ok_or_else(|| {
+        format!(
+            "unsupported HARNESS_GATEWAY_TYPE `{kind}` (compiled: {})",
+            gh_gateway::supported_gateway_types().join(", ")
+        )
+    })
+}
+
+fn validate_gateway_adapter(
+    adapter: &dyn gh_gateway::GatewayAdapter,
+) -> Result<HeaderName, String> {
+    let root_path = adapter
+        .upstream_path("/")
+        .map_err(|error| error.to_string())?;
+    if !root_path.starts_with('/') {
+        return Err(format!(
+            "gateway adapter `{}` returned a non-absolute upstream path `{root_path}`",
+            adapter.kind()
+        ));
+    }
+
+    upstream_credential_header(adapter.upstream_credential_placement()).map_err(|error| {
+        format!(
+            "gateway adapter `{}` declares invalid upstream credential placement: {error}",
+            adapter.kind()
+        )
+    })
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("INFERENCE_PROXY_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    validate_required_gateway_env(|name| std::env::var(name).ok())
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let gateway_kind = std::env::var("HARNESS_GATEWAY_TYPE").ok();
+    let gateway =
+        select_gateway_adapter(gateway_kind.as_deref()).unwrap_or_else(|error| panic!("{error}"));
+    let upstream_credential_header =
+        validate_gateway_adapter(gateway).unwrap_or_else(|error| panic!("{error}"));
+    let upstream_base = std::env::var("HARNESS_GATEWAY_URL")
+        .or_else(|_| std::env::var("HARNESS_LITELLM_BASE_URL"))
+        .expect("HARNESS_GATEWAY_URL is required")
+        .trim_end_matches('/')
+        .to_owned();
+    let static_key = std::env::var("HARNESS_STATIC_VIRTUAL_KEY").ok();
+    let resolver_url = std::env::var("HARNESS_GATEWAY_RESOLVER_URL").ok();
+    let log_url = std::env::var("HARNESS_GATEWAY_LOG_URL").ok();
+    let event_url = std::env::var("HARNESS_GATEWAY_EVENT_URL").ok().or_else(|| {
+        resolver_url
+            .as_deref()
+            .and_then(|url| url.strip_suffix("/resolve"))
+            .map(|base| format!("{base}/events"))
+    });
+    let credential_invalid_url = std::env::var("HARNESS_GATEWAY_CREDENTIAL_INVALID_URL")
+        .ok()
+        .or_else(|| {
+            resolver_url
+                .as_deref()
+                .and_then(|url| url.strip_suffix("/resolve"))
+                .map(|base| format!("{base}/credential-invalid"))
+        });
+    let oauth = oauth_config_from_env();
+    let internal_transport = InternalTransportMode::from_env();
+    if internal_transport == InternalTransportMode::InsecureHttp
+        && [
+            "HARNESS_INTERNAL_CA_PEM",
+            "HARNESS_INTERNAL_CA_FILE",
+            "HARNESS_PROXY_CLIENT_IDENTITY_PEM",
+            "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
+        ]
+        .iter()
+        .any(|name| std::env::var(name).is_ok())
+    {
+        panic!("internal TLS settings must not be configured in insecure-http mode");
+    }
+    // Hard cutover: any Control API hop (resolve / events / request-logs /
+    // credential-invalid) now requires the M2M OAuth flow. Fail fast if it is
+    // not configured.
+    let dynamic_mode = control_api_hop_configured(
+        resolver_url.as_ref(),
+        event_url.as_ref(),
+        log_url.as_ref(),
+        credential_invalid_url.as_ref(),
+    );
+    if dynamic_mode && oauth.is_none() {
+        panic!(
+            "HARNESS_PROXY_OAUTH_TOKEN_URL (and HARNESS_PROXY_OAUTH_CLIENT_ID/\
+             HARNESS_PROXY_OAUTH_CLIENT_SECRET/HARNESS_PROXY_OAUTH_RESOURCE) are required \
+             when a Control API resolver/event/log/credential-invalid URL is configured"
+        );
+    }
+    let map = load_map();
+    let listen = std::env::var("HARNESS_LISTEN").unwrap_or_else(|_| "0.0.0.0:8081".into());
+    validate_urls(
+        &upstream_base,
+        resolver_url.as_ref(),
+        log_url.as_ref(),
+        event_url.as_ref(),
+        credential_invalid_url.as_ref(),
+        oauth.as_ref().map(|oauth| &oauth.token_url),
+        internal_transport,
+    );
+
+    let upstream_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(env_u64(
+            "HARNESS_PROXY_UPSTREAM_CONNECT_TIMEOUT_MS",
+            2_000,
+        )))
+        .build()
+        .expect("building gateway client");
+    let oauth_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(500))
+        .build()
+        .expect("building OAuth client");
+    let control_client = build_control_client(if dynamic_mode {
+        internal_transport
+    } else {
+        InternalTransportMode::InsecureHttp
+    })
+    .unwrap_or_else(|error| panic!("building Control API client: {error}"));
+    let (log_tx, log_rx) = mpsc::channel(env_usize("HARNESS_PROXY_LOG_QUEUE_CAPACITY", 10_000));
+    let (invalidation_tx, invalidation_rx) = mpsc::channel(env_usize(
+        "HARNESS_PROXY_INVALIDATION_QUEUE_CAPACITY",
+        1_000,
+    ));
+    let state = Arc::new(AppState {
+        gateway,
+        upstream_credential_header,
+        upstream_base,
+        map,
+        static_key,
+        resolver_url,
+        event_url,
+        oauth,
+        service_token: RwLock::new(None),
+        token_refresh_lock: tokio::sync::Mutex::new(()),
+        upstream_client,
+        oauth_client,
+        control_client: RwLock::new(control_client),
+        resolver_timeout: Duration::from_secs(env_u64("HARNESS_PROXY_RESOLVER_TIMEOUT_SECONDS", 3)),
+        cache: Mutex::new(CredentialCache::new(
+            env_usize("HARNESS_PROXY_CACHE_CAPACITY", 100_000),
+            Duration::from_secs(env_u64("HARNESS_PROXY_CACHE_TTL_SECONDS", 60)),
+        )),
+        resolution_locks: Mutex::new(HashMap::new()),
+        rates: Mutex::new(HashMap::new()),
+        per_token_rps: env_u64("HARNESS_PROXY_PER_TOKEN_RPS", 50),
+        per_token_burst: env_u64("HARNESS_PROXY_PER_TOKEN_BURST", 100),
+        resolver_permits: Arc::new(Semaphore::new(env_usize(
+            "HARNESS_PROXY_MAX_RESOLVER_CONCURRENCY",
+            64,
+        ))),
+        request_permits: Arc::new(Semaphore::new(env_usize(
+            "HARNESS_PROXY_MAX_IN_FLIGHT",
+            7_500,
+        ))),
+        max_body_bytes: env_usize("HARNESS_PROXY_MAX_BODY_BYTES", 32 * 1024 * 1024),
+        log_tx,
+        invalidation_tx,
+        metrics: Metrics::default(),
+        ready: AtomicBool::new(true),
+    });
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    if dynamic_mode
+        && internal_transport == InternalTransportMode::Mtls
+        && std::env::var("HARNESS_INTERNAL_CA_FILE").is_ok()
+        && std::env::var("HARNESS_PROXY_CLIENT_IDENTITY_FILE").is_ok()
+    {
+        tokio::spawn(control_tls_reload_worker(
+            state.clone(),
+            shutdown_rx.clone(),
+        ));
+    }
+
+    // Hard cutover: obtain the first service token before serving traffic so a
+    // misconfigured M2M flow fails loudly rather than 503-ing later. Retry with
+    // a generous deadline so a still-starting auth dependency (DB migrations,
+    // dashboard cold start, client seed) doesn't trip the fail-fast.
+    if state.oauth.is_some() {
+        let startup_deadline_secs = env_u64("HARNESS_PROXY_OAUTH_STARTUP_DEADLINE_SECONDS", 120);
+        let deadline = Instant::now() + Duration::from_secs(startup_deadline_secs);
+        let mut obtained = false;
+        let mut attempt: u32 = 0;
+        while Instant::now() < deadline {
+            if get_valid_token(&state).await.is_some() {
+                obtained = true;
+                break;
+            }
+            attempt += 1;
+            tracing::warn!(
+                attempt,
+                "initial OAuth service token fetch failed; retrying in 2s"
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        if !obtained {
+            panic!(
+                "unable to obtain an initial OAuth service token from the Control API token endpoint within {startup_deadline_secs}s"
+            );
+        }
+        tokio::spawn(token_refresh_worker(state.clone(), shutdown_rx.clone()));
+    }
+
+    let log_handle = tokio::spawn(log_worker(
+        state.clone(),
+        log_rx,
+        log_url,
+        shutdown_rx.clone(),
+    ));
+    tokio::spawn(invalid_credential_worker(
+        state.clone(),
+        invalidation_rx,
+        credential_invalid_url,
+        shutdown_rx.clone(),
+    ));
+    if state.event_url.is_some() && state.oauth.is_some() {
+        tokio::spawn(invalidation_worker(state.clone(), shutdown_rx.clone()));
+    }
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            shutdown_signal().await;
+            state.ready.store(false, Ordering::Release);
+            let _ = shutdown_tx.send(true);
+        }
+    });
+
+    tracing::info!(gateway = state.gateway.kind(), upstream = %state.upstream_base, %listen, "inference-proxy starting");
+    let protected = Router::new()
+        .fallback(proxy)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            proxy_auth_guard,
+        ));
+    let app = Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
+        .merge(protected)
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind(&listen)
+        .await
+        .unwrap_or_else(|error| panic!("binding {listen}: {error}"));
+    let mut server_shutdown = shutdown_rx;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = server_shutdown.changed().await;
+        })
+        .await
+        .expect("server error");
+    let _ = tokio::time::timeout(Duration::from_secs(10), log_handle).await;
+}
+
+fn build_control_client(mode: InternalTransportMode) -> anyhow::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder();
+    if mode == InternalTransportMode::Mtls {
+        let pem = pem_setting("HARNESS_INTERNAL_CA_PEM", "HARNESS_INTERNAL_CA_FILE").ok_or_else(
+            || {
+                anyhow::anyhow!(
+                    "HARNESS_INTERNAL_CA_FILE or HARNESS_INTERNAL_CA_PEM is required in mtls mode"
+                )
+            },
+        )?;
+        builder = builder.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes())?);
+        let pem = pem_setting(
+            "HARNESS_PROXY_CLIENT_IDENTITY_PEM",
+            "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
+        ).ok_or_else(|| anyhow::anyhow!("HARNESS_PROXY_CLIENT_IDENTITY_FILE or HARNESS_PROXY_CLIENT_IDENTITY_PEM is required in mtls mode"))?;
+        builder = builder.identity(reqwest::Identity::from_pem(pem.as_bytes())?);
+    }
+    Ok(builder
+        .connect_timeout(Duration::from_millis(500))
+        .build()?)
+}
+
+async fn control_tls_reload_worker(
+    state: Arc<AppState>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut fingerprint = tls_file_fingerprint();
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            _ = interval.tick() => {
+                let next = tls_file_fingerprint();
+                if next.is_none() {
+                    state.metrics.tls_reload_errors.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!("unable to read Control API mTLS certificate material; retaining last-known-good client");
+                } else if next != fingerprint {
+                    match build_control_client(InternalTransportMode::Mtls) {
+                        Ok(client) => {
+                            *state.control_client.write().await = client;
+                            fingerprint = next;
+                            state.metrics.tls_reload_successes.fetch_add(1, Ordering::Relaxed);
+                            tracing::info!("reloaded Control API mTLS certificate material");
+                        }
+                        Err(error) => {
+                            state.metrics.tls_reload_errors.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(%error, "failed to reload Control API mTLS certificate material; retaining last-known-good client");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn tls_file_fingerprint() -> Option<[u8; 32]> {
+    let ca = std::fs::read(std::env::var("HARNESS_INTERNAL_CA_FILE").ok()?).ok()?;
+    let identity = std::fs::read(std::env::var("HARNESS_PROXY_CLIENT_IDENTITY_FILE").ok()?).ok()?;
+    let mut hash = Sha256::new();
+    hash.update(ca);
+    hash.update(identity);
+    Some(hash.finalize().into())
+}
+
+fn pem_setting(value_name: &str, file_name: &str) -> Option<String> {
+    std::env::var(value_name).ok().or_else(|| {
+        std::env::var(file_name).ok().map(|path| {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("reading {file_name} {path}: {error}"))
+        })
+    })
+}
+
+fn control_api_hop_configured(
+    resolver: Option<&String>,
+    events: Option<&String>,
+    logs: Option<&String>,
+    credential_invalid: Option<&String>,
+) -> bool {
+    resolver.is_some() || events.is_some() || logs.is_some() || credential_invalid.is_some()
+}
+
+/// Validate the proxy's required startup envelope in one pass. The returned
+/// error contains environment-variable names only, never configured values.
+fn validate_required_gateway_env(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+    let present = |name: &str| get(name).is_some_and(|value| !value.trim().is_empty());
+    let mut missing = Vec::new();
+    for name in ["HARNESS_GATEWAY_TYPE", "HARNESS_GATEWAY_URL"] {
+        if !present(name) {
+            missing.push(name);
+        }
+    }
+
+    let dynamic = [
+        "HARNESS_GATEWAY_RESOLVER_URL",
+        "HARNESS_GATEWAY_EVENT_URL",
+        "HARNESS_GATEWAY_LOG_URL",
+        "HARNESS_GATEWAY_CREDENTIAL_INVALID_URL",
+    ]
+    .iter()
+    .any(|name| present(name));
+    if dynamic {
+        for name in [
+            "HARNESS_PROXY_OAUTH_TOKEN_URL",
+            "HARNESS_PROXY_OAUTH_CLIENT_ID",
+            "HARNESS_PROXY_OAUTH_CLIENT_SECRET",
+            "HARNESS_PROXY_OAUTH_RESOURCE",
+        ] {
+            if !present(name) {
+                missing.push(name);
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid inference-proxy environment:\n{}",
+            missing
+                .into_iter()
+                .map(|name| format!("- {name} is required"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    }
+}
+
+/// Builds the OAuth2 client-credentials configuration from the environment.
+/// Returns `None` when no token URL is set (static-key / no-resolver mode);
+/// panics if the token URL is set but a required companion value is missing.
+fn oauth_config_from_env() -> Option<OauthConfig> {
+    let token_url = std::env::var("HARNESS_PROXY_OAUTH_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    let client_id = std::env::var("HARNESS_PROXY_OAUTH_CLIENT_ID").expect(
+        "HARNESS_PROXY_OAUTH_CLIENT_ID is required when HARNESS_PROXY_OAUTH_TOKEN_URL is set",
+    );
+    let client_secret = std::env::var("HARNESS_PROXY_OAUTH_CLIENT_SECRET").expect(
+        "HARNESS_PROXY_OAUTH_CLIENT_SECRET is required when HARNESS_PROXY_OAUTH_TOKEN_URL is set",
+    );
+    let resource = std::env::var("HARNESS_PROXY_OAUTH_RESOURCE").expect(
+        "HARNESS_PROXY_OAUTH_RESOURCE is required when HARNESS_PROXY_OAUTH_TOKEN_URL is set",
+    );
+    let scope =
+        std::env::var("HARNESS_PROXY_OAUTH_SCOPE").unwrap_or_else(|_| "gateway:resolve".into());
+    let refresh_skew = std::env::var("HARNESS_PROXY_OAUTH_REFRESH_SKEW_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    Some(OauthConfig {
+        token_url,
+        client_id,
+        client_secret,
+        scope,
+        resource,
+        refresh_skew,
+    })
+}
+
+fn validate_urls(
+    gateway: &str,
+    resolver: Option<&String>,
+    log: Option<&String>,
+    events: Option<&String>,
+    invalidation: Option<&String>,
+    token: Option<&String>,
+    internal_transport: InternalTransportMode,
+) {
+    let allow_insecure = std::env::var("BLUE_ALLOW_INSECURE_DEV").as_deref() == Ok("true");
+    for (name, url) in [
+        ("gateway", Some(gateway)),
+        ("resolver", resolver.map(String::as_str)),
+        ("request-log", log.map(String::as_str)),
+        ("events", events.map(String::as_str)),
+        ("credential-invalidation", invalidation.map(String::as_str)),
+        ("token", token.map(String::as_str)),
+    ] {
+        if let Some(url) = url {
+            let internal = matches!(
+                name,
+                "resolver" | "request-log" | "events" | "credential-invalidation"
+            );
+            if internal {
+                if !internal_url_matches_transport(internal_transport, url) {
+                    let scheme = match internal_transport {
+                        InternalTransportMode::Mtls => "HTTPS",
+                        InternalTransportMode::InsecureHttp => "HTTP",
+                    };
+                    panic!("{name} URL must use {scheme} in the configured internal transport mode: {url}");
+                }
+            } else if !allow_insecure && !url.starts_with("https://") {
+                panic!("{name} URL must use HTTPS: {url}");
+            }
+        }
+    }
+}
+
+fn internal_url_matches_transport(mode: InternalTransportMode, url: &str) -> bool {
+    match mode {
+        InternalTransportMode::Mtls => url.starts_with("https://"),
+        InternalTransportMode::InsecureHttp => url.starts_with("http://"),
+    }
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async { tokio::signal::ctrl_c().await.ok() };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("installing SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+}
+
+async fn health() -> &'static str {
+    "ok"
+}
+async fn ready(State(state): State<Arc<AppState>>) -> Response {
+    if state.ready.load(Ordering::Acquire) {
+        (StatusCode::OK, "ready").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response()
+    }
+}
+async fn metrics(State(state): State<Arc<AppState>>) -> String {
+    format!(
+        concat!(
+            "gateway_proxy_cache_hits_total {}\n",
+            "gateway_proxy_cache_misses_total {}\n",
+            "gateway_proxy_resolver_errors_total {}\n",
+            "gateway_proxy_rate_limited_total {}\n",
+            "gateway_proxy_log_dropped_total {}\n",
+            "gateway_proxy_active_streams {}\n",
+            "gateway_proxy_oauth_token_fetches_total {}\n",
+            "gateway_proxy_oauth_token_fetch_errors_total {}\n",
+            "gateway_proxy_tls_reload_successes_total {}\n",
+            "gateway_proxy_tls_reload_errors_total {}\n"
+        ),
+        state.metrics.cache_hits.load(Ordering::Relaxed),
+        state.metrics.cache_misses.load(Ordering::Relaxed),
+        state.metrics.resolver_errors.load(Ordering::Relaxed),
+        state.metrics.rate_limited.load(Ordering::Relaxed),
+        state.metrics.log_dropped.load(Ordering::Relaxed),
+        state.metrics.active_streams.load(Ordering::Relaxed),
+        state.metrics.oauth_token_fetches.load(Ordering::Relaxed),
+        state
+            .metrics
+            .oauth_token_fetch_errors
+            .load(Ordering::Relaxed),
+        state.metrics.tls_reload_successes.load(Ordering::Relaxed),
+        state.metrics.tls_reload_errors.load(Ordering::Relaxed)
+    )
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    expires_in: u64,
+}
+
+/// Fetches a fresh service token from the Control API's OAuth token endpoint
+/// using the client-credentials grant with `client_secret_basic` auth. Returns
+/// `None` on any transport/status/decode failure (the caller records the error
+/// metric and decides whether to fall back to a still-valid cached token).
+async fn fetch_service_token(state: &AppState) -> Option<CachedServiceToken> {
+    let oauth = state.oauth.as_ref()?;
+    let params = [
+        ("grant_type", "client_credentials"),
+        ("scope", oauth.scope.as_str()),
+        ("resource", oauth.resource.as_str()),
+    ];
+    let response = state
+        .oauth_client
+        .post(&oauth.token_url)
+        .basic_auth(&oauth.client_id, Some(&oauth.client_secret))
+        .form(&params)
+        .timeout(state.resolver_timeout)
+        .send()
+        .await
+        .map_err(|error| tracing::warn!(%error, "fetching service token"))
+        .ok()?;
+    if !response.status().is_success() {
+        tracing::warn!(status = %response.status(), "service token endpoint rejected the request");
+        return None;
+    }
+    let body: TokenResponse = response
+        .json()
+        .await
+        .map_err(|error| tracing::warn!(%error, "decoding service token response"))
+        .ok()?;
+    let now = Instant::now();
+    let ttl = Duration::from_secs(body.expires_in.max(1));
+    let refresh_after = match oauth.refresh_skew {
+        Some(skew) if skew < ttl => ttl - skew,
+        Some(_) => ttl / 5,
+        None => ttl.mul_f64(0.8),
+    }
+    .max(Duration::from_millis(100));
+    Some(CachedServiceToken {
+        token: body.access_token,
+        refresh_at: now + refresh_after,
+        exp: now + ttl,
+    })
+}
+
+/// Performs one token fetch, updating metrics and the cache. Returns the fresh
+/// token string, or `None` if the fetch failed.
+async fn refresh_service_token(state: &AppState) -> Option<String> {
+    state
+        .metrics
+        .oauth_token_fetches
+        .fetch_add(1, Ordering::Relaxed);
+    match fetch_service_token(state).await {
+        Some(fresh) => {
+            let token = fresh.token.clone();
+            *state.service_token.write().await = Some(fresh);
+            Some(token)
+        }
+        None => {
+            state
+                .metrics
+                .oauth_token_fetch_errors
+                .fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
+/// Hot-path accessor for the current service token. Returns the cached token
+/// while it is still fresh (`now < refresh_at`); otherwise it single-flights a
+/// refresh behind `token_refresh_lock` so a burst of callers straddling a
+/// rollover triggers exactly one fetch. Falls back to a cached-but-unexpired
+/// token if the refresh fails. Returns `None` only when M2M is unconfigured or
+/// no usable token exists.
+async fn get_valid_token(state: &AppState) -> Option<String> {
+    state.oauth.as_ref()?;
+    {
+        let cached = state.service_token.read().await;
+        if let Some(entry) = cached.as_ref() {
+            if Instant::now() < entry.refresh_at {
+                return Some(entry.token.clone());
+            }
+        }
+    }
+    let _guard = state.token_refresh_lock.lock().await;
+    // Another caller may have refreshed while we waited for the lock.
+    {
+        let cached = state.service_token.read().await;
+        if let Some(entry) = cached.as_ref() {
+            if Instant::now() < entry.refresh_at {
+                return Some(entry.token.clone());
+            }
+        }
+    }
+    if let Some(token) = refresh_service_token(state).await {
+        return Some(token);
+    }
+    // Refresh failed: reuse a still-valid token if one remains.
+    let cached = state.service_token.read().await;
+    cached
+        .as_ref()
+        .filter(|entry| Instant::now() < entry.exp)
+        .map(|entry| entry.token.clone())
+}
+
+/// Background worker that proactively refreshes the service token at its
+/// `refresh_at` instant so the hot path virtually always just reads the cache.
+async fn token_refresh_worker(
+    state: Arc<AppState>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        let sleep_for = {
+            let cached = state.service_token.read().await;
+            match cached.as_ref() {
+                Some(entry) => entry.refresh_at.saturating_duration_since(Instant::now()),
+                None => Duration::from_millis(200),
+            }
+        }
+        .max(Duration::from_millis(200));
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_for) => {}
+            _ = shutdown.changed() => return,
+        }
+        if *shutdown.borrow() {
+            return;
+        }
+        // Drives the single-flight refresh once we are at/after refresh_at.
+        let _ = get_valid_token(&state).await;
+    }
+}
+
+#[derive(Deserialize)]
+struct ResolveResponse {
+    upstream_credential: Option<String>,
+    /// Historical LiteLLM-specific field retained for one compatibility
+    /// release.
+    virtual_key: Option<String>,
+    user: String,
+    user_id: Option<String>,
+    organization_id: Option<String>,
+    profile_id: Option<String>,
+    profile_name: Option<String>,
+    credential_version: Option<String>,
+    credential_expires_at: Option<String>,
+}
+#[derive(Debug)]
+enum ResolveError {
+    Invalid,
+    Unavailable,
+}
+
+fn resolved_upstream_credential(
+    upstream_credential: Option<String>,
+    virtual_key: Option<String>,
+) -> Result<String, ResolveError> {
+    let credential = match (upstream_credential, virtual_key) {
+        (Some(current), Some(legacy)) if current != legacy => {
+            return Err(ResolveError::Unavailable)
+        }
+        (Some(current), _) => current,
+        (None, Some(legacy)) => legacy,
+        (None, None) => return Err(ResolveError::Unavailable),
+    };
+    if credential.trim().is_empty() {
+        return Err(ResolveError::Unavailable);
+    }
+    Ok(credential)
+}
+
+async fn resolve_dynamic(state: &AppState, pseudotoken: &str) -> Result<Mapping, ResolveError> {
+    let url = state
+        .resolver_url
+        .as_ref()
+        .ok_or(ResolveError::Unavailable)?;
+    let token = get_valid_token(state)
+        .await
+        .ok_or(ResolveError::Unavailable)?;
+    let _permit = state
+        .resolver_permits
+        .acquire()
+        .await
+        .map_err(|_| ResolveError::Unavailable)?;
+    let client = state.control_client.read().await.clone();
+    let response = client
+        .post(url)
+        .bearer_auth(&token)
+        .timeout(state.resolver_timeout)
+        .json(&serde_json::json!({ "pseudotoken": pseudotoken }))
+        .send()
+        .await
+        .map_err(|_| ResolveError::Unavailable)?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return Err(ResolveError::Invalid);
+    }
+    if !response.status().is_success() {
+        return Err(ResolveError::Unavailable);
+    }
+    let body: ResolveResponse = response
+        .json()
+        .await
+        .map_err(|_| ResolveError::Unavailable)?;
+    let upstream_credential =
+        resolved_upstream_credential(body.upstream_credential, body.virtual_key)?;
+    Ok(Mapping {
+        upstream_credential,
+        user: body.user,
+        user_id: body.user_id,
+        organization_id: body.organization_id,
+        profile_id: body.profile_id,
+        profile_name: body.profile_name,
+        credential_version: body.credential_version,
+        credential_expires_at: body
+            .credential_expires_at
+            .as_deref()
+            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
+    })
+}
+
+fn load_map() -> HashMap<String, Mapping> {
+    let Some(path) = std::env::var("HARNESS_PSEUDOTOKEN_MAP_FILE").ok() else {
+        return HashMap::new();
+    };
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("reading {path}: {error}"));
+    let raw: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&text).unwrap_or_else(|error| panic!("parsing {path}: {error}"));
+    raw.into_iter()
+        .map(|(token, value)| {
+            (
+                token,
+                Mapping {
+                    upstream_credential: value
+                        .get("virtual_key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    user: value
+                        .get("user")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                    user_id: None,
+                    organization_id: None,
+                    profile_id: None,
+                    profile_name: None,
+                    credential_version: None,
+                    credential_expires_at: None,
+                },
+            )
+        })
+        .collect()
+}
+
+fn extract_pseudotoken(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(text) = value.to_str() {
+            if let Some(token) = text.strip_prefix("Bearer ") {
+                return Some(token.trim().to_owned());
+            }
+        }
+    }
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .map(str::to_owned)
+}
+fn token_digest(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+fn admitted(state: &AppState, digest: &str) -> bool {
+    let mut rates = state.rates.lock().expect("rate limiter poisoned");
+    if rates.len() > 200_000 {
+        rates.retain(|_, window| window.updated.elapsed() < Duration::from_secs(120));
+    }
+    let burst = state.per_token_burst.max(1) as f64;
+    let window = rates.entry(digest.to_owned()).or_insert(RateWindow {
+        updated: Instant::now(),
+        tokens: burst,
+    });
+    let now = Instant::now();
+    window.tokens = (window.tokens
+        + now.duration_since(window.updated).as_secs_f64() * state.per_token_rps as f64)
+        .min(burst);
+    window.updated = now;
+    if window.tokens < 1.0 {
+        return false;
+    }
+    window.tokens -= 1.0;
+    true
+}
+
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+#[derive(Clone, Serialize)]
+struct RequestLogEvent {
+    id: Uuid,
+    organization_id: String,
+    user_id: String,
+    profile_id: Option<String>,
+    profile_name: Option<String>,
+    occurred_at: String,
+    method: String,
+    path: String,
+    model: Option<String>,
+    http_status: Option<u16>,
+    upstream_latency_ms: u64,
+    harness: Option<String>,
+    repository: Option<String>,
+    branch: Option<String>,
+    commit_sha: Option<String>,
+    dirty: Option<bool>,
+    run_id: Option<String>,
+}
+struct RequestLogMetadata {
+    occurred_at: String,
+    method: String,
+    path: String,
+    model: Option<String>,
+    harness: Option<String>,
+    repository: Option<String>,
+    branch: Option<String>,
+    commit_sha: Option<String>,
+    dirty: Option<bool>,
+    run_id: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct InvalidCredentialReport {
+    user_id: String,
+    credential_version: String,
+    reason: gh_gateway::InvalidCredentialReason,
+    /// Historical LiteLLM-specific field retained for one compatibility
+    /// release. It is absent for reasons old Control APIs cannot understand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classification: Option<String>,
+}
+
+async fn invalid_credential_worker(
+    state: Arc<AppState>,
+    mut receiver: mpsc::Receiver<InvalidCredentialReport>,
+    url: Option<String>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut reported = HashMap::<String, Instant>::new();
+    loop {
+        let report = tokio::select! {
+            report = receiver.recv() => report,
+            _ = shutdown.changed() => return,
+        };
+        let Some(report) = report else { return };
+        let now = Instant::now();
+        reported.retain(|_, at| now.duration_since(*at) < Duration::from_secs(300));
+        if reported.contains_key(&report.credential_version) {
+            continue;
+        }
+        reported.insert(report.credential_version.clone(), now);
+        let Some(url) = url.as_ref() else {
+            continue;
+        };
+        let Some(token) = get_valid_token(&state).await else {
+            tracing::warn!("service token unavailable; skipping invalid-credential report");
+            continue;
+        };
+        let client = state.control_client.read().await.clone();
+        if let Err(error) = client
+            .post(url)
+            .bearer_auth(&token)
+            .timeout(Duration::from_secs(45))
+            .json(&report)
+            .send()
+            .await
+        {
+            tracing::warn!(%error, "failed to report invalid gateway credential");
+        }
+    }
+}
+fn request_log_metadata(method: &Method, uri: &Uri, headers: &HeaderMap) -> RequestLogMetadata {
+    RequestLogMetadata {
+        occurred_at: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into()),
+        method: method.as_str().to_owned(),
+        path: uri.path().to_owned(),
+        model: header_text(headers, "x-harness-model"),
+        harness: header_text(headers, "x-harness-agent"),
+        repository: header_text(headers, "x-harness-repo"),
+        branch: header_text(headers, "x-harness-git-branch"),
+        commit_sha: header_text(headers, "x-harness-commit"),
+        dirty: header_text(headers, "x-harness-dirty").and_then(|value| value.parse().ok()),
+        run_id: header_text(headers, "x-harness-run-id"),
+    }
+}
+fn enqueue_request_log(
+    state: &AppState,
+    mapping: &Mapping,
+    metadata: RequestLogMetadata,
+    http_status: Option<u16>,
+    upstream_latency_ms: u64,
+) {
+    let (Some(user_id), Some(organization_id)) =
+        (mapping.user_id.clone(), mapping.organization_id.clone())
+    else {
+        return;
+    };
+    let event = RequestLogEvent {
+        id: Uuid::new_v4(),
+        organization_id,
+        user_id,
+        profile_id: mapping.profile_id.clone(),
+        profile_name: mapping.profile_name.clone(),
+        occurred_at: metadata.occurred_at,
+        method: metadata.method,
+        path: metadata.path,
+        model: metadata.model,
+        http_status,
+        upstream_latency_ms,
+        harness: metadata.harness,
+        repository: metadata.repository,
+        branch: metadata.branch,
+        commit_sha: metadata.commit_sha,
+        dirty: metadata.dirty,
+        run_id: metadata.run_id,
+    };
+    if state.log_tx.try_send(event).is_err() {
+        state.metrics.log_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+async fn log_worker(
+    state: Arc<AppState>,
+    mut receiver: mpsc::Receiver<RequestLogEvent>,
+    log_url: Option<String>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let Some(url) = log_url.map(|url| {
+        if url.ends_with("/batch") {
+            url
+        } else {
+            format!("{}/batch", url.trim_end_matches('/'))
+        }
+    }) else {
+        while receiver.recv().await.is_some() {}
+        return;
+    };
+    let mut deliveries = tokio::task::JoinSet::new();
+    loop {
+        let first = tokio::select! { event = receiver.recv() => event, _ = shutdown.changed() => { receiver.close(); receiver.recv().await } };
+        let Some(first) = first else {
+            break;
+        };
+        let mut events = vec![first];
+        let deadline = tokio::time::sleep(Duration::from_millis(100));
+        tokio::pin!(deadline);
+        while events.len() < 500 {
+            tokio::select! { event = receiver.recv() => match event { Some(event) => events.push(event), None => break }, _ = &mut deadline => break }
+        }
+        let count = events.len() as u64;
+        let payload = serde_json::json!({ "events": events });
+        if deliveries.len() >= 4 {
+            let _ = deliveries.join_next().await;
+        }
+        deliveries.spawn(deliver_log_batch(
+            state.clone(),
+            url.clone(),
+            payload,
+            count,
+        ));
+    }
+    while deliveries.join_next().await.is_some() {}
+}
+
+async fn deliver_log_batch(
+    state: Arc<AppState>,
+    url: String,
+    payload: serde_json::Value,
+    count: u64,
+) {
+    for attempt in 0..3 {
+        if let Some(token) = get_valid_token(&state).await {
+            let client = state.control_client.read().await.clone();
+            let result = client
+                .post(&url)
+                .bearer_auth(&token)
+                .timeout(Duration::from_secs(2))
+                .json(&payload)
+                .send()
+                .await;
+            if result
+                .as_ref()
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50 * (1 << attempt))).await;
+    }
+    state
+        .metrics
+        .log_dropped
+        .fetch_add(count, Ordering::Relaxed);
+    tracing::warn!(count, "dropping request-log batch");
+}
+
+#[derive(Deserialize)]
+struct InvalidationEvent {
+    user_id: String,
+    pseudotoken_hash: Option<String>,
+    #[allow(dead_code)]
+    credential_version: Option<String>,
+}
+async fn invalidation_worker(
+    state: Arc<AppState>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let url = state.event_url.clone().expect("event URL checked");
+    let mut last_id: Option<String> = None;
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        let Some(token) = get_valid_token(&state).await else {
+            tracing::warn!("service token unavailable for invalidation stream; retrying");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        let client = state.control_client.read().await.clone();
+        let mut request = client.get(&url).bearer_auth(&token);
+        if let Some(id) = &last_id {
+            request = request.header("last-event-id", id);
+        }
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                let mut bytes = response.bytes_stream();
+                let mut buffer = String::new();
+                let mut event_id = None;
+                loop {
+                    let chunk = tokio::select! { chunk = bytes.next() => chunk, _ = shutdown.changed() => return };
+                    let Some(Ok(chunk)) = chunk else {
+                        break;
+                    };
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    while let Some(end) = buffer.find('\n') {
+                        let line = buffer[..end].trim_end_matches('\r').to_owned();
+                        buffer.drain(..=end);
+                        if let Some(id) = line.strip_prefix("id:") {
+                            event_id = Some(id.trim().to_owned());
+                        } else if let Some(data) = line.strip_prefix("data:") {
+                            if data.trim() == "{\"resync\":true}" {
+                                state.cache.lock().expect("cache poisoned").clear();
+                                last_id = None;
+                            } else if let Ok(event) =
+                                serde_json::from_str::<InvalidationEvent>(data.trim())
+                            {
+                                state
+                                    .cache
+                                    .lock()
+                                    .expect("cache poisoned")
+                                    .invalidate(event.pseudotoken_hash.as_deref(), &event.user_id);
+                                last_id = event_id.take().or(last_id);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(response) => {
+                tracing::warn!(status = %response.status(), "invalidation stream rejected")
+            }
+            Err(error) => tracing::warn!(%error, "invalidation stream unavailable"),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn proxy_auth_guard(
+    State(state): State<Arc<AppState>>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !state.ready.load(Ordering::Acquire) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "proxy is draining").into_response();
+    }
+    let permit = match state.request_permits.clone().try_acquire_owned() {
+        Ok(permit) => Arc::new(permit),
+        Err(_) => {
+            let mut response =
+                (StatusCode::SERVICE_UNAVAILABLE, "proxy capacity exhausted").into_response();
+            response
+                .headers_mut()
+                .insert("retry-after", "1".parse().unwrap());
+            return response;
+        }
+    };
+    let Some(pseudotoken) = extract_pseudotoken(request.headers()) else {
+        return (StatusCode::UNAUTHORIZED, "missing pseudotoken").into_response();
+    };
+    let digest = token_digest(&pseudotoken);
+    if !admitted(&state, &digest) {
+        state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+        let mut response = (
+            StatusCode::TOO_MANY_REQUESTS,
+            "pseudotoken rate limit exceeded",
+        )
+            .into_response();
+        response
+            .headers_mut()
+            .insert("retry-after", "1".parse().unwrap());
+        return response;
+    }
+
+    let cached = { state.cache.lock().expect("cache poisoned").get(&digest) };
+    let mapping = if let Some(mapping) = state.map.get(&pseudotoken) {
+        mapping.clone()
+    } else if let Some(mapping) = cached {
+        state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+        mapping
+    } else {
+        state.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+        let resolution_lock = {
+            let mut locks = state
+                .resolution_locks
+                .lock()
+                .expect("resolution locks poisoned");
+            locks
+                .entry(digest.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _resolution_guard = resolution_lock.lock().await;
+        let rechecked = { state.cache.lock().expect("cache poisoned").get(&digest) };
+        if let Some(mapping) = rechecked {
+            state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+            state
+                .resolution_locks
+                .lock()
+                .expect("resolution locks poisoned")
+                .remove(&digest);
+            mapping
+        } else {
+            let resolved = resolve_dynamic(&state, &pseudotoken).await;
+            state
+                .resolution_locks
+                .lock()
+                .expect("resolution locks poisoned")
+                .remove(&digest);
+            match resolved {
+                Ok(mapping) => {
+                    state
+                        .cache
+                        .lock()
+                        .expect("cache poisoned")
+                        .insert(digest, mapping.clone());
+                    mapping
+                }
+                Err(ResolveError::Invalid) => {
+                    return (StatusCode::UNAUTHORIZED, "unknown pseudotoken").into_response()
+                }
+                Err(ResolveError::Unavailable) if state.static_key.is_some() => Mapping {
+                    upstream_credential: state.static_key.clone().unwrap(),
+                    user: "dev".into(),
+                    user_id: None,
+                    organization_id: None,
+                    profile_id: None,
+                    profile_name: None,
+                    credential_version: None,
+                    credential_expires_at: None,
+                },
+                Err(ResolveError::Unavailable) => {
+                    state
+                        .metrics
+                        .resolver_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "credential resolver unavailable",
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    request.extensions_mut().insert(mapping);
+    request.extensions_mut().insert(permit);
+    next.run(request).await
+}
+
+fn upstream_url(
+    adapter: &dyn gh_gateway::GatewayAdapter,
+    upstream_base: &str,
+    path_and_query: &str,
+) -> Result<String, String> {
+    let path = adapter
+        .upstream_path(path_and_query)
+        .map_err(|error| error.to_string())?;
+    if !path.starts_with('/') {
+        return Err(format!(
+            "gateway adapter `{}` returned a non-absolute upstream path `{path}`",
+            adapter.kind()
+        ));
+    }
+    Ok(format!("{upstream_base}{path}"))
+}
+
+fn upstream_credential_header(
+    placement: gh_gateway::UpstreamCredentialPlacement,
+) -> Result<HeaderName, String> {
+    let header = match placement {
+        gh_gateway::UpstreamCredentialPlacement::AuthorizationBearer => {
+            Ok(HeaderName::from_static("authorization"))
+        }
+        gh_gateway::UpstreamCredentialPlacement::Header(name) => {
+            HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| format!("invalid header name `{name}`"))
+        }
+    }?;
+    if matches!(header.as_str(), "host" | "content-length") || is_hop_by_hop(header.as_str()) {
+        return Err(format!("forbidden credential header `{header}`"));
+    }
+    Ok(header)
+}
+
+fn apply_upstream_credential(
+    placement: gh_gateway::UpstreamCredentialPlacement,
+    request: reqwest::RequestBuilder,
+    credential: &str,
+    credential_header: &HeaderName,
+) -> reqwest::RequestBuilder {
+    match placement {
+        gh_gateway::UpstreamCredentialPlacement::AuthorizationBearer => {
+            request.bearer_auth(credential)
+        }
+        gh_gateway::UpstreamCredentialPlacement::Header(_) => {
+            request.header(credential_header, credential)
+        }
+    }
+}
+
+fn copy_forwarded_headers(
+    mut upstream: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+    credential_header: &HeaderName,
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "authorization" | "x-api-key" | "host" | "content-length"
+        ) || name == credential_header
+            || is_hop_by_hop(&lower)
+        {
+            continue;
+        }
+        upstream = upstream.header(name, value);
+    }
+    upstream
+}
+
+async fn proxy(
+    State(state): State<Arc<AppState>>,
+    Extension(mapping): Extension<Mapping>,
+    Extension(permit): Extension<RequestPermit>,
+    request: Request<Body>,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let method = parts.method;
+    let uri = parts.uri;
+    let headers = parts.headers;
+    let mut metadata = request_log_metadata(&method, &uri, &headers);
+    if headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|size| size > state.max_body_bytes)
+    {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body exceeds proxy limit",
+        )
+            .into_response();
+    }
+    let seen = Arc::new(AtomicUsize::new(0));
+    let max = state.max_body_bytes;
+    let model_prefix = Arc::new(Mutex::new(Vec::with_capacity(4096)));
+    let capture = model_prefix.clone();
+    let request_stream = body.into_data_stream().map(move |item| match item {
+        Ok(chunk) if seen.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len() <= max => {
+            let mut prefix = capture.lock().expect("model capture poisoned");
+            if prefix.len() < 64 * 1024 {
+                let remaining = 64 * 1024 - prefix.len();
+                prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            Ok(chunk)
+        }
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "request body exceeds proxy limit",
+        )),
+        Err(error) => Err(std::io::Error::other(error)),
+    });
+    let path_and_query = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let url = match upstream_url(state.gateway, &state.upstream_base, path_and_query) {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::error!(gateway = state.gateway.kind(), %error, "gateway adapter rejected upstream path");
+            return (StatusCode::BAD_GATEWAY, "invalid upstream gateway path").into_response();
+        }
+    };
+    let mut upstream = state
+        .upstream_client
+        .request(method, &url)
+        .body(reqwest::Body::wrap_stream(request_stream));
+    upstream = copy_forwarded_headers(upstream, &headers, &state.upstream_credential_header);
+    upstream = apply_upstream_credential(
+        state.gateway.upstream_credential_placement(),
+        upstream,
+        &mapping.upstream_credential,
+        &state.upstream_credential_header,
+    );
+    let started = Instant::now();
+    match upstream.send().await {
+        Ok(response) => {
+            let status = response.status();
+            if metadata.model.is_none() {
+                metadata.model = model_from_prefix(&model_prefix);
+            }
+            enqueue_request_log(
+                &state,
+                &mapping,
+                metadata,
+                Some(status.as_u16()),
+                started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            );
+            // Inspect only adapter-selected responses with an explicit bounded
+            // length so an untrusted upstream cannot force arbitrary buffering.
+            if state.gateway.inspect_response_status(status.as_u16())
+                && response
+                    .content_length()
+                    .is_some_and(|size| size <= 64 * 1024)
+            {
+                let response_headers = response.headers().clone();
+                match response.bytes().await {
+                    Ok(bytes) => {
+                        if let (Some(reason), Some(user_id), Some(version)) = (
+                            state
+                                .gateway
+                                .classify_invalid_credential(status.as_u16(), &bytes),
+                            mapping.user_id.as_ref(),
+                            mapping.credential_version.as_ref(),
+                        ) {
+                            let _ = state.invalidation_tx.try_send(InvalidCredentialReport {
+                                user_id: user_id.clone(),
+                                credential_version: version.clone(),
+                                reason,
+                                classification: reason.legacy_classification().map(str::to_owned),
+                            });
+                        }
+                        let mut builder = Response::builder().status(status);
+                        for (name, value) in &response_headers {
+                            let lower = name.as_str().to_ascii_lowercase();
+                            if lower != "content-length" && !is_hop_by_hop(&lower) {
+                                builder = builder.header(name, value);
+                            }
+                        }
+                        return builder.body(Body::from(bytes)).unwrap_or_else(|_| {
+                            (StatusCode::BAD_GATEWAY, "bad upstream response").into_response()
+                        });
+                    }
+                    Err(_) => {
+                        return (StatusCode::BAD_GATEWAY, "bad upstream response").into_response()
+                    }
+                }
+            }
+            let mut builder = Response::builder().status(status);
+            for (name, value) in response.headers() {
+                let lower = name.as_str().to_ascii_lowercase();
+                if lower != "content-length" && !is_hop_by_hop(&lower) {
+                    builder = builder.header(name, value);
+                }
+            }
+            state.metrics.active_streams.fetch_add(1, Ordering::Relaxed);
+            let stream = hold_permit(response.bytes_stream(), permit, state.clone());
+            builder.body(Body::from_stream(stream)).unwrap_or_else(|_| {
+                (StatusCode::BAD_GATEWAY, "bad upstream response").into_response()
+            })
+        }
+        Err(error) => {
+            tracing::error!(%error, %url, user = %mapping.user, version = ?mapping.credential_version, "upstream request failed");
+            if metadata.model.is_none() {
+                metadata.model = model_from_prefix(&model_prefix);
+            }
+            enqueue_request_log(
+                &state,
+                &mapping,
+                metadata,
+                None,
+                started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            );
+            (StatusCode::BAD_GATEWAY, "upstream request failed").into_response()
+        }
+    }
+}
+
+fn model_from_prefix(prefix: &Mutex<Vec<u8>>) -> Option<String> {
+    let prefix = prefix.lock().expect("model capture poisoned");
+    serde_json::from_slice::<serde_json::Value>(&prefix)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("model")
+                .and_then(|model| model.as_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            let text = std::str::from_utf8(&prefix).ok()?;
+            let after_key = text.split_once("\"model\"")?.1;
+            let after_colon = after_key.split_once(':')?.1.trim_start();
+            let quoted = after_colon.strip_prefix('"')?;
+            Some(quoted.split_once('"')?.0.to_owned())
+        })
+}
+
+fn hold_permit(
+    stream: impl futures_util::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static,
+    permit: RequestPermit,
+    state: Arc<AppState>,
+) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static {
+    struct Guard {
+        _permit: RequestPermit,
+        state: Arc<AppState>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.state
+                .metrics
+                .active_streams
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    let guard = Guard {
+        _permit: permit,
+        state,
+    };
+    stream.map(move |item| {
+        let _keep = &guard;
+        item
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn mapping(user_id: &str) -> Mapping {
+        Mapping {
+            upstream_credential: "secret".into(),
+            user: "user@example.com".into(),
+            user_id: Some(user_id.into()),
+            organization_id: Some("org".into()),
+            profile_id: None,
+            profile_name: None,
+            credential_version: Some("v1".into()),
+            credential_expires_at: None,
+        }
+    }
+    #[test]
+    fn cache_is_bounded_and_invalidates_by_user() {
+        let mut cache = CredentialCache::new(2, Duration::from_secs(60));
+        cache.insert("one".into(), mapping("u1"));
+        cache.insert("two".into(), mapping("u2"));
+        cache.insert("three".into(), mapping("u3"));
+        assert!(cache.get("one").is_none());
+        assert!(cache.get("two").is_some());
+        cache.invalidate(None, "u2");
+        assert!(cache.get("two").is_none());
+    }
+    #[test]
+    fn metadata_uses_allowlisted_headers_and_omits_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-harness-agent", "codex".parse().unwrap());
+        headers.insert("x-harness-model", "gpt-5".parse().unwrap());
+        let metadata = request_log_metadata(
+            &Method::POST,
+            &"/v1/responses?api_key=secret".parse().unwrap(),
+            &headers,
+        );
+        assert_eq!(metadata.path, "/v1/responses");
+        assert_eq!(metadata.model.as_deref(), Some("gpt-5"));
+        assert_eq!(metadata.harness.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn model_can_be_captured_from_an_incomplete_streaming_prefix() {
+        let prefix = Mutex::new(br#"{"model":"gpt-5","input":"unfinished"#.to_vec());
+        assert_eq!(model_from_prefix(&prefix).as_deref(), Some("gpt-5"));
+    }
+
+    use std::sync::atomic::AtomicUsize;
+
+    fn test_oauth(token_url: String) -> OauthConfig {
+        OauthConfig {
+            token_url,
+            client_id: "test-client".into(),
+            client_secret: "test-secret".into(),
+            scope: "gateway:resolve".into(),
+            resource: "http://control-api.test".into(),
+            refresh_skew: None,
+        }
+    }
+
+    #[test]
+    fn internal_transport_modes_require_an_exact_url_scheme() {
+        assert!(internal_url_matches_transport(
+            InternalTransportMode::Mtls,
+            "https://control-api-internal:8082/internal/gateway/resolve"
+        ));
+        assert!(!internal_url_matches_transport(
+            InternalTransportMode::Mtls,
+            "http://control-api-internal:8082/internal/gateway/resolve"
+        ));
+        assert!(internal_url_matches_transport(
+            InternalTransportMode::InsecureHttp,
+            "http://control-api-internal:8082/internal/gateway/resolve"
+        ));
+        assert!(!internal_url_matches_transport(
+            InternalTransportMode::InsecureHttp,
+            "https://control-api-internal:8082/internal/gateway/resolve"
+        ));
+    }
+
+    fn test_state(oauth: Option<OauthConfig>) -> Arc<AppState> {
+        let (log_tx, _log_rx) = mpsc::channel(16);
+        let (invalidation_tx, _invalidation_rx) = mpsc::channel(16);
+        // Intentionally leak the receivers so the channels stay open for the
+        // lifetime of the test without us having to thread them through.
+        Box::leak(Box::new(_log_rx));
+        Box::leak(Box::new(_invalidation_rx));
+        Arc::new(AppState {
+            gateway: gh_gateway::gateway_adapter("litellm").unwrap(),
+            upstream_credential_header: HeaderName::from_static("authorization"),
+            upstream_base: "http://upstream.test".into(),
+            map: HashMap::new(),
+            static_key: None,
+            resolver_url: None,
+            event_url: None,
+            oauth,
+            service_token: RwLock::new(None),
+            token_refresh_lock: tokio::sync::Mutex::new(()),
+            upstream_client: reqwest::Client::new(),
+            oauth_client: reqwest::Client::new(),
+            control_client: RwLock::new(reqwest::Client::new()),
+            resolver_timeout: Duration::from_secs(3),
+            cache: Mutex::new(CredentialCache::new(10, Duration::from_secs(60))),
+            resolution_locks: Mutex::new(HashMap::new()),
+            rates: Mutex::new(HashMap::new()),
+            per_token_rps: 100,
+            per_token_burst: 100,
+            resolver_permits: Arc::new(Semaphore::new(8)),
+            request_permits: Arc::new(Semaphore::new(8)),
+            max_body_bytes: 1024,
+            log_tx,
+            invalidation_tx,
+            metrics: Metrics::default(),
+            ready: AtomicBool::new(true),
+        })
+    }
+
+    async fn token_handler(
+        State(counter): State<Arc<AtomicUsize>>,
+    ) -> axum::Json<serde_json::Value> {
+        counter.fetch_add(1, Ordering::SeqCst);
+        axum::Json(serde_json::json!({ "access_token": "service-token", "expires_in": 100 }))
+    }
+
+    /// Spawns a fake OAuth token endpoint that counts how many times it is hit
+    /// and returns its `.../token` URL.
+    async fn spawn_token_server(counter: Arc<AtomicUsize>) -> String {
+        let app = Router::new()
+            .route("/token", axum::routing::post(token_handler))
+            .with_state(counter);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/token")
+    }
+
+    async fn capture_headers(
+        State(sender): State<Arc<Mutex<Option<tokio::sync::oneshot::Sender<HeaderMap>>>>>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        if let Some(sender) = sender.lock().expect("capture lock poisoned").take() {
+            let _ = sender.send(headers);
+        }
+        StatusCode::NO_CONTENT
+    }
+
+    #[tokio::test]
+    async fn forwarding_replaces_adapter_credential_header_exactly_once() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let app = Router::new()
+            .fallback(capture_headers)
+            .with_state(Arc::new(Mutex::new(Some(sender))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut incoming = HeaderMap::new();
+        incoming.append("x-provider-key", "attacker-one".parse().unwrap());
+        incoming.append("x-provider-key", "attacker-two".parse().unwrap());
+        incoming.insert("authorization", "Bearer attacker".parse().unwrap());
+        incoming.insert("x-api-key", "attacker".parse().unwrap());
+        incoming.insert("x-request-id", "request-123".parse().unwrap());
+
+        let placement = gh_gateway::UpstreamCredentialPlacement::Header("x-provider-key");
+        let credential_header = upstream_credential_header(placement).unwrap();
+        let request = reqwest::Client::new().post(format!("http://{address}/capture"));
+        let request = copy_forwarded_headers(request, &incoming, &credential_header);
+        apply_upstream_credential(placement, request, "resolved-secret", &credential_header)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let captured = receiver.await.unwrap();
+        let values = captured
+            .get_all("x-provider-key")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["resolved-secret"]);
+        assert!(captured.get("authorization").is_none());
+        assert!(captured.get("x-api-key").is_none());
+        assert_eq!(captured.get("x-request-id").unwrap(), "request-123");
+    }
+
+    #[tokio::test]
+    async fn get_valid_token_serves_cache_until_refresh_at() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_token_server(counter.clone()).await;
+        let state = test_state(Some(test_oauth(url)));
+
+        let first = get_valid_token(&state).await;
+        assert_eq!(first.as_deref(), Some("service-token"));
+        // A second call well inside the refresh window must not hit the server.
+        let second = get_valid_token(&state).await;
+        assert_eq!(second, first);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(state.metrics.oauth_token_fetches.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn get_valid_token_single_flights_concurrent_refresh() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let url = spawn_token_server(counter.clone()).await;
+        let state = test_state(Some(test_oauth(url)));
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let state = state.clone();
+            handles.push(tokio::spawn(async move { get_valid_token(&state).await }));
+        }
+        for handle in handles {
+            assert_eq!(handle.await.unwrap().as_deref(), Some("service-token"));
+        }
+        // A burst against an empty cache must collapse into exactly one fetch.
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn get_valid_token_returns_none_without_oauth() {
+        let state = test_state(None);
+        assert!(get_valid_token(&state).await.is_none());
+    }
+
+    #[test]
+    fn every_control_api_hop_requires_m2m_configuration() {
+        let url = "http://control-api.test/internal".to_owned();
+        assert!(control_api_hop_configured(Some(&url), None, None, None));
+        assert!(control_api_hop_configured(None, Some(&url), None, None));
+        assert!(control_api_hop_configured(None, None, Some(&url), None));
+        assert!(control_api_hop_configured(None, None, None, Some(&url)));
+        assert!(!control_api_hop_configured(None, None, None, None));
+    }
+
+    #[test]
+    fn required_gateway_environment_errors_are_aggregated_and_redacted() {
+        let values = HashMap::from([
+            (
+                "HARNESS_GATEWAY_RESOLVER_URL".to_owned(),
+                "https://control.example/internal/gateway/resolve".to_owned(),
+            ),
+            (
+                "UNRELATED_SECRET".to_owned(),
+                "must-not-appear-in-errors".to_owned(),
+            ),
+        ]);
+        let error = validate_required_gateway_env(|name| values.get(name).cloned()).unwrap_err();
+        for name in [
+            "HARNESS_GATEWAY_TYPE",
+            "HARNESS_GATEWAY_URL",
+            "HARNESS_PROXY_OAUTH_TOKEN_URL",
+            "HARNESS_PROXY_OAUTH_CLIENT_ID",
+            "HARNESS_PROXY_OAUTH_CLIENT_SECRET",
+            "HARNESS_PROXY_OAUTH_RESOURCE",
+        ] {
+            assert!(error.contains(name), "missing {name} in {error}");
+        }
+        assert!(!error.contains("must-not-appear-in-errors"));
+    }
+
+    #[test]
+    fn selects_only_compiled_gateway_types() {
+        assert_eq!(
+            select_gateway_adapter(Some("litellm")).unwrap().kind(),
+            "litellm"
+        );
+        assert!(select_gateway_adapter(None)
+            .err()
+            .unwrap()
+            .contains("HARNESS_GATEWAY_TYPE is required"));
+        assert!(select_gateway_adapter(Some("unknown"))
+            .err()
+            .unwrap()
+            .contains("compiled: litellm"));
+        validate_gateway_adapter(gh_gateway::gateway_adapter("litellm").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn adapter_controls_upstream_target_and_credential_placement() {
+        let gateway = gh_gateway::gateway_adapter("litellm").unwrap();
+        assert_eq!(
+            upstream_url(gateway, "https://gateway.test", "/v1/responses?stream=true").unwrap(),
+            "https://gateway.test/v1/responses?stream=true"
+        );
+
+        let bearer = apply_upstream_credential(
+            gh_gateway::UpstreamCredentialPlacement::AuthorizationBearer,
+            reqwest::Client::new().get("https://gateway.test"),
+            "upstream-secret",
+            &HeaderName::from_static("authorization"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            bearer
+                .headers()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer upstream-secret"
+        );
+
+        let header = apply_upstream_credential(
+            gh_gateway::UpstreamCredentialPlacement::Header("x-provider-key"),
+            reqwest::Client::new().get("https://gateway.test"),
+            "upstream-secret",
+            &HeaderName::from_static("x-provider-key"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            header
+                .headers()
+                .get("x-provider-key")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "upstream-secret"
+        );
+        assert!(
+            upstream_credential_header(gh_gateway::UpstreamCredentialPlacement::Header(
+                "Invalid Header"
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            upstream_credential_header(gh_gateway::UpstreamCredentialPlacement::Header(
+                "x-provider-key"
+            ))
+            .unwrap(),
+            HeaderName::from_static("x-provider-key")
+        );
+        assert!(
+            upstream_credential_header(gh_gateway::UpstreamCredentialPlacement::Header(
+                "content-length"
+            ))
+            .is_err()
+        );
+        assert!(
+            upstream_credential_header(gh_gateway::UpstreamCredentialPlacement::Header(
+                "connection"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resolver_accepts_dual_wire_transition_and_rejects_ambiguity() {
+        let current: ResolveResponse = serde_json::from_value(serde_json::json!({
+            "upstream_credential": "current",
+            "user": "user@example.com"
+        }))
+        .unwrap();
+        assert_eq!(
+            resolved_upstream_credential(current.upstream_credential, current.virtual_key).unwrap(),
+            "current"
+        );
+        let legacy: ResolveResponse = serde_json::from_value(serde_json::json!({
+            "virtual_key": "legacy",
+            "user": "user@example.com"
+        }))
+        .unwrap();
+        assert_eq!(
+            resolved_upstream_credential(legacy.upstream_credential, legacy.virtual_key).unwrap(),
+            "legacy"
+        );
+        assert_eq!(
+            resolved_upstream_credential(Some("same".into()), Some("same".into())).unwrap(),
+            "same"
+        );
+        assert!(resolved_upstream_credential(Some("one".into()), Some("two".into())).is_err());
+        assert!(resolved_upstream_credential(None, None).is_err());
+        assert!(resolved_upstream_credential(Some("  ".into()), None).is_err());
+    }
+
+    #[test]
+    fn invalidation_report_dual_wires_litellm_reasons() {
+        let report = InvalidCredentialReport {
+            user_id: "user".into(),
+            credential_version: "version".into(),
+            reason: gh_gateway::InvalidCredentialReason::NotFound,
+            classification: gh_gateway::InvalidCredentialReason::NotFound
+                .legacy_classification()
+                .map(str::to_owned),
+        };
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["reason"], "not_found");
+        assert_eq!(value["classification"], "token_not_found_in_db");
+
+        let revoked = InvalidCredentialReport {
+            user_id: "user".into(),
+            credential_version: "version".into(),
+            reason: gh_gateway::InvalidCredentialReason::Revoked,
+            classification: None,
+        };
+        assert!(serde_json::to_value(revoked)
+            .unwrap()
+            .get("classification")
+            .is_none());
+    }
+
+    #[test]
+    fn classifies_only_litellm_invalid_key_errors() {
+        let gateway = gh_gateway::gateway_adapter("litellm").unwrap();
+        assert_eq!(
+            gateway.classify_invalid_credential(
+                StatusCode::UNAUTHORIZED.as_u16(),
+                br#"{"error":{"type":"token_not_found_in_db","code":"401"}}"#,
+            ),
+            Some(gh_gateway::InvalidCredentialReason::NotFound)
+        );
+        assert_eq!(
+            gateway.classify_invalid_credential(
+                StatusCode::UNAUTHORIZED.as_u16(),
+                br#"{"error":{"message":"Authentication Error, Key is blocked. Update via /key/unblock"}}"#,
+            ),
+            Some(gh_gateway::InvalidCredentialReason::Blocked)
+        );
+        assert_eq!(
+            gateway.classify_invalid_credential(
+                StatusCode::UNAUTHORIZED.as_u16(),
+                br#"{"error":{"type":"auth_error","message":"model is forbidden"}}"#,
+            ),
+            None
+        );
+        assert_eq!(
+            gateway.classify_invalid_credential(
+                StatusCode::FORBIDDEN.as_u16(),
+                br#"{"error":{"type":"token_not_found_in_db"}}"#,
+            ),
+            None
+        );
+    }
+}

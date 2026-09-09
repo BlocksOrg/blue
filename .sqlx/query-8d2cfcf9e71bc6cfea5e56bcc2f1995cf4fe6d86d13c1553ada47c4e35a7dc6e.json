@@ -1,0 +1,128 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id,c.instance_id,c.hostname,c.client_version,c.platform,c.architecture,c.config_revision,c.applied,c.files_ok, c.harnesses,c.packages,c.error,c.revision_matches,c.status_reasons,c.first_seen_at,c.last_seen_at,u.email AS user_email FROM public.client_status c JOIN users u ON u.id=c.user_id WHERE c.organization_id=$1 AND ($2::uuid IS NULL OR c.user_id=$2) AND ($3::text IS NULL OR EXISTS (SELECT 1 FROM jsonb_array_elements( CASE WHEN jsonb_typeof(c.harnesses)='array' THEN c.harnesses ELSE '[]'::jsonb END) entry WHERE CASE WHEN jsonb_typeof(entry)='string' THEN entry #>> '{}' ELSE entry->>'name' END=$3)) AND ($4::text IS NULL OR ($4='current' AND c.config_revision=$8 AND c.revision_matches IS TRUE) OR ($4='outdated' AND c.config_revision IS DISTINCT FROM $8 AND c.revision_matches IS DISTINCT FROM FALSE) OR ($4='attention' AND c.revision_matches IS FALSE)) AND ($5::text IS NULL OR lower(c.instance_id) LIKE $5 ESCAPE E'\\\\' OR lower(coalesce(c.hostname,'')) LIKE $5 ESCAPE E'\\\\' OR lower(u.email) LIKE $5 ESCAPE E'\\\\') AND ($6::timestamptz IS NULL OR c.last_seen_at >= $6) AND ($7::timestamptz IS NULL OR c.last_seen_at < $7) ORDER BY CASE WHEN $9='last_seen_asc' THEN c.last_seen_at END ASC, CASE WHEN $9='last_seen_asc' THEN c.id END ASC, CASE WHEN $9='last_seen_desc' THEN c.last_seen_at END DESC, CASE WHEN $9='last_seen_desc' THEN c.id END DESC OFFSET $10 LIMIT $11",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "instance_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "hostname",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "client_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "platform",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "architecture",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "config_revision",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "applied",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "files_ok",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "harnesses",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "packages",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "revision_matches",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 13,
+        "name": "status_reasons",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 14,
+        "name": "first_seen_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "user_email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8d2cfcf9e71bc6cfea5e56bcc2f1995cf4fe6d86d13c1553ada47c4e35a7dc6e"
+}

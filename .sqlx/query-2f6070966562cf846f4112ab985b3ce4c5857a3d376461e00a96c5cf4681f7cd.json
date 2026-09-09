@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select count(*) as \"count!\" from scim_user_resources s join users u on u.id=s.user_id where s.organization_id=$1 and u.status<>'removed' and ($2::text is null or ($2='userName' and lower(s.user_name)=lower($3)) or ($2='externalId' and s.external_id=$3))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2f6070966562cf846f4112ab985b3ce4c5857a3d376461e00a96c5cf4681f7cd"
+}

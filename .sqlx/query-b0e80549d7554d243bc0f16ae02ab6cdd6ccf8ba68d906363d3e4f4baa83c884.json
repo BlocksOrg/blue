@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select count(*) as \"count!\" from gateway_request_logs l where l.organization_id=$1 and l.expires_at>now() and ($2::uuid is null or l.user_id=$2) and ($3::text is null or l.profile_id=$3) and ($4::text is null or l.model=$4) and ($5::text is null or l.harness=$5) and ($6::text is null or l.result=$6) and ($7::text is null or lower(l.path) like $7 escape E'\\\\' or lower(coalesce(l.model,'')) like $7 escape E'\\\\' or lower(coalesce(l.repository,'')) like $7 escape E'\\\\' or lower(coalesce(l.branch,'')) like $7 escape E'\\\\' or lower(coalesce(l.run_id,'')) like $7 escape E'\\\\' or lower(coalesce(l.profile_name,'')) like $7 escape E'\\\\') and ($8::timestamptz is null or l.occurred_at >= $8) and ($9::timestamptz is null or l.occurred_at < $9)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b0e80549d7554d243bc0f16ae02ab6cdd6ccf8ba68d906363d3e4f4baa83c884"
+}

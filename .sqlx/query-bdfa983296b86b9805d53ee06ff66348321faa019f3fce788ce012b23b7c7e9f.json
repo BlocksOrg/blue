@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,email FROM users WHERE organization_id=$1 AND active=true AND id<>$2 AND ($3::text IS NULL OR lower(email) LIKE $3 ESCAPE E'\\\\') ORDER BY lower(email),id LIMIT 10",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "bdfa983296b86b9805d53ee06ff66348321faa019f3fce788ce012b23b7c7e9f"
+}

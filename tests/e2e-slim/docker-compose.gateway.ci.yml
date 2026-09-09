@@ -1,0 +1,12 @@
+# CI buildx cache for the gateway overlay's FULL deployment image. Reads from the
+# full e2e suite's deployment scope (so the shared cargo-chef cook layers hit
+# warm) and writes to its own gateway scope so it never evicts the slim job's
+# cache. Only included in CI (type=gha requires the GitHub Actions cache backend).
+services:
+  control-api:
+    build:
+      cache_from:
+        - type=gha,scope=blue-e2e-slim-gateway
+        - type=gha,scope=blue-e2e-deployment
+      cache_to:
+        - type=gha,mode=max,scope=blue-e2e-slim-gateway

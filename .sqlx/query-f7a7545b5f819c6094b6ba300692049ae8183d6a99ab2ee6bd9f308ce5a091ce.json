@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT harness as \"harness!\" FROM ( SELECT CASE WHEN jsonb_typeof(entry)='string' THEN entry #>> '{}' ELSE entry->>'name' END AS harness FROM public.client_status c CROSS JOIN LATERAL jsonb_array_elements( CASE WHEN jsonb_typeof(c.harnesses)='array' THEN c.harnesses ELSE '[]'::jsonb END) entry WHERE c.organization_id=$1 ) available WHERE harness IS NOT NULL AND harness <> '' ORDER BY harness",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "harness!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f7a7545b5f819c6094b6ba300692049ae8183d6a99ab2ee6bd9f308ce5a091ce"
+}

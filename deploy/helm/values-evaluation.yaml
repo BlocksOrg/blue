@@ -1,0 +1,10 @@
+blue:
+  production: false
+  existingSecret: blue-evaluation-runtime
+
+image:
+  tag: latest
+  digest: ""
+
+networkPolicy:
+  enabled: false

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: blue
+description: Self-hosted governance metaharness control plane
+type: application
+version: 0.1.1
+appVersion: "0.1.1"
+home: https://github.com/BlocksOrg/blue
+sources:
+  - https://github.com/BlocksOrg/blue

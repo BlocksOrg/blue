@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"invitation\" set status='canceled' where lower(email)=lower($1) and status='pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c903d78bc1b25c8f4d5f269b2c3194496e4b211d3916d6951a04a4f9cac970a1"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO governance_package_audiences (revision,package_id,scope) VALUES ($1,$2,$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "39ffa91ef27e4fac8f41f0929594ccffb3a23af5e5c460cf4a32f1729830e11f"
+}

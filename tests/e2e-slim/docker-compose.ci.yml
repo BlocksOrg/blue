@@ -1,0 +1,11 @@
+# CI overlay: GitHub Actions buildx cache. Distinct scopes from the full e2e
+# suite so the two never evict each other. Also reads from the full suite's
+# deployment scope so the shared cargo-chef cook layers hit warm.
+services:
+  control-api:
+    build:
+      cache_from:
+        - type=gha,scope=blue-e2e-slim-control-api
+        - type=gha,scope=blue-e2e-deployment
+      cache_to:
+        - type=gha,mode=max,scope=blue-e2e-slim-control-api

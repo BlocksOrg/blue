@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "blue.fullname" . }}-worker
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.components.worker.replicas }}
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      {{- include "blue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: {{ include "blue.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "blue.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["control-api"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - { name: BLUE_HEALTHCHECK_COMPONENT, value: control-api }
+            - { name: HARNESS_RUN_BACKGROUND_JOBS, value: "true" }
+            - { name: HARNESS_INTERNAL_LISTEN, value: "127.0.0.1:8082" }
+            # The worker's internal listener is unused and loopback-only.
+            - { name: HARNESS_INTERNAL_TRANSPORT_MODE, value: insecure-http }
+            - name: HARNESS_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_DATABASE_URL, optional: false }
+            {{- if .Values.blue.enableInferenceProxy }}
+            - name: HARNESS_GATEWAY_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_GATEWAY_ENCRYPTION_KEY, optional: false }
+            {{- end }}
+            {{- range $name, $value := .Values.blue.env }}
+            - { name: {{ $name }}, value: {{ $value | quote }} }
+            {{- end }}
+          envFrom: [{ secretRef: { name: {{ .Values.blue.existingSecret }} } }]
+          ports: [{ name: worker-health, containerPort: 8080 }]
+          readinessProbe: { httpGet: { path: /health/worker, port: worker-health }, periodSeconds: 10, timeoutSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health, port: worker-health }, periodSeconds: 30, timeoutSeconds: 10 }
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
+          {{- with .Values.blue.config.existingConfigMap }}
+          volumeMounts:
+            - { name: blue-config, mountPath: {{ $.Values.blue.config.mountPath }}, subPath: {{ $.Values.blue.config.key }}, readOnly: true }
+          {{- end }}
+      {{- with .Values.blue.config.existingConfigMap }}
+      volumes:
+        - name: blue-config
+          configMap:
+            name: {{ . }}
+            items: [{ key: {{ $.Values.blue.config.key }}, path: {{ $.Values.blue.config.key }} }]
+      {{- end }}

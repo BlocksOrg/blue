@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update scim_user_resources set updated_at=now() where user_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7411f097ed4d181f8c68ddc16c51eba89185ba972090905d69452827c3bca1a0"
+}

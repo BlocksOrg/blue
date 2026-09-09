@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.user_id,s.organization_id,a.object_key,a.retention_expires_at FROM captured_sessions s JOIN session_artifacts a ON a.id=s.current_artifact_id WHERE s.id=$1 AND a.status='complete'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "object_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "retention_expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "780cf4ec4c7581c6446c8734f762ea16fec4556245d2557a492cc7227dff348b"
+}

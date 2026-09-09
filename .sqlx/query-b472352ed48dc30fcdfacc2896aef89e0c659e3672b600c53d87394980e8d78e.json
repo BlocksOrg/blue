@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id,u.email FROM captured_sessions s JOIN users u ON u.id=s.user_id WHERE s.organization_id=$1 AND s.current_artifact_id IS NOT NULL AND ($2::uuid IS NULL OR s.user_id=$2 OR s.sharing_mode='workspace' OR EXISTS (SELECT 1 FROM captured_session_grants g JOIN users recipient ON recipient.id=g.user_id WHERE g.captured_session_id=s.id AND g.user_id=$2 AND recipient.active=true)) AND ($3::text IS NULL OR lower(u.email) LIKE $3 ESCAPE E'\\\\') GROUP BY u.id,u.email ORDER BY (u.id=$4) DESC,u.email LIMIT 10",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b472352ed48dc30fcdfacc2896aef89e0c659e3672b600c53d87394980e8d78e"
+}

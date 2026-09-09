@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://docs.bluee.sh
+    about: Install, deploy, and configuration guides.
+  - name: Report a security vulnerability
+    url: https://github.com/BlocksOrg/blue/security/policy
+    about: Report vulnerabilities privately — do not open a public issue.

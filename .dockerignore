@@ -1,0 +1,14 @@
+.git
+.next
+node_modules
+**/.next
+**/node_modules
+target
+**/target
+**/.terraform
+*.tfplan
+apps/dashboard/.next
+apps/dashboard/node_modules
+deploy/.env
+tests/e2e/artifacts
+*.tsbuildinfo

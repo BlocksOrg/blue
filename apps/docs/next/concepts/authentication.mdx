@@ -1,0 +1,50 @@
+---
+title: "Authentication and authorization"
+description: "Learn how dashboard sessions, CLI device authorization, API scopes, and gateway identities are separated."
+icon: "key"
+---
+
+The dashboard and CLI authenticate differently. Better Auth owns both flows, but a browser session cookie is never reused as a CLI credential.
+
+## Dashboard users
+
+The workspace runs in either local password mode or managed OIDC mode. The login page asks for email first, then either requests a password or redirects to the configured identity provider. Better Auth issues HTTP-only browser sessions and publishes signing keys for API token verification. OIDC mode permits only active, SCIM-provisioned identities plus the protected password-based bootstrap administrator.
+
+## CLI device authorization
+
+```mermaid
+sequenceDiagram
+  participant CLI
+  participant Auth as Better Auth
+  participant Browser
+  participant API as Control API
+  CLI->>Auth: Request device code
+  Auth-->>CLI: User code and temporary browser URL
+  CLI->>Browser: Open temporary link automatically
+  Browser->>Auth: Confirm matching code and approve
+  CLI->>Auth: Poll token endpoint
+  Auth-->>CLI: Access and refresh tokens
+  CLI->>API: Audience-bound bearer token
+  API-->>CLI: Authorized response
+```
+
+The browser URL contains an opaque, short-lived token rather than the user code. The page displays the code read-only for comparison with the terminal and offers explicit authorize and deny actions. If the default browser cannot be launched, the CLI prints the link and continues polling.
+
+Access tokens expire after 15 minutes. Refresh tokens rotate and are stored with the session in `~/.config/blue/session.json` using owner-only permissions. `blue logout` attempts remote revocation and always removes the local token file.
+
+## Scopes
+
+| Scope | Purpose |
+| --- | --- |
+| `governance:read` | Read personalized governance policy and gateway key metadata |
+| `session:write` | Presign and complete raw-session uploads |
+| `client-status:write` | Report installed harnesses and reconciliation health |
+| `gateway:resolve` | Resolve pseudotokens for the inference proxy's internal gateway requests |
+
+Administrative endpoints additionally require an administrator role in the same organization. Session visibility is organization-scoped; non-admin users see only their own captured sessions.
+
+User-management operations invalidate browser, OAuth, and device credentials when roles or access states change. The Control API also records a token cutoff and rejects previously issued bearer tokens, so an administrator claim cannot remain usable until its normal expiry. See [Manage users and invitations](/next/admin/user-management).
+
+## Gateway identity
+
+Gateway access matches the authenticated governance user to LiteLLM by case-insensitive email. The deployment provisions one managed key per user; a missing LiteLLM user produces a provisioning error. Run `blue gateway` to provision or reconcile it.

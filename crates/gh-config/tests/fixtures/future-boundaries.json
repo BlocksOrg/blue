@@ -1,0 +1,18 @@
+[
+  {
+    "harness": "kimi",
+    "candidate": "native home migration",
+    "paths_to_test": [".kimi/config.toml", ".kimi-code/config.toml", ".kimi-code/mcp.json"],
+    "source": "https://github.com/MoonshotAI/kimi-code/releases",
+    "production_boundary": null,
+    "required_evidence": "Pin releases on both sides and establish which config, session, and hook outputs Blue can safely emit. Current production behavior remains frozen in v0_0_0."
+  },
+  {
+    "harness": "opencode",
+    "candidate": "configuration, skills, and plugin directory transitions",
+    "paths_to_test": [".config/opencode/opencode.json", ".config/opencode/skills", ".config/opencode/plugins"],
+    "source": "https://github.com/anomalyco/opencode/releases",
+    "production_boundary": null,
+    "required_evidence": "Pin schema and discovery fixtures before defining another production interval. Release chronology alone does not establish a Blue output boundary."
+  }
+]

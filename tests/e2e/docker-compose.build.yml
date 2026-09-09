@@ -1,0 +1,14 @@
+services:
+  blue:
+    build:
+      additional_contexts:
+        blue-base: service:blue-base
+      args:
+        BLUE_BASE_IMAGE: blue-base
+
+  runner:
+    build:
+      additional_contexts:
+        blue-rust: service:blue-rust
+      args:
+        BLUE_E2E_RUST_IMAGE: blue-rust

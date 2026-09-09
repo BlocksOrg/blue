@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE captured_sessions SET current_artifact_id=$1,updated_at=now() WHERE id=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dacfe66d74ea8c31eb191958410d11ac668f59a6d79394efd23ab9b02beb2dd5"
+}

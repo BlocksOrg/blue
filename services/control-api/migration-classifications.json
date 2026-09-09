@@ -1,0 +1,10 @@
+{
+  "baseline_through": 30,
+  "migrations": [
+    {
+      "version": 31,
+      "classification": "expand",
+      "raises_compatibility_floor": false
+    }
+  ]
+}

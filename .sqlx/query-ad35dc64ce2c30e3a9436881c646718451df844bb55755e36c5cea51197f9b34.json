@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into users(id,organization_id,subject,email,role) values($1,$2,$3,$4,'owner')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad35dc64ce2c30e3a9436881c646718451df844bb55755e36c5cea51197f9b34"
+}

@@ -1,0 +1,9 @@
+Blue is installed as {{ include "blue.fullname" . }}.
+Dashboard: {{ .Values.blue.publicUrls.dashboard }}
+Control API: {{ .Values.blue.publicUrls.controlApi }}
+{{- if .Values.blue.enableInferenceProxy }}
+Inference proxy: {{ .Values.blue.publicUrls.inferenceProxy }}
+{{- end }}
+{{- if not .Values.blue.existingSecret }}
+WARNING: blue.existingSecret is empty. Production deployments must provide runtime secrets.
+{{- end }}

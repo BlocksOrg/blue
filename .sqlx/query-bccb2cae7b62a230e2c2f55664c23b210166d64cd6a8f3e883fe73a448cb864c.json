@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"member\" set role=$1 where \"userId\"=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bccb2cae7b62a230e2c2f55664c23b210166d64cd6a8f3e883fe73a448cb864c"
+}

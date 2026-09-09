@@ -1,0 +1,180 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "blue.fullname" . }}-control-api
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.components.controlApi.replicas }}
+  selector:
+    matchLabels:
+      {{- include "blue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: control-api
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: control-api
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "blue.serviceAccountName" . }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: control-api
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.blue.provisionerExecutable.enabled }}
+      initContainers:
+        - name: provisioner-executable
+          image: {{ include "blue.provisionerExecutableImage" . | quote }}
+          imagePullPolicy: {{ .Values.blue.provisionerExecutable.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          command: ["/bin/sh", "-ec"]
+          args:
+            - >-
+              cp /executable/provisioner /provisioner/provisioner &&
+              echo "{{ .Values.blue.provisionerExecutable.executableSha256 }}  /provisioner/provisioner" | sha256sum -c - &&
+              chmod 0555 /provisioner/provisioner
+          volumeMounts:
+            - name: provisioner-executable
+              mountPath: /provisioner
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: control-api
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "blue.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["control-api"]
+          env:
+            - name: BLUE_ENABLE_INFERENCE_PROXY
+              value: "false"
+            - name: BLUE_HEALTHCHECK_COMPONENT
+              value: control-api
+            - name: HARNESS_RUN_BACKGROUND_JOBS
+              value: "false"
+            - name: HARNESS_INTERNAL_LISTEN
+              value: 0.0.0.0:8082
+            {{- if .Values.blue.enableInferenceProxy }}
+            - { name: HARNESS_GATEWAY_TYPE, value: {{ required "blue.gatewayType is required when blue.enableInferenceProxy=true" .Values.blue.gatewayType | quote }} }
+            - { name: HARNESS_INTERNAL_TRANSPORT_MODE, value: {{ .Values.blue.internalTransport.mode | quote }} }
+            {{- if eq .Values.blue.internalTransport.mode "mtls" }}
+            - { name: HARNESS_INTERNAL_TLS_CERT_FILE, value: /var/run/blue/internal-tls/tls.crt }
+            - { name: HARNESS_INTERNAL_TLS_KEY_FILE, value: /var/run/blue/internal-tls/tls.key }
+            - { name: HARNESS_INTERNAL_TLS_CLIENT_CA_FILE, value: /var/run/blue/internal-tls/ca.crt }
+            {{- end }}
+            {{- end }}
+            - name: BETTER_AUTH_URL
+              value: {{ .Values.blue.publicUrls.dashboard | quote }}
+            - name: HARNESS_AUTH_PUBLIC_URL
+              value: {{ .Values.blue.publicUrls.dashboard | quote }}
+            - name: CONTROL_API_PUBLIC_URL
+              value: {{ .Values.blue.publicUrls.controlApi | quote }}
+            {{- if .Values.blue.enableInferenceProxy }}
+            - name: HARNESS_INFERENCE_PROXY_URL
+              value: {{ .Values.blue.publicUrls.inferenceProxy | quote }}
+            - name: HARNESS_INFERENCE_PROXY_HEALTH_URL
+              value: http://{{ include "blue.fullname" . }}-inference-proxy:{{ .Values.service.ports.inferenceProxy }}
+            - name: HARNESS_INTERNAL_ALLOWED_CLIENT_ID
+              value: {{ .Values.blue.inferenceProxyClientId | quote }}
+            {{- end }}
+            - name: CONTROL_API_URL
+              value: http://{{ include "blue.fullname" . }}-control-api:{{ .Values.service.ports.controlApi }}
+            - name: DOCS_URL
+              value: {{ .Values.blue.publicUrls.docs | quote }}
+            - name: HARNESS_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_DATABASE_URL, optional: false }
+            {{- if .Values.blue.enableInferenceProxy }}
+            - name: HARNESS_GATEWAY_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_GATEWAY_ENCRYPTION_KEY, optional: false }
+            {{- end }}
+            {{- range $name, $value := .Values.blue.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          envFrom: [{ secretRef: { name: {{ .Values.blue.existingSecret }} } }]
+          ports:
+            - { name: control-api, containerPort: 8080 }
+            - { name: gateway-internal, containerPort: 8082 }
+          startupProbe:
+            exec: { command: ["/usr/local/bin/blue-healthcheck"] }
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            exec: { command: ["/usr/local/bin/blue-healthcheck"] }
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /ready, port: control-api }
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.controlApi | nindent 12 }}
+          {{- if or .Values.blue.config.existingConfigMap .Values.blue.provisionerExecutable.enabled (and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls")) }}
+          volumeMounts:
+            {{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") }}
+            - { name: internal-tls, mountPath: /var/run/blue/internal-tls, readOnly: true }
+            {{- end }}
+            {{- with .Values.blue.config.existingConfigMap }}
+            - name: blue-config
+              mountPath: {{ $.Values.blue.config.mountPath }}
+              subPath: {{ $.Values.blue.config.key }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.blue.provisionerExecutable.enabled }}
+            - name: provisioner-executable
+              mountPath: /var/run/blue/provisioner
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.blue.config.existingConfigMap .Values.blue.provisionerExecutable.enabled (and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls")) }}
+      volumes:
+        {{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") }}
+        - name: internal-tls
+          secret: { secretName: {{ .Values.blue.internalTransport.serverSecret | quote }} }
+        {{- end }}
+        {{- with .Values.blue.config.existingConfigMap }}
+        - name: blue-config
+          configMap:
+            name: {{ . }}
+            items:
+              - key: {{ $.Values.blue.config.key }}
+                path: {{ $.Values.blue.config.key }}
+        {{- end }}
+        {{- if .Values.blue.provisionerExecutable.enabled }}
+        - name: provisioner-executable
+          emptyDir: {}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

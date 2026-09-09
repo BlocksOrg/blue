@@ -1,0 +1,16 @@
+[package]
+name = "gh-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gh-common = { workspace = true }
+gh-service = { workspace = true }
+gh-config = { workspace = true }
+gh-harness = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+semver = { workspace = true }

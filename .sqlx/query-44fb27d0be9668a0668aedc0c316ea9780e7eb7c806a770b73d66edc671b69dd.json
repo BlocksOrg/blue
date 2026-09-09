@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,source_ref,resolved_commit,sha256,size_bytes FROM package_artifacts WHERE organization_id=$1 AND connection_id=$2 AND repository=$3 AND resolved_commit=$4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_ref",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "resolved_commit",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "sha256",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "size_bytes",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "44fb27d0be9668a0668aedc0c316ea9780e7eb7c806a770b73d66edc671b69dd"
+}

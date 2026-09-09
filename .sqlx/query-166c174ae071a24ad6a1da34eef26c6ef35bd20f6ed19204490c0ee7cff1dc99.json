@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM public.client_status WHERE id=$1 AND organization_id=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "166c174ae071a24ad6a1da34eef26c6ef35bd20f6ed19204490c0ee7cff1dc99"
+}

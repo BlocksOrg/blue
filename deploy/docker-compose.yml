@@ -1,0 +1,219 @@
+# Local stack. The control API always uses PostgreSQL; MinIO is its local
+# S3-compatible raw-session blob backend. LiteLLM remains a separate profile.
+services:
+  migrate:
+    image: blue-deployment:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["migrate"]
+    environment:
+      HARNESS_DATABASE_URL: postgres://harness:harness@postgres-control:5432/governance
+    depends_on:
+      postgres-control: { condition: service_healthy }
+
+  control-api:
+    image: blue-deployment:local
+    pull_policy: never
+    command: ["control-api"]
+    environment:
+      BLUE_ENVIRONMENT: development
+      HARNESS_DATABASE_URL: postgres://harness:harness@postgres-control:5432/governance
+      BLUE_CONFIG_FILE: /etc/blue/blue.yaml
+      BLUE_CONFIG_OVERLAY_FILES: ${BLUE_CONFIG_OVERLAY_FILES:-}
+      BLUE_HEALTHCHECK_COMPONENT: control-api
+      HARNESS_BOOTSTRAP_ADMIN_EMAIL: ${HARNESS_BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      HARNESS_AUTH_SESSION_URL: http://dashboard:3000/api/auth/get-session
+      HARNESS_AUTH_PUBLIC_URL: http://127.0.0.1:3000
+      HARNESS_AUTH_JWKS_URL: http://dashboard:3000/api/auth/jwks
+      HARNESS_AUTH_ISSUER: http://127.0.0.1:3000/api/auth
+      HARNESS_AUTH_AUDIENCE: http://127.0.0.1:8080
+      HARNESS_OAUTH_CLIENT_ID: ${HARNESS_OAUTH_CLIENT_ID:-blue-cli}
+      HARNESS_AUTH_MODE: ${HARNESS_AUTH_MODE:-password}
+      HARNESS_SCIM_BEARER_TOKEN: ${HARNESS_SCIM_BEARER_TOKEN:-}
+      HARNESS_SCIM_GROUP_ROLE_MAPPINGS: ${HARNESS_SCIM_GROUP_ROLE_MAPPINGS:-}
+      HARNESS_BLOB_BUCKET: raw-sessions
+      HARNESS_PACKAGE_BUCKET: package-artifacts
+      HARNESS_BITBUCKET_TOKEN: ${HARNESS_BITBUCKET_TOKEN:-}
+      HARNESS_BLOB_REGION: us-east-1
+      HARNESS_BLOB_ENDPOINT: http://minio:9000
+      HARNESS_BLOB_PUBLIC_ENDPOINT: http://127.0.0.1:9000
+      HARNESS_BLOB_FORCE_PATH_STYLE: "true"
+      HARNESS_INTERNAL_ALLOWED_CLIENT_ID: ${HARNESS_INFERENCE_PROXY_CLIENT_ID:-blue-inference-proxy}
+      BLUE_ALLOW_INSECURE_DEV: "true"
+      HARNESS_INTERNAL_TRANSPORT_MODE: insecure-http
+      HARNESS_GATEWAY_REQUEST_LOG_RETENTION_DAYS: ${HARNESS_GATEWAY_REQUEST_LOG_RETENTION_DAYS:-30}
+      # Gateway-mode runtime, consumed only when blue.yaml sets `gateway.type`
+      # (paired with the `gateway` profile that runs the inference-proxy). In a
+      # governance-only run — the default blue.yaml has no gateway block — the
+      # control-api ignores every one of these, so leave them empty to keep the
+      # container env honest. They default to the working values for
+      # an explicit gateway-overlay invocation; see the local Compose docs.
+      HARNESS_INFERENCE_PROXY_URL: ${HARNESS_INFERENCE_PROXY_URL:-http://127.0.0.1:8081}
+      HARNESS_INFERENCE_PROXY_HEALTH_URL: ${HARNESS_INFERENCE_PROXY_HEALTH_URL:-http://inference-proxy:8081}
+      HARNESS_GATEWAY_URL: ${HARNESS_GATEWAY_URL:-http://host.docker.internal:4001}
+      HARNESS_LITELLM_ADMIN_KEY: ${LITELLM_MASTER_KEY:-}
+      HARNESS_GATEWAY_ENCRYPTION_KEY: ${HARNESS_GATEWAY_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      HARNESS_LISTEN: 0.0.0.0:8080
+      HARNESS_INTERNAL_LISTEN: 0.0.0.0:8082
+    volumes:
+      - ./blue.yaml:/etc/blue/blue.yaml:ro
+      - ./blue.gateway.yaml:/etc/blue/blue.gateway.yaml:ro
+      - ./blue.capture.yaml:/etc/blue/blue.capture.yaml:ro
+      - ./local-gateway-provisioner.mjs:/etc/blue/local-gateway-provisioner.mjs:ro
+    ports: ["8080:8080"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      postgres-control: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+
+  dashboard:
+    build:
+      context: ../apps/dashboard
+      args:
+        BLUE_DEPLOYMENT_VERSION: ${BLUE_DEPLOYMENT_VERSION:-0.1.0}
+    environment:
+      BLUE_ENVIRONMENT: development
+      CONTROL_API_URL: http://control-api:8080
+      CONTROL_API_PUBLIC_URL: http://127.0.0.1:8080
+      AUTH_DATABASE_URL: postgres://harness:harness@postgres-control:5432/governance
+      BETTER_AUTH_URL: http://127.0.0.1:3000
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-local-development-secret-change-before-production}
+      HARNESS_BOOTSTRAP_ADMIN_EMAIL: ${HARNESS_BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      HARNESS_BOOTSTRAP_ADMIN_PASSWORD: ${HARNESS_BOOTSTRAP_ADMIN_PASSWORD:-change-me-in-production}
+      HARNESS_OAUTH_CLIENT_ID: blue-cli
+      # Confidential OAuth client the inference proxy uses for M2M auth. The
+      # secret must match the proxy's HARNESS_PROXY_OAUTH_CLIENT_SECRET.
+      HARNESS_INFERENCE_PROXY_CLIENT_ID: ${HARNESS_INFERENCE_PROXY_CLIENT_ID:-blue-inference-proxy}
+      HARNESS_PROXY_OAUTH_CLIENT_SECRET: ${HARNESS_PROXY_OAUTH_CLIENT_SECRET:-local-inference-proxy-oauth-secret}
+      HARNESS_AUTH_MODE: ${HARNESS_AUTH_MODE:-password}
+      HARNESS_OIDC_PROVIDER_ID: ${HARNESS_OIDC_PROVIDER_ID:-okta}
+      HARNESS_OIDC_PROVIDER_NAME: ${HARNESS_OIDC_PROVIDER_NAME:-Okta}
+      HARNESS_OIDC_ISSUER: ${HARNESS_OIDC_ISSUER:-}
+      HARNESS_OIDC_CLIENT_ID: ${HARNESS_OIDC_CLIENT_ID:-}
+      HARNESS_OIDC_CLIENT_SECRET: ${HARNESS_OIDC_CLIENT_SECRET:-}
+      DOCS_URL: ${HARNESS_DOCS_URL:-http://127.0.0.1:3001}
+    ports: ["3000:3000"]
+    depends_on:
+      control-api: { condition: service_started }
+      docs: { condition: service_healthy }
+
+  docs:
+    build:
+      context: ../apps/docs
+    ports: ["3001:3000"]
+    volumes: ["mintlify-cache:/root/.mintlify"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  website:
+    build:
+      context: ../apps/website
+    ports: ["3002:3000"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  postgres-control:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: harness
+      POSTGRES_PASSWORD: harness
+      POSTGRES_DB: governance
+    ports: ["5433:5432"]
+    volumes: ["postgres-control-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harness -d governance"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio-data:/data"]
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do sleep 1; done;
+        mc mb --ignore-existing local/raw-sessions;
+        mc mb --ignore-existing local/package-artifacts
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+
+  inference-proxy:
+    profiles: ["gateway"]
+    restart: unless-stopped
+    image: blue-deployment:local
+    pull_policy: never
+    command: ["inference-proxy"]
+    environment:
+      BLUE_ENVIRONMENT: development
+      BLUE_HEALTHCHECK_COMPONENT: inference-proxy
+      HARNESS_GATEWAY_TYPE: ${HARNESS_GATEWAY_TYPE:-litellm}
+      HARNESS_GATEWAY_URL: ${HARNESS_GATEWAY_URL:-http://host.docker.internal:4001}
+      HARNESS_GATEWAY_RESOLVER_URL: http://control-api:8082/internal/gateway/resolve
+      HARNESS_GATEWAY_EVENT_URL: http://control-api:8082/internal/gateway/events
+      HARNESS_GATEWAY_CREDENTIAL_INVALID_URL: http://control-api:8082/internal/gateway/credential-invalid
+      HARNESS_GATEWAY_LOG_URL: http://control-api:8082/internal/gateway/request-logs
+      # OAuth2 client-credentials (M2M) auth to the Control API. The token URL is
+      # better-auth on the dashboard; the resource is the Control API audience.
+      HARNESS_PROXY_OAUTH_TOKEN_URL: http://dashboard:3000/api/auth/oauth2/token
+      HARNESS_PROXY_OAUTH_CLIENT_ID: ${HARNESS_INFERENCE_PROXY_CLIENT_ID:-blue-inference-proxy}
+      HARNESS_PROXY_OAUTH_CLIENT_SECRET: ${HARNESS_PROXY_OAUTH_CLIENT_SECRET:-local-inference-proxy-oauth-secret}
+      HARNESS_PROXY_OAUTH_SCOPE: gateway:resolve
+      HARNESS_PROXY_OAUTH_RESOURCE: http://127.0.0.1:8080
+      BLUE_ALLOW_INSECURE_DEV: "true"
+      HARNESS_INTERNAL_TRANSPORT_MODE: insecure-http
+      HARNESS_LISTEN: 0.0.0.0:8081
+    ports: ["8081:8081"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [control-api, dashboard]
+
+  litellm:
+    profiles: ["legacy-gateway"]
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--port", "4000"]
+    environment:
+      DATABASE_URL: postgres://harness:harness@postgres-litellm:5432/litellm
+      REDIS_URL: redis://redis:6379/0
+    ports: ["4000:4000"]
+    depends_on: [postgres-litellm, redis]
+
+  postgres-litellm:
+    profiles: ["legacy-gateway"]
+    image: postgres:16
+    environment:
+      POSTGRES_USER: harness
+      POSTGRES_PASSWORD: harness
+      POSTGRES_DB: litellm
+    volumes: ["postgres-litellm-data:/var/lib/postgresql/data"]
+
+  redis:
+    profiles: ["legacy-gateway"]
+    image: redis:7
+
+volumes:
+  postgres-control-data:
+  postgres-litellm-data:
+  minio-data:
+  mintlify-cache:

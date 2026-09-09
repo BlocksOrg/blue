@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from auth.\"session\" where \"userId\"=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ce3c08e0320bc23623d9bf19635c385d1b5b9402d5f3c94eb5ab86d50e185253"
+}

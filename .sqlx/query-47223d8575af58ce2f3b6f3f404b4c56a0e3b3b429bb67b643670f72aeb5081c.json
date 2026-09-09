@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"invitation\" set \"expiresAt\"=now()+interval '24 hours' where id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47223d8575af58ce2f3b6f3f404b4c56a0e3b3b429bb67b643670f72aeb5081c"
+}

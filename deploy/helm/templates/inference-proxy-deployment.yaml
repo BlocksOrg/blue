@@ -1,0 +1,90 @@
+{{- if .Values.blue.enableInferenceProxy }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "blue.fullname" . }}-inference-proxy
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference-proxy
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.components.inferenceProxy.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "blue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: inference-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: inference-proxy
+    spec:
+      serviceAccountName: {{ include "blue.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 600
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: inference-proxy
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: inference-proxy
+          image: {{ include "blue.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["inference-proxy"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - { name: BLUE_HEALTHCHECK_COMPONENT, value: inference-proxy }
+            - { name: HARNESS_GATEWAY_TYPE, value: {{ required "blue.gatewayType is required when blue.enableInferenceProxy=true" .Values.blue.gatewayType | quote }} }
+            - { name: HARNESS_INTERNAL_TRANSPORT_MODE, value: {{ .Values.blue.internalTransport.mode | quote }} }
+            - name: HARNESS_GATEWAY_RESOLVER_URL
+              value: {{ ternary "https" "http" (eq .Values.blue.internalTransport.mode "mtls") }}://{{ include "blue.fullname" . }}-control-api-internal:8082/internal/gateway/resolve
+            - name: HARNESS_GATEWAY_EVENT_URL
+              value: {{ ternary "https" "http" (eq .Values.blue.internalTransport.mode "mtls") }}://{{ include "blue.fullname" . }}-control-api-internal:8082/internal/gateway/events
+            - name: HARNESS_GATEWAY_CREDENTIAL_INVALID_URL
+              value: {{ ternary "https" "http" (eq .Values.blue.internalTransport.mode "mtls") }}://{{ include "blue.fullname" . }}-control-api-internal:8082/internal/gateway/credential-invalid
+            - name: HARNESS_GATEWAY_LOG_URL
+              value: {{ ternary "https" "http" (eq .Values.blue.internalTransport.mode "mtls") }}://{{ include "blue.fullname" . }}-control-api-internal:8082/internal/gateway/request-logs
+            # OAuth2 client-credentials (M2M) auth to the Control API. The
+            # token endpoint is better-auth on the dashboard; the resource is the
+            # Control API audience. HARNESS_PROXY_OAUTH_CLIENT_SECRET must be
+            # provided via `blue.existingSecret`.
+            - name: HARNESS_PROXY_OAUTH_TOKEN_URL
+              value: {{ printf "%s/api/auth/oauth2/token" (.Values.blue.publicUrls.dashboard | trimSuffix "/") | quote }}
+            {{- if eq .Values.blue.internalTransport.mode "mtls" }}
+            - { name: HARNESS_INTERNAL_CA_FILE, value: /var/run/blue/internal-tls/ca.crt }
+            - { name: HARNESS_PROXY_CLIENT_IDENTITY_FILE, value: /var/run/blue/internal-tls/client.pem }
+            {{- end }}
+            - { name: HARNESS_PROXY_OAUTH_CLIENT_ID, value: {{ .Values.blue.inferenceProxyClientId | quote }} }
+            - { name: HARNESS_PROXY_OAUTH_SCOPE, value: "gateway:resolve" }
+            - { name: HARNESS_PROXY_OAUTH_RESOURCE, value: {{ .Values.blue.publicUrls.controlApi | quote }} }
+            - name: HARNESS_PROXY_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_PROXY_OAUTH_CLIENT_SECRET, optional: false }
+            - { name: HARNESS_PROXY_MAX_IN_FLIGHT, value: {{ .Values.components.inferenceProxy.maxInFlightPerPod | quote }} }
+            {{- range $name, $value := .Values.blue.env }}
+            - { name: {{ $name }}, value: {{ $value | quote }} }
+            {{- end }}
+          envFrom: [{ secretRef: { name: {{ .Values.blue.existingSecret }} } }]
+          ports: [{ name: inference, containerPort: 8081 }]
+          startupProbe: { httpGet: { path: /health, port: inference }, failureThreshold: 30, periodSeconds: 10 }
+          readinessProbe: { httpGet: { path: /ready, port: inference }, periodSeconds: 5, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { path: /health, port: inference }, periodSeconds: 30, timeoutSeconds: 5 }
+          resources:
+            {{- toYaml .Values.resources.inferenceProxy | nindent 12 }}
+          {{- if eq .Values.blue.internalTransport.mode "mtls" }}
+          volumeMounts:
+            - { name: internal-tls, mountPath: /var/run/blue/internal-tls, readOnly: true }
+          {{- end }}
+      {{- if eq .Values.blue.internalTransport.mode "mtls" }}
+      volumes:
+        - name: internal-tls
+          secret: { secretName: {{ .Values.blue.internalTransport.clientSecret | quote }} }
+      {{- end }}
+{{- end }}

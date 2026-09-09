@@ -1,0 +1,45 @@
+{{- include "blue.validate" . -}}
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "blue.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.migrations.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+        blue.blocks.org/migration-access: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "blue.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "blue.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["migrate"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: HARNESS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.blue.existingSecret | quote }}
+                  key: HARNESS_DATABASE_URL
+                  optional: false
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+{{- end }}

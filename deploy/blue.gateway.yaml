@@ -1,0 +1,19 @@
+# Overlay for gateway mode. Merge with blue.yaml by setting
+# BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.gateway.yaml.
+gateway:
+  type: litellm
+  url: os.environ/HARNESS_GATEWAY_URL
+  inference_proxy_url: os.environ/HARNESS_INFERENCE_PROXY_URL
+  inference_proxy_health_url: os.environ/HARNESS_INFERENCE_PROXY_HEALTH_URL
+  internal_allowed_client_id: blue-inference-proxy
+  secret_encryption:
+    provider: environment
+    key: os.environ/HARNESS_GATEWAY_ENCRYPTION_KEY
+  provisioner:
+    type: local-executable
+    executable_path: /etc/blue/local-gateway-provisioner.mjs
+    executable_sha256: 7f6e3f4d26667418aa8f311b3a00f2eb775e954b073a1f1de947f706b26a8e28
+    policy_revision: local-executable-v4
+    reconcile_ttl_seconds: 86400
+    timeout_seconds: 15
+    max_concurrency: 8

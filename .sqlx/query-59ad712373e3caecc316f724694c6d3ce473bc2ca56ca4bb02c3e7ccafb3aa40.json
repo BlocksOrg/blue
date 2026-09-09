@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) as \"count!\" FROM captured_sessions s LEFT JOIN session_artifacts a ON a.id=s.current_artifact_id WHERE s.organization_id=$1 AND s.current_artifact_id IS NOT NULL AND ($2::uuid IS NULL OR s.user_id=$2 OR s.sharing_mode='workspace' OR EXISTS (SELECT 1 FROM captured_session_grants g JOIN users recipient ON recipient.id=g.user_id WHERE g.captured_session_id=s.id AND g.user_id=$2 AND recipient.active=true)) AND ($3::text IS NULL OR s.harness=$3) AND ($4::text IS NULL OR a.status=$4) AND ($5::text IS NULL OR lower(s.native_session_id) LIKE $5 ESCAPE E'\\\\' OR lower(coalesce(s.cwd,'')) LIKE $5 ESCAPE E'\\\\' OR lower(coalesce(s.title,'')) LIKE $5 ESCAPE E'\\\\' OR lower(coalesce(s.summary,'')) LIKE $5 ESCAPE E'\\\\') AND ($6::timestamptz IS NULL OR s.updated_at >= $6) AND ($7::timestamptz IS NULL OR s.updated_at < $7)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "59ad712373e3caecc316f724694c6d3ce473bc2ca56ca4bb02c3e7ccafb3aa40"
+}

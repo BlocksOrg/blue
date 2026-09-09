@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select ao.id from auth.\"organization\" ao join organizations po on po.slug=ao.slug where po.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9df49bfccad3637ce21ad7c2e66528c9ed4115302281e886d95a5962ed89817b"
+}

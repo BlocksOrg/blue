@@ -1,0 +1,124 @@
+# Gateway overlay for the e2e-slim suite (opt-in, secret-gated on OPENROUTER_API_KEY).
+#
+# Additive on top of docker-compose.yml: adds a real LiteLLM proxy (fed by
+# OpenRouter) and a real inference-proxy, and re-points control-api at the
+# gateway-enabled config. This exercises real inference through
+# agent -> inference-proxy -> LiteLLM -> OpenRouter, with per-user virtual keys
+# minted by a test-only EXECUTABLE provisioner (fixtures/litellm-provisioner.mjs)
+# that also creates the user's LiteLLM account on demand — covering the
+# executable-provisioner protocol against a real gateway.
+#
+# Both control-api and inference-proxy run from the same full deployment image
+# (BLUE_E2E_SLIM_IMAGE — the one the whole slim suite now uses), which ships both
+# binaries in its final stage. They speak plain HTTP internally
+# (HARNESS_INTERNAL_TRANSPORT_MODE=insecure-http) — no mTLS machinery in this suite.
+
+services:
+  # Give LiteLLM its own database on the single shared Postgres (see the init SQL).
+  postgres:
+    volumes:
+      - ./fixtures/postgres-init:/docker-entrypoint-initdb.d:ro
+
+  # OAuth service-token issuer for the inference-proxy -> control-api hop. The
+  # sidecar already serves the JWKS; the gateway path additionally uses its
+  # /oauth2/token endpoint. Issuer/audience/client-id must byte-match control-api.
+  jwks:
+    environment:
+      PORT: "8080"
+      E2E_TOKEN_ISSUER: https://e2e-slim.blue.test/
+      E2E_TOKEN_AUDIENCE: https://control-api.e2e-slim.blue.test
+      E2E_TOKEN_CLIENT_ID: blue-inference-proxy
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for the gateway path}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-e2e-slim-master}
+      DATABASE_URL: postgres://harness:harness@postgres:5432/litellm
+    volumes:
+      - ./fixtures/litellm-config.yaml:/etc/litellm/config.yaml:ro
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      # LiteLLM must run its Prisma migrations before it serves keys/spend logs;
+      # gate on readiness (not just liveliness) so dependents wait for that.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/readiness')\""]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  control-api:
+    image: ${BLUE_E2E_SLIM_IMAGE:-blue-e2e-base:local}
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    command: ["control-api"]
+    environment:
+      # Gateway-enabled config (adds the top-level `gateway:` block).
+      BLUE_CONFIG_FILE: /etc/blue/gateway-slim.yaml
+      # Executable provisioner: run.sh hashes the mounted script and control-api
+      # refuses to start on a mismatch. The script needs the LiteLLM coordinates
+      # (in-network URL + admin key) to create users and mint virtual keys.
+      HARNESS_PROVISIONER_EXECUTABLE_SHA256: ${HARNESS_PROVISIONER_EXECUTABLE_SHA256:?run.sh must hash fixtures/litellm-provisioner.mjs}
+      E2E_LITELLM_URL: http://litellm:4000
+      HARNESS_LITELLM_ADMIN_KEY: ${LITELLM_MASTER_KEY:-sk-e2e-slim-master}
+      HARNESS_GATEWAY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      # Plain-HTTP internal transport (no mTLS certs in this suite).
+      HARNESS_INTERNAL_TRANSPORT_MODE: insecure-http
+      HARNESS_INTERNAL_LISTEN: 0.0.0.0:8082
+    volumes:
+      - ./fixtures/gateway-slim.yaml:/etc/blue/gateway-slim.yaml:ro
+      # Mounted read-only; the exec bit comes from the checkout (committed 0755).
+      - ./fixtures/litellm-provisioner.mjs:/etc/blue/litellm-provisioner:ro
+    ports:
+      - "8082:8082"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      litellm: { condition: service_healthy }
+    healthcheck:
+      # Gateway control-api listens on 8082 with the gateway config; use the
+      # image's bundled component-aware healthcheck rather than a fixed curl URL.
+      test: ["CMD", "/usr/local/bin/blue-healthcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+
+  inference-proxy:
+    image: ${BLUE_E2E_SLIM_IMAGE:-blue-e2e-base:local}
+    command: ["inference-proxy"]
+    environment:
+      HARNESS_LISTEN: 0.0.0.0:8081
+      # Upstream gateway (in-network LiteLLM).
+      HARNESS_GATEWAY_TYPE: litellm
+      HARNESS_GATEWAY_URL: http://litellm:4000
+      # control-api internal endpoints (plain HTTP; events + credential-invalid
+      # are derived from the resolver URL automatically).
+      HARNESS_INTERNAL_TRANSPORT_MODE: insecure-http
+      HARNESS_GATEWAY_RESOLVER_URL: http://control-api:8082/internal/gateway/resolve
+      HARNESS_GATEWAY_LOG_URL: http://control-api:8082/internal/gateway/request-logs
+      # M2M service token: client-credentials against the JWKS sidecar's issuer.
+      # resource -> the JWT `aud`, which must equal control-api's auth audience.
+      HARNESS_PROXY_OAUTH_TOKEN_URL: http://jwks:8080/oauth2/token
+      HARNESS_PROXY_OAUTH_CLIENT_ID: blue-inference-proxy
+      HARNESS_PROXY_OAUTH_CLIENT_SECRET: e2e-slim-proxy-secret
+      HARNESS_PROXY_OAUTH_RESOURCE: https://control-api.e2e-slim.blue.test
+      HARNESS_PROXY_OAUTH_SCOPE: gateway:resolve
+      # Allow the plain-HTTP gateway + OAuth token URLs (they are not "internal").
+      BLUE_ALLOW_INSECURE_DEV: "true"
+    ports:
+      - "8081:8081"
+    depends_on:
+      litellm: { condition: service_healthy }
+      jwks: { condition: service_healthy }
+      control-api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s

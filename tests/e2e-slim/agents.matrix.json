@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "Slim-only version matrix for the e2e-slim suite. NOT symlinked (unlike",
+    "agents.lock.json), so the shared lock and the full tests/e2e suite are",
+    "untouched. Each entry is an EXTRA historical, in-range (blessed) sample —",
+    "the newest/blessed version per harness is the lock pin and is NOT duplicated",
+    "here (build.rs adds the lock pin as its own cell). Every sample is below its",
+    "adapter's `verified_before` ceiling, so the default matrix has no expected",
+    "skips. Above-ceiling / calendar-current builds are deliberately excluded.",
+    "`integrity` mirrors the lock's shape (pulled from npm dist metadata when",
+    "authoring); `profile` documents the adapter VersionInterval each sample maps",
+    "to. `arguments` is the per-cell launch argv (the element mentioning",
+    "BLUE_CERT_OK is swapped for the tool-forcing prompt at cert time)."
+  ],
+  "agents": {
+    "codex": {
+      "versions": [
+        {
+          "version": "0.146.0",
+          "integrity": "sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==",
+          "profile": "codex-v0_145_0",
+          "arguments": ["exec", "--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--json", "Return BLUE_CERT_OK and do not edit files."]
+        },
+        {
+          "version": "0.142.4",
+          "integrity": "sha512-BW9+3Cs7tChgkc0QhUsZIDm6XgpSDSeJkljRSHhJZqDwlaxDnNVhRP/sZwhgrTn3f2jPn3jc4WTKfLOTk+g5pA==",
+          "profile": "codex-v0_114_0",
+          "arguments": ["exec", "--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--json", "Return BLUE_CERT_OK and do not edit files."]
+        },
+        {
+          "version": "0.135.0",
+          "integrity": "sha512-ID75QEYmAT1WsUQmpxPlNsL5W1a+2eeD7fP6ywdwGseiXUG8D5i16L+dzbr8MT+2oTkaVqzOdvAqVOCeV/H/Bw==",
+          "profile": "codex-v0_114_0",
+          "arguments": ["exec", "--skip-git-repo-check", "--dangerously-bypass-hook-trust", "--json", "Return BLUE_CERT_OK and do not edit files."]
+        }
+      ]
+    },
+    "claude": {
+      "versions": [
+        {
+          "version": "2.1.220",
+          "integrity": "sha512-ogBrvwkqF9f8okmnXKxmRNHuvtFxFEffe5pWdqOV3iQDxlUOKirFqnyWC7NGXXnDA4WkkbPH8pvSbwyCR2Auyw==",
+          "profile": "claude-v2_0_12",
+          "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files.", "--output-format", "json"]
+        },
+        {
+          "version": "2.1.197",
+          "integrity": "sha512-EqrwbRcI7M5y8jQlayIfTMmbZJ2OQaLOc7KwIWKdryQCdKWUEFr+C9rMovZUuj2Asndi7aqLujEzRtr471gncg==",
+          "profile": "claude-v2_0_12",
+          "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files.", "--output-format", "json"]
+        },
+        {
+          "version": "2.1.159",
+          "integrity": "sha512-l1Qsa3CamItHIpTgXWEEEPxpfCm3xB9QBfwxcvkk53QNr3HLS6NAkmutVrWusAA38mSwitrcwH3zOdY4qP/VMA==",
+          "profile": "claude-v2_0_12",
+          "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files.", "--output-format", "json"]
+        }
+      ]
+    },
+    "kimi": {
+      "versions": [
+        {
+          "version": "0.31.1",
+          "integrity": "sha512-Hyly4EjzemSjla479jC47h+K98wNvRKOqGwu6mBncI/MlIafqEByUXeGl/9+DsOKdiE6fQTxkxiAcgusBay56Q==",
+          "profile": "kimi-v0_0_0",
+          "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files."]
+        },
+        {
+          "version": "0.20.3",
+          "integrity": "sha512-4uv5bAoQyo1JZ0PgxzNKVDfE0Og2Gcxo40a0evFT8zv3RKWBTIIkjMCH0jrRNC6nf6o/tuwS/xModu6kNutYbQ==",
+          "profile": "kimi-v0_0_0",
+          "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files."]
+        },
+        {
+          "version": "0.6.0",
+          "integrity": "sha512-3AfCc1KdDY0ShQ2eqNlHF3JQrXzVjYCcsIjfv2F06onOHza/RYiK4tpBf18rIpQj86juNCVBPJBc5Iv1ruZBYw==",
+          "profile": "kimi-v0_0_0",
+          "arguments": ["-p", "Return BLUE_CERT_OK and do not edit files."]
+        }
+      ]
+    },
+    "opencode": {
+      "versions": [
+        {
+          "version": "1.18.10",
+          "integrity": "sha512-/PoGrZnTrSrmHvvXUg12O4yAEjytuqEQNG8usCydrYg4EtosvbtKtGIHI40DFaIhPws91Wa20niSvFG32xL8ZQ==",
+          "profile": "opencode-v0_0_0",
+          "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."]
+        },
+        {
+          "version": "1.17.12",
+          "integrity": "sha512-zqtPmMK6BLyAZ0SywKkt8iVwm+gB6RNM7OUbnHS8bRNuC3y6bAbYwOCLuXrE3E/RZ7CyGK2Jj08fheVmGdjKcg==",
+          "profile": "opencode-v0_0_0",
+          "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."]
+        },
+        {
+          "version": "1.15.13",
+          "integrity": "sha512-9LvgcILITiYPsKrBYSHQYR4ur/WBQYMHN5jEnboa/NVboPyl+WBGgvDHQ2SJasPpBmCAd2YTTorz2uMbcF7Hhw==",
+          "profile": "opencode-v0_0_0",
+          "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."]
+        }
+      ]
+    }
+  }
+}

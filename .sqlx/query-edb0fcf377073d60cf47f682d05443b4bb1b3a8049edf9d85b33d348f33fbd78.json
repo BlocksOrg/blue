@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update scim_user_resources set external_id=$1,user_name=$2,given_name=$3,family_name=$4,updated_at=now() where user_id=$5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "edb0fcf377073d60cf47f682d05443b4bb1b3a8049edf9d85b33d348f33fbd78"
+}

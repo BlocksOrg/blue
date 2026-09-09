@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select distinct result from gateway_request_logs where organization_id=$1 and expires_at>now() and ($2::uuid is null or user_id=$2) order by result",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "result",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "343965b489e5d30f5733ef10036602b07d2e4f043835f6307946972a09d082b4"
+}

@@ -1,0 +1,998 @@
+import { expect, test } from "@playwright/test";
+import { chmod, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { collect, prepareClient, prepareEmptyClient, readClientFile, runBareCliInPty, runCli, runCliWithInput, spawnCli, spawnCliInPty, waitForOutput } from "../support/cli.js";
+import { loginAsAdmin } from "../support/dashboard.js";
+import YAML from "yaml";
+
+const canonicalProfiles: Record<string, string> = {
+  codex: "codex-v0_145_0",
+  claude: "claude-v2_0_12",
+  kimi: "kimi-v0_0_0",
+  opencode: "opencode-v0_0_0",
+};
+
+test.describe.serial("Blue deployment journey", () => {
+  let home: string;
+  let adminSessionId: string;
+
+  test.beforeAll(async () => {
+    home = await prepareClient("journey");
+  });
+
+  test("@smoke dashboard login approves a real CLI device flow", async ({ page }) => {
+    await loginAsAdmin(page);
+    const child = spawnCli(home, ["login"]);
+    const deviceUrl = await waitForOutput(child, /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/);
+    await page.goto(deviceUrl);
+    await expect(page.getByText("Confirmation code")).toBeVisible();
+    await page.getByRole("button", { name: "Authorize" }).click();
+    await expect(page.getByText("CLI authorized")).toBeVisible();
+    const result = await collect(child);
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const session = path.join(home, ".config", "blue", "session.json");
+    expect((await stat(session)).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await readFile(session, "utf8")).refresh_token).toBeTruthy();
+    await expect(stat(path.join(home, ".codex", "blue.config.toml"))).rejects.toThrow();
+    await expect(stat(path.join(home, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
+    const preferred = await runCli(home, ["agent", "claude"]);
+    expect(preferred.code, preferred.stderr).toBe(0);
+  });
+
+  test("@smoke executable provisioner creates managed gateway access", async () => {
+    const result = await runCli(home, ["gateway"]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("status          : ready");
+    expect(result.stdout).toContain("alias           : e2e");
+    expect(result.stdout).toContain("gateway id      : e2e-executable");
+  });
+
+  test("@smoke /direct tears down gateway wiring and offers an agent reload", async ({ page }) => {
+    await loginAsAdmin(page);
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const originalResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(originalResponse.status(), await originalResponse.text()).toBe(200);
+    const original = await originalResponse.json();
+    const gatewayConfig = YAML.parse(original.managed_yaml);
+    gatewayConfig.gateway = { type: "litellm" };
+    const gatewayResponse = await page.request.put(`${control}/admin/governance-config`, {
+      data: {
+        base_revision: original.revision,
+        managed_yaml: YAML.stringify(gatewayConfig),
+      },
+    });
+    expect(gatewayResponse.status(), await gatewayResponse.text()).toBe(200);
+
+    const directHome = await prepareClient("direct-mode");
+    await copyFile(
+      path.join(home, ".config", "blue", "session.json"),
+      path.join(directHome, ".config", "blue", "session.json"),
+    );
+    const direct = spawnCliInPty(directHome, "blue run codex -- direct-mode", {
+      E2E_AGENT_READ_STDIN: "1",
+    });
+    const directCompletion = collect(direct);
+    try {
+      await waitForOutput(direct, /Ctrl-\] Control/);
+      await expect
+        .poll(async () =>
+          readClientFile(directHome, "agent-log/codex.env").catch(() => ""),
+        )
+        .toMatch(/^env_HARNESS_CODEX_KEY=psk_/m);
+      expect(await readClientFile(directHome, ".codex/blue.config.toml")).toContain(
+        'model_provider = "governed"',
+      );
+      direct.stdin.write("\u001d");
+      await waitForOutput(direct, /Command/);
+      const menuEntry = waitForOutput(direct, /Toggle personal provider credentials/);
+      direct.stdin.write("/dir");
+      await menuEntry;
+      direct.stdin.write("\r");
+      await waitForOutput(direct, /Keep current session/);
+      direct.stdin.write("\r");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      direct.stdin.write("\u001d");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      direct.stdin.write("continue\r");
+      const result = await directCompletion;
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    } finally {
+      if (direct.exitCode === null) direct.kill("SIGTERM");
+    }
+
+    expect(await readClientFile(directHome, ".config/blue/blue.toml")).toContain(
+      "force_governance_only = true",
+    );
+    const directProfile = await readClientFile(directHome, ".codex/blue.config.toml");
+    expect(directProfile).not.toContain('model_provider = "governed"');
+    expect(directProfile).toContain('model = "gpt-e2e"');
+    expect(await readClientFile(directHome, "agent-log/codex.env")).toContain(
+      "env_HARNESS_CODEX_KEY=psk_",
+    );
+
+    const directRestart = await runCli(directHome, ["run", "codex", "--", "verify-direct"]);
+    expect(directRestart.code, directRestart.stderr).toBe(0);
+    expect(await readClientFile(directHome, "agent-log/codex.env")).toContain(
+      "env_HARNESS_CODEX_KEY=\n",
+    );
+
+    const gateway = spawnCliInPty(directHome, "blue run codex -- gateway-mode", {
+      E2E_AGENT_READ_STDIN: "1",
+    });
+    const gatewayCompletion = collect(gateway);
+    try {
+      await waitForOutput(gateway, /Ctrl-\] Control/);
+      gateway.stdin.write("\u001d");
+      await waitForOutput(gateway, /Command/);
+      gateway.stdin.write("/direct\r");
+      await waitForOutput(gateway, /Keep current session/);
+      gateway.stdin.write("\r");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      gateway.stdin.write("\u001d");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      gateway.stdin.write("continue\r");
+      const result = await gatewayCompletion;
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    } finally {
+      if (gateway.exitCode === null) gateway.kill("SIGTERM");
+    }
+
+    expect(await readClientFile(directHome, ".config/blue/blue.toml")).toContain(
+      "force_governance_only = false",
+    );
+    expect(await readClientFile(directHome, ".codex/blue.config.toml")).toContain(
+      'model_provider = "governed"',
+    );
+    const gatewayRestart = await runCli(directHome, ["run", "codex", "--", "verify-gateway"]);
+    expect(gatewayRestart.code, gatewayRestart.stderr).toBe(0);
+    expect(await readClientFile(directHome, "agent-log/codex.env")).toMatch(
+      /^env_HARNESS_CODEX_KEY=psk_/m,
+    );
+
+    const currentResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(currentResponse.status(), await currentResponse.text()).toBe(200);
+    const current = await currentResponse.json();
+    const restoreResponse = await page.request.put(`${control}/admin/governance-config`, {
+      data: { base_revision: current.revision, managed_yaml: original.managed_yaml },
+    });
+    expect(restoreResponse.status(), await restoreResponse.text()).toBe(200);
+  });
+
+  test("guided setup discovers the deployment and completes device login", async ({ page }) => {
+    await loginAsAdmin(page);
+    const setupHome = await prepareEmptyClient("guided-setup");
+    const child = spawnCliInPty(setupHome, "blue setup");
+    const completion = collect(child);
+    const deviceUrl = waitForOutput(child, /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/, 30_000);
+    setTimeout(() => child.stdin.write("http://127.0.0.1:8080\r"), 500);
+    await page.goto(await deviceUrl);
+    await page.getByRole("button", { name: "Authorize" }).click();
+    await expect(page.getByText("CLI authorized")).toBeVisible();
+    const result = await completion;
+    expect(result.code, result.stderr).toBe(0);
+    expect(await readClientFile(setupHome, ".config/blue/blue.toml")).toContain("http://127.0.0.1:8080");
+    await expect(stat(path.join(setupHome, ".codex", "blue.config.toml"))).rejects.toThrow();
+    const bare = spawnCliInPty(setupHome, "blue");
+    const launched = collect(bare);
+    await waitForOutput(bare, /Choose your coding agent/);
+    bare.stdin.write("\u001b[B\r");
+    const bareResult = await launched;
+    expect(bareResult.code, bareResult.stderr).toBe(0);
+    expect(bareResult.stdout).toContain("fake-claude-ok");
+    expect(await readClientFile(setupHome, ".config/blue/blue.toml")).toContain('preferred_harness = "claude"');
+    expect((await stat(path.join(setupHome, ".config", "blue", "runtime", "claude", "settings.json"))).isFile()).toBeTruthy();
+    await expect(stat(path.join(setupHome, ".codex", "blue.config.toml"))).rejects.toThrow();
+    await expect(stat(path.join(setupHome, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
+    await expect(stat(path.join(setupHome, ".config", "blue", "runtime", "opencode", "opencode.json"))).rejects.toThrow();
+  });
+
+  test("@smoke CLI applies policy, reports health, and launches Codex transparently", async () => {
+    for (const args of [["version"], ["help"], ["doctor"], ["config"], ["apply", "--yes"], ["status"], ["verify"]]) {
+      const result = await runCli(home, args);
+      expect(result.code, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+    }
+    const launched = await runCli(home, ["run", "codex", "--", "hello world"]);
+    expect(launched.code, launched.stderr).toBe(0);
+    expect(launched.stdout).toContain("fake-codex-ok");
+    const log = await readClientFile(home, "agent-log/codex.env");
+    expect(log).toContain("hello world");
+    expect(log).toContain("env_OPENAI_API_KEY=");
+    expect(await readClientFile(home, ".codex/blue.config.toml")).toContain("gpt-e2e");
+    await expect(stat(path.join(home, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
+    await expect(stat(path.join(home, ".config", "blue", "runtime", "opencode", "opencode.json"))).rejects.toThrow();
+  });
+
+  test("@smoke governance-only deployment does not attempt gateway provisioning", async ({ request }) => {
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const governanceControl = "http://blue-governance-only:8080";
+    const adminSession = JSON.parse(await readFile(path.join(home, ".config", "blue", "session.json"), "utf8"));
+    const adminHeaders = { authorization: `Bearer ${adminSession.token}` };
+    const activeResponse = await request.get(`${governanceControl}/admin/governance-config`, {
+      headers: adminHeaders,
+    });
+    expect(activeResponse.status(), await activeResponse.text()).toBe(200);
+    const active = await activeResponse.json();
+    const governanceOnly = YAML.parse(active.managed_yaml);
+    delete governanceOnly.gateway;
+    const disableResponse = await request.put(`${governanceControl}/admin/governance-config`, {
+      headers: adminHeaders,
+      data: { base_revision: active.revision, managed_yaml: YAML.stringify(governanceOnly) },
+    });
+    expect(disableResponse.status(), await disableResponse.text()).toBe(200);
+
+    try {
+      const governanceHome = await prepareClient("governance-only");
+      const configPath = path.join(governanceHome, ".config", "blue", "blue.toml");
+      await writeFile(
+        configPath,
+        (await readFile(configPath, "utf8")).replace("http://127.0.0.1:8080", "http://blue-governance-only:8080"),
+      );
+      await copyFile(
+        path.join(home, ".config", "blue", "session.json"),
+        path.join(governanceHome, ".config", "blue", "session.json"),
+      );
+
+      const session = JSON.parse(await readFile(path.join(governanceHome, ".config", "blue", "session.json"), "utf8"));
+      const ensured = await request.post("http://blue-governance-only:8080/gateway/key/ensure", {
+        headers: { authorization: `Bearer ${session.token}` },
+        data: {},
+      });
+      expect(ensured.status(), await ensured.text()).toBe(200);
+      expect(await ensured.json()).toMatchObject({ enabled: false, status: "disabled" });
+
+      for (const args of [["config"], ["agent", "codex"], ["apply", "--yes"], ["status"]]) {
+        const result = await runCli(governanceHome, args);
+        expect(result.code, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+        expect(result.stderr).not.toContain("gateway mode is not enabled");
+      }
+      const launched = await runCli(governanceHome, ["run", "codex", "--", "governance-only"]);
+      expect(launched.code, launched.stderr).toBe(0);
+      expect(launched.stdout).toContain("fake-codex-ok");
+      const log = await readClientFile(governanceHome, "agent-log/codex.env");
+      expect(log).toContain("env_HARNESS_CODEX_KEY=\n");
+      expect(log).toContain("env_OPENAI_BASE_URL=\n");
+    } finally {
+      const currentResponse = await request.get(`${control}/admin/governance-config`, {
+        headers: adminHeaders,
+      });
+      expect(currentResponse.status(), await currentResponse.text()).toBe(200);
+      const current = await currentResponse.json();
+      const restoreResponse = await request.put(`${control}/admin/governance-config`, {
+        headers: adminHeaders,
+        data: { base_revision: current.revision, managed_yaml: active.managed_yaml },
+      });
+      expect(restoreResponse.status(), await restoreResponse.text()).toBe(200);
+    }
+  });
+
+  test("@smoke dashboard mutation produces a stale client revision that apply repairs", async ({ page }) => {
+    await loginAsAdmin(page);
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const currentResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(currentResponse.status()).toBe(200);
+    const current = await currentResponse.json();
+    const changed = String(current.managed_yaml).replace(/revision:\s*[^\n]+/, `revision: "e2e-${Date.now()}"`);
+    const update = await page.request.put(`${control}/admin/governance-config`, {
+      data: { base_revision: current.revision, managed_yaml: changed },
+    });
+    expect(update.status(), await update.text()).toBe(200);
+    const stale = await runCli(home, ["verify"]);
+    expect(stale.code).not.toBe(0);
+    const apply = await runCli(home, ["apply", "--yes"]);
+    expect(apply.code, apply.stderr).toBe(0);
+    expect((await runCli(home, ["verify"])).code).toBe(0);
+  });
+
+  test("full harness matrix preserves argv and generates isolated overlays", async () => {
+    const expectedFiles: Record<string, string> = {
+      codex: ".codex/blue.config.toml",
+      claude: ".config/blue/runtime/claude/settings.json",
+      kimi: ".config/blue/runtime/kimi/config.toml",
+      opencode: ".config/blue/runtime/opencode/opencode.json",
+    };
+    for (const [harness, file] of Object.entries(expectedFiles)) {
+      const result = await runCli(home, [harness, "--e2e-flag", "value with spaces"]);
+      expect(result.code, `${harness}: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain(`fake-${harness}-ok`);
+      expect(await readClientFile(home, `agent-log/${harness}.env`)).toContain("value with spaces");
+      expect((await stat(path.join(home, file))).isFile()).toBeTruthy();
+      const compatibilityState = JSON.parse(
+        await readClientFile(
+          home,
+          `.config/blue/runtime/${harness}/compatibility-state.json`,
+        ),
+      );
+      expect(compatibilityState.schema_version).toBe(4);
+      expect(compatibilityState.profile_id).toBe(canonicalProfiles[harness]);
+    }
+    const status = await runCli(home, ["status"]);
+    expect(status.stdout).toContain("e2e-skill");
+    expect(status.stdout).toContain("applied");
+    expect(await readClientFile(home, ".config/blue/runtime/kimi/skills/example/SKILL.md")).toContain("E2E managed skill fixture");
+  });
+
+  test("Codex compatibility boundaries select exact profiles and retire legacy state", async () => {
+    const boundaryHome = await prepareClient("codex-boundary");
+    const boundaryBin = path.join(boundaryHome, "bin");
+    const boundaryCodex = path.join(boundaryBin, "codex");
+    const boundaryPath = `${boundaryBin}:${process.env.PATH ?? ""}`;
+    await mkdir(boundaryBin, { recursive: true });
+    await writeFile(
+      boundaryCodex,
+      "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ] || [ \"${1:-}\" = \"version\" ]; then printf 'codex 0.144.99\\n'; exit 0; fi\nexec /usr/local/bin/codex \"$@\"\n",
+    );
+    await chmod(boundaryCodex, 0o755);
+    await copyFile(
+      path.join(home, ".config", "blue", "session.json"),
+      path.join(boundaryHome, ".config", "blue", "session.json"),
+    );
+
+    const legacy = await runCli(
+      boundaryHome,
+      ["run", "codex", "--", "legacy-boundary"],
+      { PATH: boundaryPath },
+    );
+    expect(legacy.code, legacy.stderr).toBe(0);
+    const statePath = ".config/blue/runtime/codex/compatibility-state.json";
+    const legacyState = JSON.parse(await readClientFile(boundaryHome, statePath));
+    expect(legacyState).toMatchObject({
+      schema_version: 4,
+      profile_id: "codex-v0_0_0",
+    });
+    expect(await readClientFile(boundaryHome, ".codex/blue.config.toml")).not.toContain(
+      "session-upload",
+    );
+
+    legacyState.profile_id = "codex-v1";
+    await writeFile(path.join(boundaryHome, statePath), JSON.stringify(legacyState));
+    await writeFile(
+      path.join(boundaryHome, ".codex", "blue.config.toml"),
+      "# force reconciliation from legacy compatibility state\n",
+    );
+    await writeFile(
+      boundaryCodex,
+      "#!/bin/sh\n# upgraded binary fingerprint\nif [ \"${1:-}\" = \"--version\" ] || [ \"${1:-}\" = \"version\" ]; then printf 'codex 0.145.0\\n'; exit 0; fi\nexec /usr/local/bin/codex \"$@\"\n",
+    );
+    const current = await runCli(
+      boundaryHome,
+      ["run", "codex", "--", "current-boundary"],
+      { PATH: boundaryPath },
+    );
+    expect(current.code, current.stderr).toBe(0);
+    expect(JSON.parse(await readClientFile(boundaryHome, statePath))).toMatchObject({
+      schema_version: 4,
+      profile_id: "codex-v0_145_0",
+    });
+    expect(await readClientFile(boundaryHome, ".codex/blue.config.toml")).toContain(
+      "session-upload",
+    );
+  });
+
+  test("PTY launch preserves stdin and native exit status", async () => {
+    const child = spawnCli(home, ["run", "codex", "--", "stdin-check"], {
+      E2E_AGENT_READ_STDIN: "1",
+      E2E_AGENT_EXIT_CODE: "17",
+    });
+    const result = collect(child);
+    child.stdin.end("hello from stdin\n");
+    const completed = await result;
+    expect(completed.code).toBe(17);
+    expect(completed.stdout).toContain("fake-codex-stdin:hello from stdin");
+  });
+
+  test("@smoke preferred agent and bare blue preserve fragmented TUI output", async () => {
+    expect((await runCli(home, ["agent", "claude"])).code).toBe(0);
+    const launched = await runBareCliInPty(home, {
+      E2E_AGENT_FRAGMENTED_ANSI: "1",
+      E2E_AGENT_FRAGMENTED_CLEAR: "1",
+    });
+    expect(launched.code, launched.stderr).toBe(0);
+    expect(launched.stdout).toContain("fake-claude-ok");
+    expect(launched.stdout).toContain("\u001b[38;2;1;2;3mBLUE_ANSI_OK\u001b[0m");
+    const clearAt = launched.stdout.indexOf("\u001b[2J", launched.stdout.indexOf("BLUE_ANSI_OK"));
+    expect(clearAt).toBeGreaterThanOrEqual(0);
+    expect(launched.stdout.indexOf("Ctrl-] Control", clearAt)).toBeGreaterThan(clearAt);
+    expect(await readClientFile(home, ".config/blue/blue.toml")).toContain('preferred_harness = "claude"');
+    const noninteractive = await runCli(home, ["agent"]);
+    expect(noninteractive.code).toBe(1);
+    expect(noninteractive.stderr).toContain("requires a name");
+  });
+
+  test("PTY teardown restores terminal modes leaked by an agent", async () => {
+    const launched = await runBareCliInPty(home, { E2E_AGENT_LEAK_TERMINAL_MODES: "1" });
+    expect(launched.code, launched.stderr).toBe(0);
+    const enabledAt = launched.stdout.indexOf("\u001b[?1003h");
+    const exitedAt = launched.stdout.indexOf("fake-claude-ok");
+    expect(enabledAt).toBeGreaterThanOrEqual(0);
+    expect(exitedAt).toBeGreaterThan(enabledAt);
+    for (const reset of ["\u001b[r", "\u001b[?1003l", "\u001b[?1006l", "\u001b[?1004l", "\u001b[?2004l", "\u001b[<u", "\u001b[=0u", "\u001b[?25h"]) {
+      expect(launched.stdout.lastIndexOf(reset), `missing terminal reset ${JSON.stringify(reset)}`).toBeGreaterThan(exitedAt);
+    }
+  });
+
+  test("portable sessions round-trip through storage and native restore for every harness", async ({ page }) => {
+    await loginAsAdmin(page);
+    const transcripts = new Map<string, { path: string; content: string }>();
+    for (const harness of ["codex", "claude", "kimi", "opencode"]) {
+      const sessionId = `e2e-${harness}`;
+      const transcript = harness === "codex"
+        ? path.join(home, ".codex", "sessions", "2026", "09", "05", `rollout-${sessionId}.jsonl`)
+        : harness === "claude"
+          ? path.join(home, ".claude", "projects", "e2e", `${sessionId}.jsonl`)
+          : harness === "kimi"
+            ? path.join(home, ".config", "blue", "runtime", "kimi", "sessions", "e2e", sessionId, "agents", "main", "wire.jsonl")
+            : path.join(home, `${sessionId}-export.json`);
+      const content = harness === "opencode"
+        ? JSON.stringify({
+            info: { id: sessionId, title: "e2e-opencode" },
+            messages: [{ info: { role: "user" }, parts: [{ type: "text", text: "e2e-opencode" }] }],
+          })
+        : `${JSON.stringify({ role: "user", content: `e2e-${harness}` })}\n`;
+      transcripts.set(harness, { path: transcript, content });
+      await mkdir(path.dirname(transcript), { recursive: true });
+      await writeFile(transcript, content);
+      if (harness === "claude") {
+        const companion = path.join(path.dirname(transcript), sessionId, "subagents", "agent-1.jsonl");
+        await mkdir(path.dirname(companion), { recursive: true });
+        await writeFile(companion, `${JSON.stringify({ role: "assistant", content: "claude companion" })}\n`);
+      }
+      if (harness === "kimi") {
+        const sessionRoot = path.resolve(path.dirname(transcript), "..", "..");
+        await writeFile(path.join(sessionRoot, "state.json"), JSON.stringify({
+          conversation: { ready: true },
+          access_token: "must-not-leave-source",
+          approvals: ["must-not-restore"],
+        }));
+        await mkdir(path.join(sessionRoot, "plans"), { recursive: true });
+        await writeFile(path.join(sessionRoot, "plans", "plan.md"), "safe plan");
+      }
+      const result = await runCliWithInput(
+        home,
+        ["session-upload", harness],
+        JSON.stringify({
+          session_id: sessionId,
+          transcript_path: transcript,
+          cwd: "/workspace/e2e",
+          profile: canonicalProfiles[harness],
+        }),
+      );
+      expect(result.code, `${harness}: ${result.stderr}`).toBe(0);
+    }
+    await expect.poll(async () => {
+      const response = await page.request.get(`${process.env.E2E_CONTROL_API_URL}/session-uploads?per_page=25`);
+      return (await response.json()).items.length;
+    }, { timeout: 30_000 }).toBe(4);
+    const response = await page.request.get(`${process.env.E2E_CONTROL_API_URL}/session-uploads?per_page=25`);
+    expect(response.status()).toBe(200);
+    const sessions = await response.json();
+    expect(sessions.items).toHaveLength(4);
+    expect(sessions.items.map((item: { harness: string }) => item.harness).sort()).toEqual([
+      "claude",
+      "codex",
+      "kimi",
+      "opencode",
+    ]);
+    const codex = sessions.items.find((item: { harness: string }) => item.harness === "codex");
+    adminSessionId = codex.id;
+    const detail = await page.request.get(`${process.env.E2E_CONTROL_API_URL}/session-uploads/${codex.id}`);
+    expect(detail.status()).toBe(200);
+    expect((await detail.json()).artifacts[0].status).toBe("complete");
+    for (const session of sessions.items as Array<{ id: string; harness: string; artifact_format: string; resumable: boolean }>) {
+      expect(session.artifact_format).toBe("blue-session-bundle-v1");
+      expect(session.resumable).toBe(true);
+      const download = await page.request.post(`${process.env.E2E_CONTROL_API_URL}/session-uploads/${session.id}/download`);
+      const downloadBody = await download.json();
+      expect(download.status()).toBe(200);
+      const stored = await page.request.get(downloadBody.download_url);
+      expect(stored.status(), await stored.text()).toBe(200);
+      const bundlePath = path.join(home, "downloads", `${session.harness}.bundle.tgz`);
+      await mkdir(path.dirname(bundlePath), { recursive: true });
+      await writeFile(bundlePath, await stored.body());
+
+      const restoreHome = await prepareEmptyClient(`restore-${session.harness}`);
+      const preflight = await runCli(restoreHome, ["session-restore", "--bundle", bundlePath, "--preflight"]);
+      expect(preflight.code, `${session.harness} preflight: ${preflight.stderr}`).toBe(0);
+      const restored = await runCli(restoreHome, ["session-restore", "--bundle", bundlePath]);
+      expect(restored.code, `${session.harness} restore: ${restored.stderr}`).toBe(0);
+      const result = JSON.parse(restored.stdout);
+      expect(result.harness).toBe(session.harness);
+      const expectedId = session.harness === "opencode" ? "e2e-opencode-imported" : `e2e-${session.harness}`;
+      expect(result.launch_args).toContain(expectedId);
+
+      const source = transcripts.get(session.harness)!;
+      if (session.harness !== "opencode") {
+        const nativeRelative = path.relative(home, source.path);
+        expect(await readClientFile(restoreHome, nativeRelative)).toBe(source.content);
+      }
+      if (session.harness === "claude") {
+        expect(await readClientFile(restoreHome, ".claude/projects/e2e/e2e-claude/subagents/agent-1.jsonl")).toContain("claude companion");
+        expect(await readClientFile(restoreHome, ".claude/projects/e2e/sessions-index.json")).toContain("e2e-claude");
+      }
+      if (session.harness === "kimi") {
+        const state = await readClientFile(restoreHome, ".config/blue/runtime/kimi/sessions/e2e/e2e-kimi/state.json");
+        expect(state).toContain("conversation");
+        expect(state).not.toContain("must-not-leave-source");
+        expect(state).not.toContain("approvals");
+        expect(await readClientFile(restoreHome, ".config/blue/runtime/kimi/sessions/e2e/e2e-kimi/plans/plan.md")).toBe("safe plan");
+        expect(await readClientFile(restoreHome, ".config/blue/runtime/kimi/session_index.jsonl")).toContain("e2e-kimi");
+      }
+    }
+    await page.goto(`/sessions/${codex.id}`);
+    await expect(page.getByRole("heading", { name: "e2e-codex" })).toBeVisible();
+  });
+
+  test("gateway swaps the pseudotoken and records request metadata", async ({ page }) => {
+    await loginAsAdmin(page);
+    const log = await readClientFile(home, "agent-log/codex.env");
+    const token = log.match(/^env_HARNESS_CODEX_KEY=(.+)$/m)?.[1];
+    expect(token).toBeTruthy();
+    expect((await page.request.post("http://blue:8081/v1/chat/completions", { data: {} })).status()).toBe(401);
+    expect((await page.request.post("http://blue:8081/v1/chat/completions", {
+      headers: { authorization: "Bearer invalid-pseudotoken" },
+      data: {},
+    })).status()).toBe(401);
+    const response = await page.request.post("http://blue:8081/v1/chat/completions?api-version=e2e", {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-harness-agent": "codex",
+        "x-harness-repo": "blocks/e2e",
+        "x-harness-git-branch": "main",
+        "x-e2e-forwarded": "yes",
+      },
+      data: { model: "gpt-e2e", messages: [{ role: "user", content: "hello" }] },
+    });
+    expect(response.status(), await response.text()).toBe(200);
+    expect((await response.json()).choices[0].message.content).toBe("hello");
+    const streamed = await page.request.post("http://blue:8081/v1/chat/completions", {
+      headers: { authorization: `Bearer ${token}` },
+      data: { model: "gpt-e2e", stream: true, messages: [{ role: "user", content: "stream" }] },
+    });
+    expect(streamed.status()).toBe(200);
+    expect(streamed.headers()["content-type"]).toContain("text/event-stream");
+    expect(await streamed.text()).toContain("data: [DONE]");
+    const upstreamFailure = await page.request.post("http://blue:8081/v1/e2e/error", {
+      headers: { authorization: `Bearer ${token}` },
+      data: { model: "gpt-e2e" },
+    });
+    expect(upstreamFailure.status()).toBe(429);
+    expect(upstreamFailure.headers()["retry-after"]).toBe("7");
+    expect(await upstreamFailure.text()).toContain("e2e upstream rate limit");
+    const upstreamRequests = await page.request.get("http://fake-upstream:4010/_e2e/requests");
+    expect(upstreamRequests.status()).toBe(200);
+    const forwarded = (await upstreamRequests.json()).find((item: { query: string }) => item.query === "?api-version=e2e");
+    expect(forwarded.headers["x-e2e-forwarded"]).toBe("yes");
+    expect(forwarded.authorization).not.toBe(token);
+    await expect.poll(async () => {
+      const logs = await page.request.get(`${process.env.E2E_CONTROL_API_URL}/gateway/request-logs`);
+      const items = (await logs.json()).items;
+      return items.find((item: { path: string; harness?: string }) =>
+        item.path === "/v1/chat/completions" && item.harness === "codex"
+      );
+    }).toMatchObject({
+      harness: "codex",
+      repository: "blocks/e2e",
+      branch: "main",
+      model: "gpt-e2e",
+      http_status: 200,
+      result: "success",
+    });
+  });
+
+  test("managed-file drift fails verification and is repaired", async () => {
+    const overlay = path.join(home, ".config", "blue", "runtime", "claude", "settings.json");
+    await writeFile(overlay, "tampered = true\n");
+    expect((await runCli(home, ["verify"])).code).not.toBe(0);
+    expect((await runCli(home, ["apply", "--yes"])).code).toBe(0);
+    expect((await runCli(home, ["verify"])).code).toBe(0);
+  });
+
+  test("daemon observes a new revision and reconciles it without apply", async ({ page }) => {
+    await loginAsAdmin(page);
+    const child = spawnCli(home, ["daemon", "--interval", "1"]);
+    await waitForOutput(child, /Starting reconcile daemon/);
+    const completion = collect(child);
+    try {
+      const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+      const currentResponse = await page.request.get(`${control}/admin/harnesses/managed-configs`);
+      expect(currentResponse.status()).toBe(200);
+      const current = await currentResponse.json();
+      const model = `gpt-daemon-${Date.now()}`;
+      const changed = String(current.configurations.claude).replace(/model:\s*[^\n]+/, `model: ${model}`);
+      const update = await page.request.put(`${control}/admin/harnesses/claude/managed-config`, {
+        data: {
+          base_revision: current.revision,
+          managed_config_yaml: changed,
+          version_requirement: current.version_requirements.claude,
+        },
+      });
+      expect(update.status(), await update.text()).toBe(200);
+      await expect.poll(
+        () => readClientFile(home, ".config/blue/runtime/claude/settings.json"),
+        { timeout: 20_000 },
+      ).toContain(model);
+    } finally {
+      child.kill("SIGTERM");
+    }
+    const result = await completion;
+    expect([0, 1, 143]).toContain(result.code);
+    expect((await runCli(home, ["verify"])).code).toBe(0);
+  });
+
+  test("running supervisor displays a revision received over SSE", async ({ page }) => {
+    await loginAsAdmin(page);
+    const child = spawnCliInPty(home, "blue run codex -- wait-for-revision", {
+      E2E_AGENT_READ_STDIN: "1",
+    });
+    const completion = collect(child);
+    try {
+      await waitForOutput(child, /Ctrl-\] Control/);
+      const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+      const currentResponse = await page.request.get(`${control}/admin/harnesses/managed-configs`);
+      expect(currentResponse.status()).toBe(200);
+      const current = await currentResponse.json();
+      const changed = String(current.configurations.codex).replace(
+        /model:\s*[^\n]+/,
+        `model: gpt-sse-${Date.now()}`,
+      );
+      // Register before publishing the revision: the SSE event may arrive
+      // before the mutation response on a fast local stack.
+      const revisionNotice = waitForOutput(child, /New Blue policy/);
+      const update = await page.request.put(`${control}/admin/harnesses/codex/managed-config`, {
+        data: {
+          base_revision: current.revision,
+          managed_config_yaml: changed,
+          version_requirement: current.version_requirements.codex,
+        },
+      });
+      expect(update.status(), await update.text()).toBe(200);
+      await revisionNotice;
+      child.stdin.write("continue\r");
+      const result = await completion;
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGTERM");
+    }
+  });
+
+  test("shim lifecycle is isolated and reversible", async () => {
+    const dir = path.join(home, "shims");
+    await mkdir(dir, { recursive: true });
+    const install = await runCli(home, ["shim", "install", "--dir", dir]);
+    expect(install.code, install.stderr).toBe(0);
+    for (const harness of ["codex", "claude", "kimi", "opencode"]) {
+      expect((await stat(path.join(dir, harness))).isFile()).toBeTruthy();
+    }
+    const uninstall = await runCli(home, ["shim", "uninstall", "--dir", dir]);
+    expect(uninstall.code, uninstall.stderr).toBe(0);
+  });
+
+  test("dashboard theme follows the system and persists an explicit choice", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    await loginAsAdmin(page);
+
+    const root = page.locator("html");
+    await expect(root).not.toHaveClass(/\bdark\b/);
+
+    const selectTheme = async (name: "Dark" | "System" | "Light") => {
+      const themeTrigger = page.getByRole("menuitem", { name: "Theme" });
+      if (!(await themeTrigger.isVisible())) {
+        await page.getByRole("button", { name: /Open user menu/ }).click();
+      }
+      await expect(themeTrigger).toBeVisible();
+      await themeTrigger.dispatchEvent("click");
+      const option = page.getByRole("menuitemradio", { name });
+      await expect(option).toBeVisible();
+      await option.dispatchEvent("click");
+    };
+
+    await selectTheme("Dark");
+    await expect(root).toHaveClass(/\bdark\b/);
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("blue-theme"))).toBe("dark");
+
+    const persistedPage = await page.context().newPage();
+    await persistedPage.goto("/sessions");
+    await expect(persistedPage.locator("html")).toHaveClass(/\bdark\b/);
+    await persistedPage.close();
+
+    await selectTheme("System");
+    await expect(root).not.toHaveClass(/\bdark\b/);
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect(root).toHaveClass(/\bdark\b/);
+
+    await selectTheme("Light");
+    await expect(root).not.toHaveClass(/\bdark\b/);
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("blue-theme"))).toBe("light");
+  });
+
+  test("dashboard harness editor publishes configuration consumed by the CLI", async ({ page }) => {
+    await loginAsAdmin(page, { fresh: true });
+    await page.getByRole("link", { name: "Harnesses" }).click();
+    await expect(page).toHaveURL(/\/harnesses$/);
+    await page.getByRole("button", { name: "Actions for Codex" }).click();
+    await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const model = `gpt-dashboard-${Date.now()}`;
+    await page.getByLabel("Managed config YAML").fill(`model: ${model}\nreasoning_effort: low\napproval_policy: never\nsandbox_mode: workspace-write\n`);
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    const launch = await runCli(home, ["codex", "--dashboard-check"]);
+    expect(launch.code, launch.stderr).toBe(0);
+    expect(await readClientFile(home, ".codex/blue.config.toml")).toContain(model);
+  });
+
+  test("administrator API supports branding and invitation lifecycle", async ({ page }) => {
+    await loginAsAdmin(page);
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const me = await page.request.get(`${control}/auth/me`);
+    expect((await me.json()).role).toBe("admin");
+    for (const route of [
+      "/admin/governance-config/revisions",
+      "/admin/blue-config/export",
+      "/admin/harnesses/managed-configs",
+      "/admin/package-catalog",
+      "/admin/users",
+      "/admin/client-status",
+      "/admin/client-status/facets",
+      "/session-uploads/facets",
+      "/gateway/request-logs/facets",
+    ]) {
+      expect((await page.request.get(`${control}${route}`)).status(), route).toBe(200);
+    }
+    const instanceId = randomUUID();
+    const reported = await page.request.post(`${control}/client-status`, {
+      data: {
+        instance_id: instanceId,
+        hostname: "removable-e2e-client",
+        client_version: "0.1.0",
+        platform: "linux",
+        applied: false,
+        files_ok: true,
+      },
+    });
+    expect(reported.status(), await reported.text()).toBe(204);
+    const clientPage = await (await page.request.get(`${control}/admin/client-status?q=${instanceId}`)).json();
+    expect(clientPage.items).toHaveLength(1);
+    expect(clientPage.items[0]).toEqual(expect.objectContaining({
+      instance_id: instanceId,
+      activity_status: "recent",
+      first_seen_at: expect.any(String),
+      id: expect.any(String),
+    }));
+    const removed = await page.request.delete(`${control}/admin/client-status/${clientPage.items[0].id}`);
+    expect(removed.status(), await removed.text()).toBe(204);
+    expect((await page.request.delete(`${control}/admin/client-status/${clientPage.items[0].id}`)).status()).toBe(404);
+    const gatewayStatus = await (await page.request.get(`${control}/gateway/status`)).json();
+    expect(gatewayStatus.harnesses.length).toBeGreaterThan(0);
+    expect(gatewayStatus.inference_proxy_url).toBeTruthy();
+    expect(gatewayStatus.upstream_gateway_url).toBeTruthy();
+    expect(gatewayStatus.provisioner_type).toBeTruthy();
+    expect(gatewayStatus.runtime_checks).toBeTruthy();
+    const branding = await page.request.put(`${control}/admin/branding`, {
+      data: { logo_url: "https://example.com/blue.png", favicon_url: null },
+    });
+    expect(branding.status()).toBe(200);
+    expect((await (await page.request.get(`${control}/branding`)).json()).logo_url).toContain("example.com");
+
+    const identity = await (await page.request.get(`${control}/auth/me`)).json();
+    const adminEmail: string = identity.email;
+    const upperCased = adminEmail.toUpperCase();
+
+    const bySubstring = await (await page.request.get(
+      `${control}/admin/users?q=${encodeURIComponent(upperCased.slice(1, 6))}`,
+    )).json();
+    expect(bySubstring.items.map((item: { email: string }) => item.email)).toContain(adminEmail);
+    const bySubject = await (await page.request.get(
+      `${control}/admin/users?q=${encodeURIComponent(identity.subject ?? adminEmail)}`,
+    )).json();
+    expect(bySubject.total).toBeGreaterThan(0);
+    expect((await (await page.request.get(
+      `${control}/admin/users?provisioning_source=local`,
+    )).json()).items.every((item: { provisioning_source: string }) => item.provisioning_source === "local")).toBe(true);
+    expect((await page.request.get(`${control}/admin/users?provisioning_source=sso`)).status()).toBe(400);
+    expect((await page.request.get(`${control}/admin/users?q=${"a".repeat(201)}`)).status()).toBe(400);
+    expect((await (await page.request.get(
+      `${control}/admin/users?q=${encodeURIComponent("no-such-member@example.invalid")}`,
+    )).json()).total).toBe(0);
+
+    for (const facet of [
+      "/admin/client-status/facets",
+      "/session-uploads/facets",
+      "/gateway/request-logs/facets",
+    ]) {
+      const unfiltered = await (await page.request.get(`${control}${facet}`)).json();
+      expect(unfiltered.users.length).toBeLessThanOrEqual(10);
+      const missed = await (await page.request.get(
+        `${control}${facet}?user_q=${encodeURIComponent("no-such-member@example.invalid")}`,
+      )).json();
+      expect(missed.users, facet).toEqual([]);
+      expect((await page.request.get(`${control}${facet}?user_q=${"a".repeat(201)}`)).status(), facet).toBe(400);
+      const hydrated = await (await page.request.get(
+        `${control}${facet}?user_q=${encodeURIComponent("no-such-member@example.invalid")}&selected_user_id=${identity.id}`,
+      )).json();
+      expect(hydrated.users, facet).toEqual([]);
+      if (unfiltered.users.length > 0) {
+        const last = unfiltered.users[unfiltered.users.length - 1];
+        const matched = await (await page.request.get(
+          `${control}${facet}?user_q=${encodeURIComponent(last.email.toUpperCase())}`,
+        )).json();
+        expect(matched.users.map((user: { id: string }) => user.id), facet).toContain(last.id);
+        const prioritized = await (await page.request.get(
+          `${control}${facet}?selected_user_id=${last.id}`,
+        )).json();
+        expect(prioritized.users[0].id, facet).toBe(last.id);
+      }
+    }
+
+    const created = await page.request.post(`${control}/admin/invitations`, {
+      data: { email: `invite-${Date.now()}@example.com`, role: "member" },
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    const invitation = await created.json();
+    expect((await page.request.get(`${control}/admin/invitations/${invitation.id}`)).status()).toBe(200);
+    const invitationMatches = await (await page.request.get(
+      `${control}/admin/invitations?status=outstanding&role=member&q=${encodeURIComponent(invitation.email.toUpperCase())}`,
+    )).json();
+    expect(invitationMatches.items.map((item: { id: string }) => item.id)).toContain(invitation.id);
+    expect((await (await page.request.get(
+      `${control}/admin/invitations?status=outstanding&role=admin&q=${encodeURIComponent(invitation.email)}`,
+    )).json()).total).toBe(0);
+    expect((await page.request.get(`${control}/admin/invitations?role=owner`)).status()).toBe(400);
+    expect((await page.request.post(`${control}/admin/invitations/${invitation.id}/resend`)).status()).toBe(200);
+    expect((await page.request.delete(`${control}/admin/invitations/${invitation.id}`)).status()).toBe(204);
+  });
+
+  test("invited member can read policy but cannot call administrator or cross-user APIs", async ({ page, browser }) => {
+    await loginAsAdmin(page);
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
+    const email = `member-${Date.now()}@example.com`;
+    const created = await page.request.post(`${control}/admin/invitations`, { data: { email, role: "member" } });
+    expect(created.status(), await created.text()).toBe(201);
+    const invitation = await created.json();
+    const memberContext = await browser.newContext();
+    try {
+      const memberPage = await memberContext.newPage();
+      await memberPage.goto(`${dashboard}/accept-invitation?id=${invitation.id}`);
+      await memberPage.getByLabel("Password").fill("member-password-e2e");
+      await memberPage.getByRole("button", { name: "Create account" }).click();
+      await expect(memberPage).toHaveURL(/\/sessions/);
+      const me = await memberContext.request.get(`${control}/auth/me`);
+      expect(me.status(), await me.text()).toBe(200);
+      const identity = await me.json();
+      expect(identity.role).toBe("member");
+      expect((await memberContext.request.get(`${control}/admin/users`)).status()).toBe(403);
+      expect((await memberContext.request.get(`${control}/health/dependencies`)).status()).toBe(200);
+      expect((await memberContext.request.post(`${control}/gateway/proxy/health`)).status()).toBe(403);
+      expect((await memberContext.request.get(`${control}/gateway/request-logs`)).status()).toBe(403);
+      expect((await memberContext.request.get(`${control}/gateway/request-logs/facets`)).status()).toBe(403);
+      const gatewayStatus = await memberContext.request.get(`${control}/gateway/status`);
+      expect(gatewayStatus.status(), await gatewayStatus.text()).toBe(200);
+      expect(await gatewayStatus.json()).toEqual({ enabled: true, runtime_configured: true });
+      const memberConfig = await memberContext.request.get(`${control}/governance-config`, {
+        headers: {
+          "x-blue-contract-version": "2",
+          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state",
+        },
+      });
+      expect(memberConfig.status(), await memberConfig.text()).toBe(200);
+      expect((await memberConfig.json()).revision).toBeTruthy();
+      const memberSessions = await memberContext.request.get(`${control}/session-uploads?per_page=25`);
+      expect(memberSessions.status(), await memberSessions.text()).toBe(200);
+      expect((await memberSessions.json()).items).not.toContainEqual(expect.objectContaining({ id: adminSessionId }));
+      expect((await memberContext.request.get(`${control}/session-uploads/${adminSessionId}`)).status()).toBe(403);
+      expect((await memberContext.request.post(`${control}/session-uploads/${adminSessionId}/download`)).status()).toBe(403);
+
+      const shared = await page.request.put(`${control}/session-uploads/${adminSessionId}/sharing`, {
+        data: { mode: "selected", user_ids: [identity.id] },
+      });
+      expect(shared.status(), await shared.text()).toBe(200);
+      const resumable = await memberContext.request.get(`${control}/session-uploads?resumable=true&limit=100`);
+      expect(resumable.status(), await resumable.text()).toBe(200);
+      expect((await resumable.json()).items).toContainEqual(expect.objectContaining({
+        id: adminSessionId,
+        shared: true,
+      }));
+      expect((await memberContext.request.get(`${control}/session-uploads/${adminSessionId}`)).status()).toBe(200);
+      expect((await memberContext.request.post(`${control}/session-uploads/${adminSessionId}/download`)).status()).toBe(200);
+      expect((await memberContext.request.put(`${control}/session-uploads/${adminSessionId}/sharing`, {
+        data: { mode: "workspace" },
+      })).status()).toBe(403);
+
+      const revoked = await page.request.put(`${control}/session-uploads/${adminSessionId}/sharing`, {
+        data: { mode: "private" },
+      });
+      expect(revoked.status(), await revoked.text()).toBe(200);
+      expect((await memberContext.request.get(`${control}/session-uploads/${adminSessionId}`)).status()).toBe(403);
+      expect((await memberContext.request.post(`${control}/session-uploads/${adminSessionId}/download`)).status()).toBe(403);
+
+      await memberPage.goto(`${dashboard}/sessions`);
+      await expect(memberPage.getByRole("link", { name: "Sessions" })).toBeVisible();
+      await expect(memberPage.getByRole("link", { name: "Gateway" })).toBeVisible();
+      for (const name of ["Harnesses", "Extensions", "Members", "Clients"]) {
+        await expect(memberPage.getByRole("link", { name })).toHaveCount(0);
+      }
+      await memberPage.goto(`${dashboard}/gateway`);
+      await expect(memberPage.getByRole("tab", { name: "Key" })).toBeVisible();
+      await expect(memberPage.getByRole("tab", { name: "Overview" })).toHaveCount(0);
+      await expect(memberPage.getByRole("tab", { name: "Logs" })).toHaveCount(0);
+      const deniedPaths = ["/harnesses", "/extensions", "/members", "/clients", "/gateway?tab=logs"];
+      for (const path of deniedPaths) {
+        const response = await memberPage.goto(`${dashboard}${path}`, { waitUntil: "commit" });
+        expect(response?.status(), path).toBe(404);
+      }
+      const suspended = await page.request.patch(`${control}/admin/users/${identity.id}`, { data: { status: "suspended" } });
+      expect(suspended.status(), await suspended.text()).toBe(200);
+      await expect.poll(async () => (await memberContext.request.get(`${control}/auth/me`)).status()).toBe(401);
+      const reactivated = await page.request.patch(`${control}/admin/users/${identity.id}`, { data: { status: "active" } });
+      expect(reactivated.status(), await reactivated.text()).toBe(200);
+      expect((await page.request.delete(`${control}/admin/users/${identity.id}`)).status()).toBe(204);
+    } finally {
+      await memberContext.close();
+    }
+  });
+
+  test("SCIM supports discovery plus user and group lifecycle", async ({ request }) => {
+    const base = `${process.env.E2E_CONTROL_API_URL}/scim/v2`;
+    const headers = { authorization: "Bearer e2e-scim-token", "content-type": "application/scim+json" };
+    for (const route of ["/ServiceProviderConfig", "/ResourceTypes", "/Schemas"]) {
+      expect((await request.get(`${base}${route}`, { headers })).status()).toBe(200);
+    }
+    const createdUser = await request.post(`${base}/Users`, {
+      headers,
+      data: {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        externalId: `external-${Date.now()}`,
+        userName: `scim-${Date.now()}@example.com`,
+        active: true,
+        name: { givenName: "E2E", familyName: "Member" },
+      },
+    });
+    expect(createdUser.status(), await createdUser.text()).toBe(201);
+    const user = await createdUser.json();
+    const group = await request.post(`${base}/Groups`, {
+      headers,
+      data: {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        displayName: "Blue Administrators",
+        members: [{ value: user.id }],
+      },
+    });
+    expect(group.status(), await group.text()).toBe(201);
+    const groupBody = await group.json();
+    expect(groupBody.members).toEqual([
+      expect.objectContaining({ value: user.id }),
+    ]);
+    const invalidReplacement = await request.put(`${base}/Groups/${groupBody.id}`, {
+      headers,
+      data: {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        displayName: "Replacement Must Roll Back",
+        members: [{ value: randomUUID() }],
+      },
+    });
+    expect(invalidReplacement.status(), await invalidReplacement.text()).toBe(400);
+    const unchangedGroup = await request.get(`${base}/Groups/${groupBody.id}`, { headers });
+    expect(unchangedGroup.status(), await unchangedGroup.text()).toBe(200);
+    expect(await unchangedGroup.json()).toEqual(expect.objectContaining({
+      displayName: "Blue Administrators",
+      members: [expect.objectContaining({ value: user.id })],
+    }));
+    expect((await request.get(`${base}/Users?filter=${encodeURIComponent(`userName eq "${user.userName}"`)}`, { headers })).status()).toBe(200);
+    expect((await request.patch(`${base}/Users/${user.id}`, {
+      headers,
+      data: {
+        schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        Operations: [{ op: "replace", path: "active", value: false }],
+      },
+    })).status()).toBe(200);
+    expect((await request.delete(`${base}/Groups/${groupBody.id}`, { headers })).status()).toBe(204);
+    expect((await request.delete(`${base}/Users/${user.id}`, { headers })).status()).toBe(204);
+  });
+
+  test("logout removes the local rotating session", async () => {
+    const logout = await runCli(home, ["logout"]);
+    expect(logout.code, logout.stderr).toBe(0);
+    await expect(readFile(path.join(home, ".config", "blue", "session.json"), "utf8")).rejects.toThrow();
+  });
+});

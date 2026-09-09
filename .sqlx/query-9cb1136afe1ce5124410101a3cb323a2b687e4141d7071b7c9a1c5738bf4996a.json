@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update public.gateway_key_selections set credential_state='invalid',recovery_attempts=recovery_attempts+1,next_recovery_at=now() + make_interval(secs => least(3600,30 * (1 << least(recovery_attempts,7))) * (0.8 + random() * 0.4)),recovery_lease_until=null,provisioning_error=$2,updated_at=now() where user_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9cb1136afe1ce5124410101a3cb323a2b687e4141d7071b7c9a1c5738bf4996a"
+}

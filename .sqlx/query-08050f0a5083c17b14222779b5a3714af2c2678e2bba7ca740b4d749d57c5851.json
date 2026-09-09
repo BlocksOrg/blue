@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select i.id,i.email,i.role,i.status,i.\"expiresAt\" as expires_at,i.\"createdAt\" as created_at,u.email as inviter_email from auth.\"invitation\" i left join auth.\"user\" u on u.id=i.\"inviterId\" where i.\"organizationId\"=$1 and ($2::bool=false or i.status='pending') and ($3::text is null or lower(i.email) like $3 escape E'\\\\') and ($4::text is null or i.role=$4) order by i.\"createdAt\" desc limit $5 offset $6",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "inviter_email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "08050f0a5083c17b14222779b5a3714af2c2678e2bba7ca740b4d749d57c5851"
+}

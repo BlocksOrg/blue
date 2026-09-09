@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "blue": {
+      "type": "object",
+      "required": ["production", "enableInferenceProxy", "publicUrls"],
+      "properties": {
+        "production": { "type": "boolean" },
+        "enableInferenceProxy": { "type": "boolean" },
+        "gatewayType": { "type": "string", "pattern": "^$|^[a-z0-9_-]+$" },
+        "inferenceProxyClientId": { "type": "string" },
+        "internalTransport": {
+          "type": "object",
+          "required": ["mode", "serverSecret", "clientSecret"],
+          "properties": {
+            "mode": { "enum": ["mtls", "insecure-http"] },
+            "serverSecret": { "type": "string" },
+            "clientSecret": { "type": "string" }
+          }
+        },
+        "existingSecret": { "type": "string" },
+        "config": {
+          "type": "object",
+          "properties": {
+            "existingConfigMap": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 },
+            "mountPath": { "type": "string", "pattern": "^/" }
+          }
+        },
+        "provisionerExecutable": {
+          "type": "object",
+          "required": ["enabled", "image", "executableSha256"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": {
+              "type": "object",
+              "required": ["repository", "digest", "pullPolicy"],
+              "properties": {
+                "repository": { "type": "string" },
+                "digest": { "type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$" },
+                "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+              }
+            },
+            "executableSha256": { "type": "string", "pattern": "^$|^[a-f0-9]{64}$" }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "enabled": { "const": true } } },
+              "then": {
+                "properties": {
+                  "image": {
+                    "properties": {
+                      "repository": { "minLength": 1 },
+                      "digest": { "pattern": "^sha256:[a-f0-9]{64}$" }
+                    }
+                  },
+                  "executableSha256": { "pattern": "^[a-f0-9]{64}$" }
+                }
+              }
+            }
+          ]
+        },
+        "publicUrls": {
+          "type": "object",
+          "required": ["dashboard", "controlApi", "docs", "inferenceProxy"],
+          "properties": {
+            "dashboard": { "type": "string", "format": "uri" },
+            "controlApi": { "type": "string", "format": "uri" },
+            "docs": { "type": "string", "format": "uri" },
+            "inferenceProxy": { "type": "string", "format": "uri" }
+          }
+        }
+      },
+      "allOf": [{
+        "if": { "properties": { "enableInferenceProxy": { "const": true } } },
+        "then": { "required": ["gatewayType"], "allOf": [
+          { "properties": { "gatewayType": { "minLength": 1 } } },
+          {
+          "if": { "properties": { "internalTransport": { "properties": { "mode": { "const": "mtls" } } } } },
+          "then": { "properties": { "internalTransport": { "properties": {
+            "serverSecret": { "minLength": 1 }, "clientSecret": { "minLength": 1 }
+          } } } }
+        }] }
+      }, {
+        "if": { "properties": { "production": { "const": true } } },
+        "then": {
+          "properties": { "existingSecret": { "minLength": 1 } },
+          "required": ["existingSecret"]
+        }
+      }]
+    },
+    "migrations": {
+      "type": "object",
+      "required": ["enabled", "activeDeadlineSeconds", "backoffLimit", "ttlSecondsAfterFinished"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
+        "backoffLimit": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "ttlSecondsAfterFinished": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": ["enabled", "databaseCidrs", "redisCidrs", "externalHttpsCidrs"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "databaseCidrs": { "type": "array", "items": { "type": "string" } },
+        "databasePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "redisCidrs": { "type": "array", "items": { "type": "string" } },
+        "redisPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "externalHttpsCidrs": { "type": "array", "items": { "type": "string" } },
+        "extraEgress": { "type": "array" }
+      }
+    }
+  },
+  "allOf": [{
+    "if": {
+      "properties": { "blue": { "properties": { "production": { "const": true } } } }
+    },
+    "then": {
+      "properties": {
+        "image": {
+          "properties": { "digest": { "pattern": "^sha256:[a-f0-9]{64}$" } },
+          "required": ["digest"]
+        },
+        "migrations": {
+          "properties": { "enabled": { "const": true } }
+        },
+        "networkPolicy": {
+          "properties": {
+            "enabled": { "const": true },
+            "databaseCidrs": { "minItems": 1 },
+            "externalHttpsCidrs": { "minItems": 1 }
+          }
+        }
+      }
+    }
+  }]
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from auth.\"deviceCode\" where \"userId\"=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ef68ff97b1f2ca2d65a0a9349eea6b5811bb856b5ddf3a323ff83a167c8cfa1d"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from gateway_request_logs where expires_at <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6a3a5767d93ee564ea8006198df03ea2545eda741fb1b950f29a3d3ab9b3c2a6"
+}

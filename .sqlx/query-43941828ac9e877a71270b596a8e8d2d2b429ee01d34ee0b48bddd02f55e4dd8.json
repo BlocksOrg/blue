@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update public.gateway_key_revocations set attempts=attempts+1,last_error=$2,next_attempt_at=now() + make_interval(secs => least(3600,30 * (1 << least(attempts,7)))) where external_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "43941828ac9e877a71270b596a8e8d2d2b429ee01d34ee0b48bddd02f55e4dd8"
+}

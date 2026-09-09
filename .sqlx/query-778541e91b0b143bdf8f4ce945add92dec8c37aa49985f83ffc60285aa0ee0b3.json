@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"invitation\" set status='canceled' where \"organizationId\"=$1 and lower(email)=lower($2) and status='pending' and \"expiresAt\" <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "778541e91b0b143bdf8f4ce945add92dec8c37aa49985f83ffc60285aa0ee0b3"
+}

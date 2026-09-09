@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(SELECT 1 FROM captured_sessions s WHERE s.id=$1 AND s.organization_id=$2 AND (s.sharing_mode='workspace' OR EXISTS (SELECT 1 FROM captured_session_grants g JOIN users u ON u.id=g.user_id WHERE g.captured_session_id=s.id AND g.user_id=$3 AND u.active=true))) AS \"exists!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "22c88808d40f5392816736d1a62de6de9bffeb4d70ead15e016313153506321c"
+}

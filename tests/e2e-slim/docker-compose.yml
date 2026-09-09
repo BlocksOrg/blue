@@ -1,0 +1,107 @@
+name: blue-e2e-slim
+
+# Lean, gateway-disabled topology for the e2e-slim suite: control-api + its two
+# hard dependencies (Postgres, an S3 blob store) plus a tiny JWKS sidecar that
+# stands in for the dashboard's Better Auth JWKS endpoint. No dashboard,
+# inference-proxy, LiteLLM, Redis, or gateway. Tests run on the host, so the
+# data services publish host ports.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: harness
+      POSTGRES_PASSWORD: harness
+      POSTGRES_DB: governance
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harness -d governance"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    image: ${BLUE_E2E_SLIM_IMAGE:-blue-e2e-base:local}
+    command: ["migrate"]
+    environment:
+      HARNESS_DATABASE_URL: postgres://harness:harness@postgres:5432/governance
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mc alias set local http://minio:9000 minioadmin minioadmin && mc mb --ignore-existing local/raw-sessions"]
+
+  jwks:
+    image: node:22-bookworm-slim
+    command: ["node", "/fixtures/jwks-server.mjs"]
+    environment:
+      PORT: "8080"
+    volumes:
+      - ./fixtures:/fixtures:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  control-api:
+    # The full deployment image (built once by `images.yml`, or locally by the
+    # build overlay). It ships control-api, so the governance-only stack runs it
+    # directly with `command: ["control-api"]`; use the image's component-aware
+    # healthcheck so the runtime does not need a general-purpose curl binary.
+    image: ${BLUE_E2E_SLIM_IMAGE:-blue-e2e-base:local}
+    command: ["control-api"]
+    environment:
+      HARNESS_DATABASE_URL: postgres://harness:harness@postgres:5432/governance
+      BLUE_CONFIG_FILE: /etc/blue/blue.yaml
+      BLUE_HEALTHCHECK_COMPONENT: control-api
+      HARNESS_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
+      # Auth: verify user tokens against the committed test JWKS. These MUST stay
+      # byte-identical to the constants in src/lib.rs (KID/ISSUER/AUDIENCE).
+      HARNESS_AUTH_JWKS_URL: http://jwks:8080/jwks
+      HARNESS_AUTH_ISSUER: https://e2e-slim.blue.test/
+      HARNESS_AUTH_AUDIENCE: https://control-api.e2e-slim.blue.test
+      # Blob storage: control-api's own S3 client stays in-network; presigned
+      # URLs must resolve to the host-published endpoint the test runner reaches.
+      HARNESS_BLOB_BUCKET: raw-sessions
+      HARNESS_BLOB_REGION: us-east-1
+      HARNESS_BLOB_ENDPOINT: http://minio:9000
+      HARNESS_BLOB_PUBLIC_ENDPOINT: http://127.0.0.1:9000
+      HARNESS_BLOB_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      BLUE_ALLOW_INSECURE_DEV: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./fixtures/governance-only-slim.yaml:/etc/blue/blue.yaml:ro
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+      jwks: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/blue-healthcheck"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s

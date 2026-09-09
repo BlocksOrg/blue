@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id,u.email FROM captured_session_grants g JOIN users u ON u.id=g.user_id WHERE g.captured_session_id=$1 AND u.active=true ORDER BY lower(u.email),u.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2c41200d9c6477723a20c9d637f6f149f920b216a1b0fb33795d4743b807d5e7"
+}

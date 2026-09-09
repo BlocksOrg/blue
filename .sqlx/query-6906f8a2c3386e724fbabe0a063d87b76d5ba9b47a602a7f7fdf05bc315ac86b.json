@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,connection_id,repository,requested_ref,resolved_commit FROM package_artifacts WHERE organization_id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "connection_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "repository",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "requested_ref",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "resolved_commit",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6906f8a2c3386e724fbabe0a063d87b76d5ba9b47a602a7f7fdf05bc315ac86b"
+}

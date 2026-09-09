@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update scim_groups set external_id=$1,display_name=$2,updated_at=now() where id=$3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0f4af7aa34ca921af0bb6574717c4e3533fa980a5c5bd2def9463430cc26c2c9"
+}

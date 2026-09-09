@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE session_artifacts SET status='failed',failure_reason='blob metadata mismatch' WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a84d63603f7eb9ab00a727d01c97cba378cbf3d5bb6970e6afdfcfc1e0c6dd40"
+}

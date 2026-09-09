@@ -1,0 +1,55 @@
+---
+title: "Manage organization policy"
+description: "Edit, validate, version, and deliver governance policy from the dashboard."
+icon: "file-pen"
+---
+
+The user menu's **Current deployment configuration** dialog presents a read-only export of the effective deployment configuration. Managed coding-agent settings are edited on **Harnesses**, while extensions and MCP servers use **Extensions**. Other organization policy is edited in the mounted `blue.yaml`.
+
+The mounted `blue.yaml` is also reconciled at Control API startup. A deployment change creates a revision when it changes the effective policy. Dashboard changes win when both sources changed the same field; the service logs the skipped paths without logging their values.
+
+## Source-of-truth boundary
+
+Store organization decisions in the deployment `governance` section:
+
+- allowed harnesses
+- managed harness settings, which can also be changed from **Harnesses**
+- global gateway type; client-to-proxy authentication is fixed to bearer
+- session-upload opt-in
+
+Packages, skills, subagents, hooks, plugins, helpers, and MCP servers can be managed from **Extensions** and are included in the exported deployment YAML.
+
+Do not store the deployed inference proxy URL or a user pseudotoken. The Control API injects both when serving `GET /governance-config` to an authenticated user.
+
+## Publishing a change
+
+<Steps>
+  <Step title="Edit the deployment YAML">Change the smallest policy block needed in the mounted `blue.yaml`.</Step>
+  <Step title="Deploy the change">Restart the Control API. It validates and reconciles the new baseline into an immutable revision.</Step>
+  <Step title="Reconcile clients">Developers can run `blue apply` immediately. Daemons pick up the revision on their next TTL poll.</Step>
+  <Step title="Verify rollout">Use the Clients page to compare desired and applied revisions and inspect managed-file health.</Step>
+</Steps>
+
+## Harness settings
+
+Open **Harnesses** in the administrator sidebar. Its metadata-driven table lists the available harnesses; each row's **Edit** dialog provides an optional semantic-version range and a YAML editor scoped to that agent's `managed_config`. The server validates both before publishing them and records the minimum compatible Blue client when version pinning is enabled.
+
+Saving replaces only the selected agent's `managed_config` and preserves packages, MCP servers, and every other policy block. Each save uses the current base revision, so a concurrent policy change must be reloaded instead of being overwritten.
+
+## Extensions
+
+Open **Extensions** in the administrator sidebar. Package cards show immutable versions, digests, harness compatibility, and included skills, subagents, hooks, plugins, or helper executables. The MCP servers tab manages local-command and remote-URL servers and the agents that receive each definition. See [Managed packages](/next/admin/managed-packages) for the complete package lifecycle.
+
+Custom packages use the same normalized schema as catalog entries. The source inspector accepts `github:owner/repository@ref` for public GitHub repositories, public HTTPS archives, or an allowed deployment-managed GitHub/Bitbucket repository connection. Public GitHub refs are resolved to immutable codeload URLs and downloaded directly by clients. Managed repository refs are resolved to immutable commits and mirrored into organization-scoped storage. Every inspected source displays its exact SHA-256, and archives are capped at 100 MiB. Review the complete adapter inventory and digest before saving.
+
+Per-harness overrides can disable a package or provide adapter settings. They cannot change the organization-approved archive or digest. All Extension tabs share one pending-change state and publish through the same revision checks.
+
+## Reconcile with deployment YAML
+
+The user menu's **Current deployment configuration** dialog combines the mounted server and catalog sections with the complete current governance revision and provides **Copy** and **Download** actions. Use it when dashboard changes should become the new deployment baseline. Existing environment and file references are preserved. Literal database credentials, SCIM tokens, gateway secrets, and repository credentials are replaced by usable `os.environ/NAME` references and listed above the export.
+
+Managed-repository extensions include their connection, repository, requested ref, resolved commit, and digest in the export. On startup Blue reuses a matching artifact or mirrors the exact pinned commit again; a missing connection or digest mismatch is rejected.
+
+The Clients page reports each package as applied or drifted. Package failures are isolated, so unrelated packages can converge, but a governed launch does not proceed while one of its required packages failed for that harness.
+
+See [Harness version compatibility](/next/concepts/harness-version-compatibility) for version routing and [Governance configuration](/next/reference/governance-config) for field definitions and examples.

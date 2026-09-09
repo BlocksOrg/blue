@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"user\" set email=$1,name=$2,banned=$3,\"banReason\"=$4,\"updatedAt\"=now() where id=$5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0f8f893612a841551d7314bb8abc9bfc6d389b4ac9c3b27b8a7367ff0bc5b14d"
+}

@@ -1,0 +1,14 @@
+# Production overlay. Replace all examples before installation.
+blue:
+  production: true
+  existingSecret: blue-runtime
+
+image:
+  repository: ghcr.io/blocksorg/governance-harness
+  tag: ""
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+networkPolicy:
+  enabled: true
+  databaseCidrs: [10.0.0.0/24]
+  externalHttpsCidrs: [10.0.1.0/24]

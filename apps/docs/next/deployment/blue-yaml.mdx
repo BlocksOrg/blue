@@ -1,0 +1,378 @@
+---
+title: "Configure blue.yaml"
+description: "Author the unified deployment configuration for runtime services, governance policy, gateway routing, and managed package catalogs."
+icon: "file-code"
+---
+
+`blue.yaml` is the source-controlled configuration for one Blue deployment. The binary default for `BLUE_CONFIG_FILE` is `blue.yaml`, but every documented container deployment uses the image's fixed `/etc/blue/blue.yaml`; mount the file there.
+
+The file combines server runtime configuration and the organization policy seed, but Blue does not send the complete file to clients.
+
+| Top-level section | Purpose | Delivered to clients |
+| --- | --- | --- |
+| `control_api` | Database, identity, storage, retention, and managed-repository runtime | No |
+| `gateway` | Optional inference gateway, proxy, encryption, and provisioner runtime | Only a personalized gateway projection; never server secrets |
+| `governance` | Baseline policy for allowed agents, managed configuration, packages, and session capture | Yes, after organization and user personalization |
+| `package_catalog` | Curated extension choices shown to administrators | No; a package enters governance only after an administrator selects it |
+
+<Warning>
+  Treat the repository containing `blue.yaml` as deployment configuration, not secret storage. Commit environment references and immutable policy values. Put credentials in your secret manager and expose them to the workload through `blue.existingSecret` or your existing secret delivery system.
+</Warning>
+
+## How values are resolved
+
+Runtime settings use this precedence:
+
+1. A non-empty direct environment variable, such as `HARNESS_DATABASE_URL`.
+2. The corresponding scalar in `blue.yaml`.
+3. A built-in default, where the setting has one.
+
+A YAML scalar can reference an environment variable with either supported form:
+
+```yaml
+database_url: os.environ/HARNESS_DATABASE_URL
+```
+
+```yaml
+database_url: env://HARNESS_DATABASE_URL
+```
+
+`os.environ/NAME` is used by generated exports and examples. `env://NAME` is accepted for compatibility. Startup fails when a referenced variable is absent. Boolean and numeric settings may be native YAML scalars or environment-backed strings.
+
+Managed repository credential fields also accept `file://absolute/path`, which is useful with secret-store CSI mounts:
+
+```yaml
+private_key: file:///var/run/secrets/blue/github-app.pem
+```
+
+`file://` is not a general reference form for every runtime field. Use it for managed repository connection fields and `gateway.secret_encryption.key`.
+
+## Production starting point
+
+The deployment bundle includes a minimal `blue.yaml`. A production-oriented governance-only configuration has this shape:
+
+```yaml
+control_api:
+  listen: 0.0.0.0:8080
+  database_url: os.environ/HARNESS_DATABASE_URL
+
+  bootstrap:
+    organization_slug: engineering
+    organization_name: Engineering
+    admin_subject: bootstrap-admin
+    admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL
+
+  auth:
+    public_url: https://blue.example.com
+    session_url: http://blue-blue-dashboard:3000/api/auth/get-session
+    jwks_url: http://blue-blue-dashboard:3000/api/auth/jwks
+    issuer: https://blue.example.com/api/auth
+    audience: https://api.blue.example.com
+    client_id: blue-cli
+
+  identity:
+    mode: password
+
+  blob_storage:
+    bucket: os.environ/HARNESS_BLOB_BUCKET
+    region: us-west-2
+    presign_ttl_seconds: 300
+    retention_days: 30
+
+  package_artifacts:
+    bucket: os.environ/HARNESS_PACKAGE_BUCKET
+
+  gateway_request_logs:
+    retention_days: 30
+
+governance:
+  revision: "2026-08-30.1"
+  contract_version: 2
+  required_capabilities:
+    - adapter_intervals
+    - compiled_harness_registry
+    - transactional_reconcile
+    - versioned_state
+  minimum_client_version: "0.1.0"
+  ttl_seconds: 300
+  required: true
+  allowed_harnesses: [codex, claude, kimi, opencode]
+  harnesses:
+    codex:
+      managed_config:
+        model: gpt-5.6-sol
+        reasoning_effort: medium
+        approval_policy: on-request
+        sandbox_mode: workspace-write
+    claude:
+      managed_config: {}
+    kimi:
+      managed_config: {}
+    opencode:
+      managed_config: {}
+```
+
+New production baselines use `required: true`, so clients refuse to launch from
+an expired cache when the governance service is unavailable. Existing revisions
+and an explicitly authored `required: false` remain unchanged during upgrades.
+
+The Helm values configure the public dashboard and API domains separately. Keep those values consistent with `control_api.auth`:
+
+```yaml
+blue:
+  publicUrls:
+    dashboard: https://blue.example.com
+    controlApi: https://api.blue.example.com
+  existingSecret: blue-runtime
+```
+
+## Configure `control_api`
+
+### Process and bootstrap settings
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `listen` | No | Control API bind address. The image and chart expect `0.0.0.0:8080`. |
+| `internal_listen` | No | Internal resolver bind; defaults to `127.0.0.1:8082` and must be `0.0.0.0:8082` for cross-pod gateway mode. |
+| `database_url` | Yes | PostgreSQL connection URL. Prefer `os.environ/HARNESS_DATABASE_URL`. |
+| `database.max_connections` | No | Control database pool size; defaults to `30`. Gateway provisioning requires at least `2`. |
+| `gateway_request_logs.max_connections` | No | Request-log database pool size; defaults to `5`. |
+| `run_background_jobs` | No | Run cleanup, reconciliation, and other background loops; defaults to `true`. |
+| `gateway.kms_max_concurrency` | No | Maximum concurrent gateway KMS operations; defaults to `32`. |
+| `gateway.kms_timeout_seconds` | No | Gateway KMS operation timeout; defaults to `3`. |
+| `bootstrap.organization_slug` | No | Stable identifier for the initial organization. Do not casually change it after deployment. |
+| `bootstrap.organization_name` | No | Initial display name for the organization. |
+| `bootstrap.admin_subject` | No | Stable subject for the protected bootstrap administrator. |
+| `bootstrap.admin_email` | No | Email used to initialize the bootstrap administrator. |
+
+Bootstrap values initialize a new database. They are not a declarative user-management system for existing organizations; manage members and invitations through the dashboard or SCIM after startup.
+
+### Authentication endpoints
+
+| Field | Example | Meaning |
+| --- | --- | --- |
+| `auth.public_url` | `https://blue.example.com` | Browser-reachable dashboard origin used for invitations and device authorization. |
+| `auth.session_url` | `http://blue-blue-dashboard:3000/api/auth/get-session` | Better Auth session endpoint reachable from the Control API. Helm names this `<release>-blue-dashboard`; this example uses release name `blue`. Loopback applies only when both processes share one container. |
+| `auth.jwks_url` | `http://blue-blue-dashboard:3000/api/auth/jwks` | Signing-key endpoint reachable from the Control API. Helm names this `<release>-blue-dashboard`; this example uses release name `blue`. |
+| `auth.issuer` | `https://blue.example.com/api/auth` | OAuth issuer expected in CLI access tokens. |
+| `auth.audience` | `https://api.blue.example.com` | Public Control API origin used as the token audience and discovery URL. |
+| `auth.client_id` | `blue-cli` | Public OAuth client identifier used by workstation clients. |
+
+`BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, bootstrap password, and OIDC provider credentials are dashboard runtime variables supplied through the Helm secret; they are not replacements for the endpoint contract above.
+
+<Warning>
+  Changing issuer, audience, client ID, or `BETTER_AUTH_SECRET` on an existing deployment invalidates authentication assumptions and may invalidate sessions or signing material. Treat those changes as planned identity migrations.
+</Warning>
+
+### Identity lifecycle
+
+```yaml
+control_api:
+  identity:
+    mode: oidc
+    scim_bearer_token: os.environ/HARNESS_SCIM_BEARER_TOKEN
+    group_role_mappings: os.environ/HARNESS_SCIM_GROUP_ROLE_MAPPINGS
+```
+
+`mode` accepts `password` or `oidc`. OIDC mode requires a SCIM bearer token because Blue uses directory provisioning rather than just-in-time user creation. `group_role_mappings` is a JSON object whose values are `admin` or `member`, for example `{"Blue Admins":"admin"}`. Configure provider ID, issuer, client ID, and client secret as dashboard environment variables. Follow [Set up Okta SSO and SCIM](/next/admin/identity-provisioning) for the complete lifecycle.
+
+### Blob and package storage
+
+```yaml
+control_api:
+  blob_storage:
+    bucket: blue-sessions-production
+    region: us-west-2
+    presign_ttl_seconds: 300
+    retention_days: 30
+  package_artifacts:
+    bucket: blue-packages-production
+```
+
+| Field | Meaning |
+| --- | --- |
+| `blob_storage.bucket` | Raw session-upload objects. Required even when capture is initially disabled. |
+| `blob_storage.region` | S3 signing region; defaults to `us-east-1`. |
+| `blob_storage.endpoint` | Optional internal S3-compatible endpoint used by the service. Omit for AWS S3. |
+| `blob_storage.public_endpoint` | Optional client-reachable endpoint embedded in presigned URLs. Use when the internal endpoint is not externally resolvable. |
+| `blob_storage.force_path_style` | Enable for providers such as local MinIO that require path-style addressing. |
+| `blob_storage.presign_ttl_seconds` | Positive lifetime for upload/download URLs; defaults to 300 seconds. |
+| `blob_storage.retention_days` | Positive session-retention deadline stored by Blue. The AWS starter creates a matching lifecycle rule; configure equivalent expiration for other storage backends because Blue does not delete expired objects itself. |
+| `package_artifacts.bucket` | Separate non-expiring bucket for immutable archives mirrored from managed repositories; defaults to `package-artifacts`. |
+
+Use workload identity or ambient AWS credentials rather than static access keys. Keep session and package buckets separate because they have different retention and recovery requirements.
+
+### Request logs and managed repositories
+
+`gateway_request_logs.retention_days` controls metadata retention for inference-proxy request logs. It does not store prompt or response bodies.
+
+Managed repository connections let administrators select packages from private GitHub or Bitbucket repositories without giving repository credentials to clients:
+
+```yaml
+control_api:
+  package_sources:
+    connections:
+      - id: engineering-github
+        name: Engineering GitHub
+        provider: github
+        app_id: os.environ/HARNESS_GITHUB_APP_ID
+        private_key: file:///var/run/secrets/blue/github-app.pem
+        organizations:
+          engineering: [example-org]
+```
+
+Supported providers are `github`, `bitbucket_cloud`, and `bitbucket_data_center`. GitHub requires `app_id` and `private_key`; Bitbucket requires `token`. Connection IDs must be unique and contain only letters, numbers, dashes, or underscores. The `organizations` map limits which repository namespaces each Blue organization may use. See [Managed repositories](/next/deployment/managed-repositories) for enterprise URLs, CA bundles, and artifact mirroring.
+
+## Configure optional gateway mode
+
+Omit the entire `gateway` section for governance-only operation. Adding it connects Blue to an upstream inference gateway operated by your organization, enables gateway policy for every allowed agent, and requires a provisioner plus encrypted server-side credential storage. Blue does not bundle the upstream gateway. LiteLLM is the first and currently only supported `gateway.type`.
+
+```yaml
+gateway:
+  type: litellm
+  url: os.environ/HARNESS_GATEWAY_URL
+  inference_proxy_url: https://inference.blue.example.com
+  inference_proxy_health_url: http://127.0.0.1:8081/health
+  internal_allowed_client_id: blue-inference-proxy
+  secret_encryption:
+    provider: aws-kms
+    key_id: arn:aws:kms:us-west-2:123456789012:key/example
+  provisioner:
+    type: builtin-litellm
+    reconcile_ttl_seconds: 86400
+```
+
+| Field | Meaning |
+| --- | --- |
+| `type` | Gateway policy identifier projected into personalized client policy. |
+| `url` | Upstream LiteLLM-compatible gateway reachable from the Control API. |
+| `inference_proxy_url` | Public proxy URL written into governed agent overlays. |
+| `inference_proxy_health_url` | Internal health URL used by the Control API. |
+| `internal_allowed_client_id` | OAuth client id (`sub`) the Control API accepts on the internal resolver from the inference proxy's client-credentials token. Defaults to `blue-inference-proxy`. |
+| `secret_encryption.provider` | `aws-kms` for production or `environment` for development. |
+| `secret_encryption.key_id` | AWS KMS key used for envelope encryption. |
+| `secret_encryption.key` | Base64 environment key required by the development `environment` provider. |
+| `provisioner.type` | Built-in or custom executable identifier. The public image supports `builtin-litellm`. |
+| `provisioner.executable_path` | Optional absolute path to a custom executable. Required with `executable_sha256`. |
+| `provisioner.executable_sha256` | Lowercase SHA-256 pin for the exact custom executable. Required with `executable_path`. |
+| `provisioner.policy_revision` | Non-empty policy revision for a custom executable; changing it triggers reconciliation. |
+| `provisioner.reconcile_ttl_seconds` | Positive interval before Blue reconciles the managed gateway credential again. |
+| `provisioner.timeout_seconds` | Per-invocation custom executable deadline; defaults to 15 seconds. |
+| `provisioner.max_concurrency` | Configured provisioner concurrency ceiling; defaults to `8` and is further limited by the database pool. |
+
+`HARNESS_PROVISIONER_EXECUTABLE_PATH` and `HARNESS_PROVISIONER_EXECUTABLE_SHA256` override the corresponding custom-provisioner YAML fields.
+
+The inference proxy also requires `HARNESS_GATEWAY_TYPE` with the same value as
+`gateway.type`; it does not infer a gateway from the upstream URL. In Helm, set
+`blue.gatewayType`, which is required with `blue.enableInferenceProxy=true` and
+is injected into both the Control API and proxy workloads.
+
+The LiteLLM administrator key remains a runtime secret supplied as `HARNESS_LITELLM_ADMIN_KEY`; do not put it in governance policy. See [Bring your own gateway](/next/concepts/gateway-mode) for the request path, pseudotoken model, and operational checks.
+
+## Configure the governance baseline
+
+The `governance` section is the deployment-authored baseline delivered to clients after personalization. It controls:
+
+| Field | Meaning |
+| --- | --- |
+| `revision` | Required seed value. The Control API replaces it with an immutable stored revision ID whenever it publishes a revision. |
+| `contract_version` | Wire contract version. Current clients support version 2. |
+| `required_capabilities` | Features a client must support before accepting policy. |
+| `minimum_client_version` | Operator-visible rollout floor; required when using harness version ranges or versioned package adapters. |
+| `ttl_seconds` | Client cache and polling interval; defaults to 300 seconds. |
+| `required` | When true, clients fail closed instead of launching from stale cached policy. |
+| `allowed_harnesses` | Supported agent keys users may launch through Blue. |
+| `harnesses` | Per-agent version constraint, managed settings, MCP servers, and package overrides. |
+| `session_upload` | Optional global raw-session capture policy. Omit to disable capture. |
+| `telemetry` | Optional metadata-only run event sink. |
+
+Per-agent managed settings are agent-native and version-aware:
+
+```yaml
+governance:
+  harnesses:
+    codex:
+      version_requirement: ">=0.149.0, <0.150.0"
+      managed_config:
+        model: gpt-5.6-sol
+        reasoning_effort: medium
+        approval_policy: on-request
+        sandbox_mode: workspace-write
+      mcp:
+        - name: engineering-tools
+          transport: http
+          url: https://mcp.example.com
+```
+
+Use [Governance configuration](/next/reference/governance-config) for the complete client policy schema, package adapters, MCP transports, and harness-specific behavior.
+
+### Baseline reconciliation
+
+On startup, the Control API compares:
+
+1. The baseline previously loaded from `blue.yaml`.
+2. The current organization revision, including dashboard edits.
+3. The newly mounted `governance` section.
+
+Non-conflicting deployment changes create a new immutable revision. A dashboard-edited value wins when both the dashboard and the new deployment baseline changed the same path; startup reports the skipped path without logging secret values. Users, sessions, gateway selections, package artifacts, and other accumulated records are not replaced by `blue.yaml`.
+
+The Control API detects baseline changes from the normalized document, not from the authored `revision` string. You do not need to manually increment that seed value; use source control and deployment image tags to identify authored releases.
+
+<Tip>
+  Make small, reviewable baseline changes and inspect startup reconciliation notices after deployment. Export the current secret-safe YAML from the dashboard before a large refactor so authored configuration reflects intentional dashboard state.
+</Tip>
+
+## Configure the package catalog
+
+`package_catalog` defines choices displayed on the dashboard's Extensions page. Catalog entries are not automatically installed. When an administrator selects one, Blue copies its immutable recipe into an organization governance revision.
+
+```yaml
+package_catalog:
+  packages:
+    - id: engineering-toolkit
+      name: Engineering Toolkit
+      version: "1.4.0"
+      source_ref: https://artifacts.example.com/blue/engineering-toolkit-1.4.0.tar.gz
+      sha256: 64-character-lowercase-sha256-digest
+      adapters:
+        codex:
+          skills_dir: skills
+        claude:
+          skills_dir: skills
+        kimi:
+          skills_dir: skills
+        opencode:
+          skills_dir: skills
+```
+
+Every source must be immutable and SHA-256 pinned. Use `platform_sources` when helper binaries differ by operating system or architecture. Adapter paths must be archive-relative and identify only content Blue knows how to activate; package installation does not run arbitrary installer scripts.
+
+## Validate and roll out changes
+
+<Steps>
+  <Step title="Review secret boundaries">
+    Confirm that database URLs, private keys, tokens, encryption material, bootstrap passwords, and gateway administrator keys are references rather than literals.
+  </Step>
+  <Step title="Validate YAML and deployment templates">
+    Run the release bundle's validation workflow. Locally, parse `blue.yaml`, lint the chart, and render Kubernetes resources:
+
+    ```bash
+    yq eval '.' blue.yaml >/dev/null
+    helm lint chart/blue -f values.yaml
+    helm template blue chart/blue -f values.yaml >/dev/null
+    ```
+  </Step>
+  <Step title="Review infrastructure and image changes">
+    Review the OpenTofu plan and the organization image diff. Pin the upstream Blue image to the intended release rather than relying on `latest`.
+  </Step>
+  <Step title="Deploy and inspect startup">
+    Wait for the Helm rollout and inspect Control API logs for YAML parsing, missing references, migration failures, and baseline reconciliation notices.
+  </Step>
+  <Step title="Verify public behavior">
+    Check the dashboard and Control API health endpoints, sign in as an administrator, then run `blue setup`, `blue login`, `blue status`, and a governed agent launch from a test workstation.
+  </Step>
+</Steps>
+
+<Check>
+  A complete rollout has healthy service probes, no unresolved environment references, the expected governance revision in the dashboard, and matching desired/applied revisions on a test client.
+</Check>

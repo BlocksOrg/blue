@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"invitation\" set \"inviterId\"=(select subject from users where organization_id=$1 and protected limit 1) where \"inviterId\"=$2 and status='pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2f1a73062103192fef73431cbc28ef03eb09ba89a59eaa0d2c6cb963447e1a17"
+}

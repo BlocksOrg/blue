@@ -1,0 +1,1419 @@
+//! `gh-config` builds launch-scoped, metaharness-owned runtime overlays. Native
+//! user configuration is read as merge input but is not a governance target.
+//! Each writer also returns the arguments/environment needed to opt the child
+//! process into its overlay.
+
+mod adapters;
+pub mod implementations {
+    //! Public harness implementation contract and compiled registry.
+    pub use super::adapters::*;
+}
+mod compat;
+mod packages;
+mod plan;
+pub mod session_bundle;
+mod util;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use gh_common::{paths, GhError, Harness};
+use gh_service::{GatewayConfig, HarnessPolicy, ManagedPackage};
+use serde::{Deserialize, Serialize};
+
+pub use compat::{
+    resolve as resolve_compatibility, supported_install, validate_package_adapter_for_policy,
+    validate_package_adapters_for_policy, CompatibilityFailure, HarnessContext, ProfileStatus,
+};
+pub use packages::PackageFetcher;
+
+pub struct AuthenticatedPackageFetcher<'a> {
+    pub client: &'a gh_service::ServiceClient,
+    pub session: &'a gh_service::Session,
+}
+
+impl PackageFetcher for AuthenticatedPackageFetcher<'_> {
+    fn fetch(&self, source_ref: &str, artifact_id: Option<&str>) -> Result<Vec<u8>, GhError> {
+        match artifact_id {
+            Some(id) => self.client.download_package_artifact(self.session, id),
+            None => packages::DirectPackageFetcher.fetch(source_ref, None),
+        }
+    }
+}
+
+/// Result of writing one harness's config.
+#[derive(Debug, Default)]
+pub struct HarnessWrite {
+    /// Files (and skill dirs) written, for reporting.
+    pub files: Vec<PathBuf>,
+    /// Env vars the launcher/daemon must set so the harness sees the gateway
+    /// token (Codex `env_key`; empty for in-file harnesses).
+    pub env: BTreeMap<String, String>,
+    /// Arguments prepended when launching the native CLI (for example a
+    /// Codex profile or Claude's additional settings files).
+    pub launch_args: Vec<String>,
+    /// Package failures are reported independently so unrelated packages and
+    /// harness configuration can still converge.
+    pub package_errors: Vec<String>,
+    /// Non-fatal capability gaps discovered by the selected version adapter.
+    pub warnings: Vec<String>,
+}
+
+/// Read-only process configuration for launching an already-reconciled
+/// harness. Unlike `HarnessWrite`, producing this value never mutates state.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct HarnessLaunchSpec {
+    pub env: BTreeMap<String, String>,
+    pub launch_args: Vec<String>,
+}
+
+impl HarnessWrite {
+    /// Fold another write's files/env into this one (used when a harness emits
+    /// multiple config files across helpers).
+    pub fn merge(&mut self, other: HarnessWrite) {
+        self.files.extend(other.files);
+        self.env.extend(other.env);
+        self.launch_args.extend(other.launch_args);
+        self.package_errors.extend(other.package_errors);
+        self.warnings.extend(other.warnings);
+    }
+}
+
+/// Knobs that affect *how* config is written, independent of the policy.
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOptions {
+    /// When false, inference routing is never written even if the global policy
+    /// has a `gateway` block (governance-only, e.g. local development).
+    pub gateway_enabled: bool,
+    /// Claude only: also write the un-overridable `managed-settings.json`.
+    pub enforced: bool,
+    /// The caller explicitly approved merging into existing user config.
+    pub allow_existing_merge: bool,
+    /// Install each compatible harness's native session-upload hook.
+    pub session_upload_enabled: bool,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        WriteOptions {
+            gateway_enabled: true,
+            enforced: false,
+            allow_existing_merge: false,
+            session_upload_enabled: false,
+        }
+    }
+}
+
+pub fn resolve_launch_spec(
+    context: &HarnessContext,
+    policy: &HarnessPolicy,
+    packages: &[ManagedPackage],
+    gateway: Option<&GatewayConfig>,
+    opts: WriteOptions,
+) -> Result<HarnessLaunchSpec, GhError> {
+    let home = paths::home_dir()?;
+    resolve_launch_spec_at(&home, context, policy, packages, gateway, opts)
+}
+
+fn resolve_launch_spec_at(
+    home: &std::path::Path,
+    context: &HarnessContext,
+    policy: &HarnessPolicy,
+    packages: &[ManagedPackage],
+    gateway: Option<&GatewayConfig>,
+    opts: WriteOptions,
+) -> Result<HarnessLaunchSpec, GhError> {
+    let wiring = if opts.gateway_enabled {
+        gateway
+            .map(|gateway| context.profile.implementation.gateway_wiring(gateway))
+            .transpose()?
+    } else {
+        None
+    };
+    let mut activation = packages::active_launch(context, packages, policy)?;
+    crate::util::prepend_helper_paths(&mut activation.env, &activation.helpers);
+    let spec = HarnessLaunchSpec {
+        env: activation.env,
+        launch_args: activation.launch_args,
+    };
+    context
+        .profile
+        .implementation
+        .launch(home, wiring.as_ref(), spec)
+}
+
+/// Write all managed files for a single harness. This is the one entry point.
+pub fn write_harness(
+    context: &HarnessContext,
+    policy: &HarnessPolicy,
+    gateway: Option<&GatewayConfig>,
+    opts: WriteOptions,
+) -> Result<HarnessWrite, GhError> {
+    write_harness_with_packages(context, policy, &[], gateway, opts)
+}
+
+/// Write a harness overlay and activate organization-managed packages.
+pub fn write_harness_with_packages(
+    context: &HarnessContext,
+    policy: &HarnessPolicy,
+    packages: &[ManagedPackage],
+    gateway: Option<&GatewayConfig>,
+    opts: WriteOptions,
+) -> Result<HarnessWrite, GhError> {
+    write_harness_with_package_fetcher(
+        context,
+        policy,
+        packages,
+        gateway,
+        opts,
+        &packages::DirectPackageFetcher,
+    )
+}
+
+pub fn write_harness_with_package_fetcher(
+    context: &HarnessContext,
+    policy: &HarnessPolicy,
+    packages: &[ManagedPackage],
+    gateway: Option<&GatewayConfig>,
+    opts: WriteOptions,
+    fetcher: &dyn PackageFetcher,
+) -> Result<HarnessWrite, GhError> {
+    let harness = context.harness;
+    let home = paths::home_dir()?;
+    // A single global gateway applies uniformly to every reconciled harness.
+    let wiring = if opts.gateway_enabled {
+        gateway
+            .map(|gateway| context.profile.implementation.gateway_wiring(gateway))
+            .transpose()?
+    } else {
+        None
+    };
+    let wiring_ref = wiring.as_ref();
+
+    let input = adapters::ReconcileInput {
+        home: &home,
+        policy,
+        gateway: wiring_ref,
+        options: opts,
+        interval: &context.profile.interval,
+    };
+    let _lock = ReconcileLock::acquire(&home, harness)?;
+    let mut package_write = packages::reconcile_with_fetcher(context, packages, policy, fetcher)?;
+    if !package_write.errors.is_empty() {
+        packages::commit_activation_state(harness, &mut package_write)?;
+        return Ok(HarnessWrite {
+            files: package_write.files,
+            env: package_write.env,
+            launch_args: package_write.launch_args,
+            package_errors: package_write.errors,
+            warnings: Vec::new(),
+        });
+    }
+    reconcile_prepared_at(context, &input, &mut package_write, |prepared| {
+        packages::commit_activation_state(harness, prepared)
+    })
+}
+
+fn reconcile_prepared_at(
+    context: &HarnessContext,
+    input: &adapters::ReconcileInput<'_>,
+    package_write: &mut packages::PreparedPackages,
+    commit_packages: impl FnOnce(&mut packages::PreparedPackages) -> Result<(), GhError>,
+) -> Result<HarnessWrite, GhError> {
+    let home = input.home;
+    // The selected implementation constructs exact bytes, modes, removals,
+    // ownership, environment, and launch arguments without touching active
+    // paths. Nothing changes until the complete plan validates and is staged.
+    // Compatibility state is mutable input to planning: stale outputs from a
+    // previous implementation must be present before the transaction takes
+    // its snapshot, never deleted afterward as a finalize side effect.
+    let previous_state = load_definition_state_at(home, context.definition)?;
+    let mut plan = context
+        .profile
+        .implementation
+        .plan(input, &package_write.resolved)?;
+    add_stale_implementation_removals(context, &previous_state, &mut plan);
+    if !input.options.allow_existing_merge {
+        let native_changes = unowned_native_changes(context, home, &previous_state, &plan)?;
+        if !native_changes.is_empty() {
+            return Err(GhError::config(format!(
+                "existing {} configuration requires explicit merge approval: {}; run `blue apply` interactively or enable mode.allow_noninteractive_merge",
+                context.definition.metadata.key,
+                native_changes.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    let mut report = plan.report();
+    if let Some(warning) = &context.unverified_warning {
+        report.warnings.push(warning.clone());
+    }
+    report.files.extend(package_write.files.iter().cloned());
+    report.package_errors.extend(package_write.errors.clone());
+    if report.package_errors.is_empty() {
+        plan.writes.push(compatibility_state_write(
+            home,
+            context,
+            &report,
+            &plan.owned_paths,
+        )?);
+    }
+    validate_plan(context, home, &plan)?;
+    let mut transaction = FileTransaction::begin(home, &plan)?;
+    transaction.apply(&plan)?;
+    commit_packages(package_write)?;
+    transaction.commit();
+    Ok(report)
+}
+
+/// Complete package preflight for a harness without changing active package
+/// or compatibility state. Revision coordinators call this for every harness
+/// before beginning the first configuration commit.
+pub fn preflight_packages_with_fetcher(
+    context: &HarnessContext,
+    policy: &HarnessPolicy,
+    packages: &[ManagedPackage],
+    fetcher: &dyn PackageFetcher,
+) -> Result<(), GhError> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let home = paths::home_dir()?;
+    let _lock = ReconcileLock::acquire(&home, context.harness)?;
+    packages::preflight_with_fetcher(context, packages, policy, fetcher)
+}
+
+pub fn preflight_packages(
+    context: &HarnessContext,
+    policy: &HarnessPolicy,
+    packages: &[ManagedPackage],
+) -> Result<(), GhError> {
+    preflight_packages_with_fetcher(context, policy, packages, &packages::DirectPackageFetcher)
+}
+
+/// Remove every path owned exclusively by Blue while leaving native/user
+/// configuration untouched. Tenant transitions use this to ensure an inactive
+/// deployment cannot keep supplying overlays, hooks, or gateway credentials to
+/// agents launched outside Blue.
+pub fn remove_all_managed_configuration() -> Result<(), GhError> {
+    let home = paths::home_dir()?;
+    remove_all_managed_configuration_at(&home)
+}
+
+fn remove_all_managed_configuration_at(home: &std::path::Path) -> Result<(), GhError> {
+    let mut locks = Vec::new();
+    let mut owned = Vec::new();
+    for harness in Harness::ALL {
+        locks.push(ReconcileLock::acquire(home, harness)?);
+        owned.extend(load_compatibility_state_at(home, harness)?.owned_paths);
+    }
+    owned.sort();
+    owned.dedup();
+    let mut roots = Vec::<PathBuf>::new();
+    for path in owned {
+        validate_home_path(home, &path, true)?;
+        if roots.iter().any(|root| path.starts_with(root)) {
+            continue;
+        }
+        roots.retain(|root| !root.starts_with(&path));
+        roots.push(path);
+    }
+    roots.sort();
+    let plan = adapters::ReconcilePlan {
+        remove_paths: roots.clone(),
+        owned_paths: roots,
+        ..Default::default()
+    };
+    let mut transaction = FileTransaction::begin(home, &plan)?;
+    transaction.apply(&plan)?;
+    transaction.commit();
+    drop(locks);
+    Ok(())
+}
+
+/// Validate each component without following links beneath the canonical home.
+fn validate_home_path(
+    home: &std::path::Path,
+    path: &std::path::Path,
+    allow_final_symlink: bool,
+) -> Result<(), GhError> {
+    use std::path::Component;
+    let relative = path
+        .strip_prefix(home)
+        .map_err(|_| GhError::config(format!("path escaped user home: {}", path.display())))?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(GhError::config(format!(
+            "invalid managed path: {}",
+            path.display()
+        )));
+    }
+    let mut current = home.to_path_buf();
+    let components = relative.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if !(allow_final_symlink && index + 1 == components.len()) {
+                    return Err(GhError::config(format!(
+                        "managed path traverses symlink: {}",
+                        current.display()
+                    )));
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(GhError::Io {
+                    path: current,
+                    source,
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan(
+    context: &HarnessContext,
+    home: &std::path::Path,
+    plan: &adapters::ReconcilePlan,
+) -> Result<(), GhError> {
+    let declared = context.profile.implementation.paths(home);
+    let previous = load_definition_state_at(home, context.definition)?;
+    let state_path = definition_state_path(home, context.definition);
+    let owns = |path: &std::path::Path| {
+        declared
+            .owned_outputs
+            .iter()
+            .any(|root| path.starts_with(root))
+    };
+    let authenticated = |path: &std::path::Path| {
+        previous
+            .owned_paths
+            .iter()
+            .any(|root| path.starts_with(root))
+    };
+    let authorized = |path: &std::path::Path| {
+        owns(path)
+            || declared
+                .native_migrations
+                .iter()
+                .any(|target| target == path)
+            || path == state_path
+            || authenticated(path)
+    };
+    for path in plan.writes.iter().map(|write| &write.path) {
+        validate_home_path(home, path, false)?;
+        if !authorized(path) {
+            return Err(GhError::config(format!(
+                "implementation planned unauthorized write: {}",
+                path.display()
+            )));
+        }
+    }
+    for path in &plan.remove_paths {
+        validate_home_path(home, path, true)?;
+        if !authorized(path) {
+            return Err(GhError::config(format!(
+                "implementation planned unauthorized removal: {}",
+                path.display()
+            )));
+        }
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && !declared.owned_outputs.contains(path)
+            && !declared.native_migrations.contains(path)
+            && !previous.owned_paths.contains(path)
+            && !previous.files.contains(path)
+        {
+            return Err(GhError::config(
+                "symlink removal requires exact declared or authenticated ownership",
+            ));
+        }
+    }
+    for path in &plan.owned_paths {
+        validate_home_path(home, path, false)?;
+        if !owns(path) {
+            return Err(GhError::config(format!(
+                "implementation claimed unauthorized ownership: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+struct ReconcileLock {
+    file: Option<std::fs::File>,
+    harness: Harness,
+}
+thread_local! {
+    static HELD_RECONCILE_LOCKS: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+impl ReconcileLock {
+    fn acquire(home: &std::path::Path, harness: Harness) -> Result<Self, GhError> {
+        let nested = HELD_RECONCILE_LOCKS.with(|locks| locks.borrow().contains(harness.key()));
+        if nested {
+            return Ok(Self {
+                file: None,
+                harness,
+            });
+        }
+        let path = home
+            .join(".config/blue/locks")
+            .join(format!("{}.lock", harness.key()));
+        validate_home_path(home, &path, false)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| GhError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        lock_file(&file, harness)?;
+        HELD_RECONCILE_LOCKS.with(|locks| {
+            locks.borrow_mut().insert(harness.key().to_owned());
+        });
+        Ok(Self {
+            file: Some(file),
+            harness,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn lock_file(file: &std::fs::File, harness: Harness) -> Result<(), GhError> {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        // SAFETY: flock only observes the valid descriptor owned by `file`.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if std::time::Instant::now() >= deadline {
+            return Err(GhError::config(format!(
+                "timed out waiting for {} reconciliation lock: {error}",
+                harness.key()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_file(_file: &std::fs::File, _harness: Harness) -> Result<(), GhError> {
+    Ok(())
+}
+
+impl Drop for ReconcileLock {
+    fn drop(&mut self) {
+        let Some(file) = self.file.as_ref() else {
+            return;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: the descriptor is valid until this struct is dropped.
+            let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        }
+        HELD_RECONCILE_LOCKS.with(|locks| {
+            locks.borrow_mut().remove(self.harness.key());
+        });
+    }
+}
+
+struct FileTransaction {
+    root: PathBuf,
+    backup: PathBuf,
+    staging: PathBuf,
+    trash: PathBuf,
+    targets: Vec<(PathBuf, bool)>,
+    committed: bool,
+}
+impl FileTransaction {
+    fn begin(home: &std::path::Path, plan: &adapters::ReconcilePlan) -> Result<Self, GhError> {
+        let mut paths = plan
+            .writes
+            .iter()
+            .map(|write| &write.path)
+            .chain(&plan.remove_paths)
+            .chain(&plan.owned_paths)
+            .cloned()
+            .collect::<Vec<_>>();
+        paths.extend([
+            home.join(".config/blue/package-state.json"),
+            home.join(".config/blue/package-state"),
+            home.join(".config/blue/package-state-v4"),
+        ]);
+        Self::begin_paths(home, paths)
+    }
+
+    fn begin_paths(home: &std::path::Path, mut paths: Vec<PathBuf>) -> Result<Self, GhError> {
+        for path in &paths {
+            validate_home_path(home, path, true)?;
+        }
+        paths.sort();
+        paths.dedup();
+        let mut roots = Vec::<PathBuf>::new();
+        for path in paths {
+            if !roots.iter().any(|root| path.starts_with(root)) {
+                roots.push(path);
+            }
+        }
+        let mut paths = roots;
+        validate_home_path(home, &home.join(".config/blue/transactions"), false)?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = home
+            .join(".config/blue/transactions")
+            .join(format!("{}-{nonce}", std::process::id()));
+        let backup = root.join("backup");
+        let staging = root.join("staging");
+        let trash = root.join("trash");
+        for path in [&backup, &staging, &trash] {
+            std::fs::create_dir_all(path).map_err(|source| GhError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        if !root.starts_with(home) {
+            return Err(GhError::config("transaction root escaped user home"));
+        }
+        /* All staging and trash entries live beside the governed files, so
+         * their final rename cannot cross a filesystem boundary. */
+        std::fs::metadata(&root).map_err(|source| GhError::Io {
+            path: root.clone(),
+            source,
+        })?;
+        paths.sort();
+        paths.dedup();
+        let mut targets = Vec::new();
+        for (index, path) in paths.into_iter().enumerate() {
+            let existed = std::fs::symlink_metadata(&path).is_ok();
+            if existed {
+                copy_tree(&path, &backup.join(index.to_string()))?;
+            }
+            targets.push((path, existed));
+        }
+        Ok(Self {
+            root,
+            backup,
+            staging,
+            trash,
+            targets,
+            committed: false,
+        })
+    }
+    fn apply(&mut self, plan: &adapters::ReconcilePlan) -> Result<(), GhError> {
+        self.apply_with_fault(plan, None)
+    }
+
+    fn apply_with_fault(
+        &mut self,
+        plan: &adapters::ReconcilePlan,
+        fail_after: Option<usize>,
+    ) -> Result<(), GhError> {
+        // Materialize every body before the first active path changes.
+        for (index, write) in plan.writes.iter().enumerate() {
+            let staged = self.staging.join(index.to_string());
+            std::fs::write(&staged, &write.body).map_err(|source| GhError::Io {
+                path: staged.clone(),
+                source,
+            })?;
+            #[cfg(unix)]
+            if let Some(mode) = write.mode {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode)).map_err(
+                    |source| GhError::Io {
+                        path: staged,
+                        source,
+                    },
+                )?;
+            }
+        }
+        let mut completed = 0usize;
+        let mut trashed = std::collections::BTreeSet::new();
+        for (index, path) in plan.remove_paths.iter().enumerate() {
+            if std::fs::symlink_metadata(path).is_ok() {
+                std::fs::rename(path, self.trash.join(format!("remove-{index}"))).map_err(
+                    |source| GhError::Io {
+                        path: path.clone(),
+                        source,
+                    },
+                )?;
+                trashed.insert(path.clone());
+            }
+            completed += 1;
+            if fail_after == Some(completed) {
+                return Err(GhError::other("injected reconciliation commit fault"));
+            }
+        }
+        for (index, write) in plan.writes.iter().enumerate() {
+            if let Some(parent) = write.path.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            if write.path.exists() && !trashed.contains(&write.path) {
+                std::fs::rename(&write.path, self.trash.join(format!("write-{index}"))).map_err(
+                    |source| GhError::Io {
+                        path: write.path.clone(),
+                        source,
+                    },
+                )?;
+            }
+            std::fs::rename(self.staging.join(index.to_string()), &write.path).map_err(
+                |source| GhError::Io {
+                    path: write.path.clone(),
+                    source,
+                },
+            )?;
+            completed += 1;
+            if fail_after == Some(completed) {
+                return Err(GhError::other("injected reconciliation commit fault"));
+            }
+        }
+        Ok(())
+    }
+    fn commit(&mut self) {
+        self.committed = true;
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+    fn rollback(&self) -> Result<(), GhError> {
+        for (index, (path, existed)) in self.targets.iter().enumerate() {
+            if path.is_dir() && !path.is_symlink() {
+                std::fs::remove_dir_all(path).map_err(|source| GhError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            } else if std::fs::symlink_metadata(path).is_ok() {
+                std::fs::remove_file(path).map_err(|source| GhError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+            if *existed {
+                copy_tree(&self.backup.join(index.to_string()), path)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Revision-wide rollback guard used by the daemon when several harnesses
+/// must converge together. Individual harness commits remain atomic; this
+/// outer snapshot restores earlier commits if a later required harness fails.
+pub struct RevisionTransaction {
+    inner: FileTransaction,
+    _locks: Vec<ReconcileLock>,
+}
+
+impl RevisionTransaction {
+    pub fn commit(&mut self) {
+        self.inner.commit();
+    }
+}
+
+pub fn begin_revision_transaction(
+    contexts: &[HarnessContext],
+) -> Result<RevisionTransaction, GhError> {
+    let home = paths::home_dir()?;
+    begin_revision_transaction_at(&home, contexts)
+}
+fn begin_revision_transaction_at(
+    home: &std::path::Path,
+    contexts: &[HarnessContext],
+) -> Result<RevisionTransaction, GhError> {
+    let mut harnesses = contexts
+        .iter()
+        .map(|context| context.harness)
+        .collect::<Vec<_>>();
+    harnesses.sort_by_key(|harness| harness.key());
+    harnesses.dedup();
+    let locks = harnesses
+        .into_iter()
+        .map(|harness| ReconcileLock::acquire(home, harness))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut affected = vec![
+        home.join(".config/blue/package-state.json"),
+        home.join(".config/blue/package-state"),
+        home.join(".config/blue/package-state-v4"),
+    ];
+    for context in contexts {
+        let mut paths = context
+            .profile
+            .implementation
+            .paths(home)
+            .transaction_targets();
+        paths.push(definition_state_path(home, context.definition));
+        for path in &paths {
+            if affected
+                .iter()
+                .skip(3)
+                .any(|existing| path.starts_with(existing) || existing.starts_with(path))
+            {
+                return Err(GhError::config(format!(
+                    "cross-harness reconciliation path collision at {}",
+                    path.display()
+                )));
+            }
+        }
+        affected.extend(paths);
+        let previous = load_definition_state_at(home, context.definition)?;
+        affected.extend(previous.files);
+        affected.extend(previous.owned_paths);
+    }
+    Ok(RevisionTransaction {
+        inner: FileTransaction::begin_paths(home, affected)?,
+        _locks: locks,
+    })
+}
+impl Drop for FileTransaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(error) = self.rollback() {
+                tracing::error!(%error, backup = %self.backup.display(), "reconciliation rollback failed; backup retained");
+                return;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn copy_tree(source: &std::path::Path, destination: &std::path::Path) -> Result<(), GhError> {
+    if source.is_symlink() {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let target = std::fs::read_link(source).map_err(|error| GhError::Io {
+            path: source.to_path_buf(),
+            source: error,
+        })?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, destination).map_err(|source| GhError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+        #[cfg(not(unix))]
+        return Err(GhError::config(
+            "symlink snapshots are unsupported on this platform",
+        ));
+    } else if source.is_dir() {
+        std::fs::create_dir_all(destination).map_err(|source_error| GhError::Io {
+            path: destination.to_path_buf(),
+            source: source_error,
+        })?;
+        for entry in std::fs::read_dir(source).map_err(|source_error| GhError::Io {
+            path: source.to_path_buf(),
+            source: source_error,
+        })? {
+            let entry = entry.map_err(|source_error| GhError::Io {
+                path: source.to_path_buf(),
+                source: source_error,
+            })?;
+            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|source_error| GhError::Io {
+                path: parent.to_path_buf(),
+                source: source_error,
+            })?;
+        }
+        std::fs::copy(source, destination).map_err(|source_error| GhError::Io {
+            path: destination.to_path_buf(),
+            source: source_error,
+        })?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CompatibilityState {
+    #[serde(default = "compatibility_state_schema_version")]
+    schema_version: u32,
+    profile_id: String,
+    version: String,
+    files: Vec<PathBuf>,
+    #[serde(default)]
+    owned_paths: Vec<PathBuf>,
+}
+const fn compatibility_state_schema_version() -> u32 {
+    4
+}
+
+#[cfg(test)]
+fn compatibility_state_path(home: &std::path::Path, harness: Harness) -> PathBuf {
+    definition_state_path(home, adapters::definition(harness))
+}
+fn definition_state_path(
+    home: &std::path::Path,
+    definition: &adapters::HarnessDefinition,
+) -> PathBuf {
+    home.join(".config/blue/runtime")
+        .join(definition.metadata.key)
+        .join("compatibility-state.json")
+}
+
+fn load_compatibility_state(harness: Harness) -> Result<CompatibilityState, GhError> {
+    let home = paths::home_dir()?;
+    load_compatibility_state_at(&home, harness)
+}
+
+fn load_compatibility_state_at(
+    home: &std::path::Path,
+    harness: Harness,
+) -> Result<CompatibilityState, GhError> {
+    load_definition_state_at(home, adapters::definition(harness))
+}
+
+fn load_definition_state_at(
+    home: &std::path::Path,
+    definition: &'static adapters::HarnessDefinition,
+) -> Result<CompatibilityState, GhError> {
+    let harness = definition.metadata.key;
+    let state_path = definition_state_path(home, definition);
+    validate_home_path(home, &state_path, false)?;
+    match std::fs::read(&state_path) {
+        Ok(bytes) => {
+            let state: CompatibilityState = serde_json::from_slice(&bytes)
+                .map_err(|error| GhError::Serde(error.to_string()))?;
+            if state.schema_version > compatibility_state_schema_version() {
+                return Err(GhError::config(format!(
+                    "unsupported compatibility state schema {} (client supports {})",
+                    state.schema_version,
+                    compatibility_state_schema_version()
+                )));
+            }
+            let registration = definition.profile(&state.profile_id).ok_or_else(|| {
+                GhError::config(format!(
+                    "unknown persisted compatibility profile `{}` for {harness}",
+                    state.profile_id
+                ))
+            })?;
+            semver::Version::parse(&state.version).map_err(|error| {
+                GhError::config(format!("invalid persisted harness version: {error}"))
+            })?;
+            let declared = registration.implementation.paths(home);
+            for owned in &state.owned_paths {
+                validate_home_path(home, owned, true)?;
+                if !declared
+                    .owned_outputs
+                    .iter()
+                    .any(|root| owned.starts_with(root))
+                {
+                    return Err(GhError::config(format!(
+                        "persisted ownership is outside profile outputs: {}",
+                        owned.display()
+                    )));
+                }
+            }
+            for file in &state.files {
+                validate_home_path(home, file, true)?;
+            }
+            Ok(state)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(CompatibilityState::default())
+        }
+        Err(source) => Err(GhError::Io {
+            path: state_path,
+            source,
+        }),
+    }
+}
+
+fn add_stale_implementation_removals(
+    context: &HarnessContext,
+    previous: &CompatibilityState,
+    plan: &mut adapters::ReconcilePlan,
+) {
+    if previous.profile_id.is_empty() || previous.profile_id == context.profile.id {
+        return;
+    }
+    let current = plan.files.iter().collect::<std::collections::BTreeSet<_>>();
+    plan.remove_paths.extend(
+        previous
+            .files
+            .iter()
+            .filter(|path| {
+                !current.contains(path)
+                    && previous
+                        .owned_paths
+                        .iter()
+                        .any(|owned| path.starts_with(owned))
+            })
+            .cloned(),
+    );
+    plan.remove_paths.extend(
+        previous
+            .owned_paths
+            .iter()
+            .filter(|old| {
+                !plan
+                    .owned_paths
+                    .iter()
+                    .any(|current| old.starts_with(current) || current.starts_with(old))
+            })
+            .cloned(),
+    );
+    plan.remove_paths.sort();
+    plan.remove_paths.dedup();
+    plan.owned_paths.sort();
+    plan.owned_paths.dedup();
+}
+
+fn unowned_native_changes(
+    context: &HarnessContext,
+    home: &std::path::Path,
+    previous: &CompatibilityState,
+    plan: &adapters::ReconcilePlan,
+) -> Result<Vec<PathBuf>, GhError> {
+    let targets = context.profile.implementation.paths(home).native_migrations;
+    let mut changed = Vec::new();
+    for target in targets {
+        if previous
+            .owned_paths
+            .iter()
+            .any(|owned| target.starts_with(owned))
+        {
+            continue;
+        }
+        let write_changes = plan
+            .writes
+            .iter()
+            .find(|write| write.path == target)
+            .is_some_and(|write| {
+                std::fs::read(&target).map_or(true, |current| current != write.body)
+            });
+        let removal_changes = target.exists() && plan.remove_paths.contains(&target);
+        if write_changes || removal_changes {
+            changed.push(target);
+        }
+    }
+    Ok(changed)
+}
+
+fn compatibility_state_write(
+    home: &std::path::Path,
+    context: &HarnessContext,
+    report: &HarnessWrite,
+    owned_paths: &[PathBuf],
+) -> Result<adapters::PlannedFile, GhError> {
+    let state_path = definition_state_path(home, context.definition);
+    let current = report
+        .files
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let state = CompatibilityState {
+        schema_version: compatibility_state_schema_version(),
+        profile_id: context.profile.id.to_owned(),
+        version: context.version.to_string(),
+        files: current.into_iter().collect(),
+        owned_paths: owned_paths.to_vec(),
+    };
+    Ok(adapters::PlannedFile {
+        path: state_path,
+        body: serde_json::to_vec_pretty(&state)
+            .map_err(|error| GhError::Serde(error.to_string()))?,
+        mode: None,
+    })
+}
+
+pub use packages::{
+    statuses as package_statuses, teardown_inactive as teardown_inactive_packages, PackageStatus,
+};
+/// Existing user configuration files that a write for this harness may
+/// modify. The CLI uses this for an interactive preflight before manual apply.
+pub fn existing_config_files(
+    harness: Harness,
+    policy: &HarnessPolicy,
+    opts: WriteOptions,
+) -> Result<Vec<PathBuf>, GhError> {
+    let home = paths::home_dir()?;
+    let _ = opts;
+    let previous = load_compatibility_state(harness)?;
+    let implementation = adapters::detected_context(harness, policy)?
+        .profile
+        .implementation;
+    Ok(implementation
+        .paths(&home)
+        .native_migrations
+        .into_iter()
+        .filter(|path| path.exists())
+        .filter(|path| {
+            !previous
+                .owned_paths
+                .iter()
+                .any(|owned| path.starts_with(owned))
+        })
+        .filter(|path| implementation.native_migration_needs_review(path, policy))
+        .collect())
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use crate::adapters::HarnessImplementation;
+
+    #[test]
+    fn uncommitted_transaction_restores_existing_and_removes_new_outputs() {
+        let home = std::env::temp_dir().join(format!("blue-transaction-{}", std::process::id()));
+        let runtime = home.join(".config/blue/runtime/kimi");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("config.toml"), "last-known-good").unwrap();
+        {
+            let plan = adapters::kimi::v0_0_0::IMPLEMENTATION
+                .plan(
+                    &adapters::ReconcileInput {
+                        home: &home,
+                        policy: &HarnessPolicy::default(),
+                        gateway: None,
+                        options: WriteOptions::default(),
+                        interval: &adapters::kimi::IMPLEMENTATIONS[0].interval,
+                    },
+                    &adapters::ResolvedPackages::default(),
+                )
+                .unwrap();
+            let _transaction = FileTransaction::begin(&home, &plan).unwrap();
+            std::fs::write(runtime.join("config.toml"), "partial-commit").unwrap();
+            std::fs::write(runtime.join("new.toml"), "new").unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("config.toml")).unwrap(),
+            "last-known-good"
+        );
+        assert!(!runtime.join("new.toml").exists());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn codex_plan_is_pure_and_native_migration_rolls_back() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-codex-plan-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let native = home.join(".codex/config.toml");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        let original = "model_provider = \"governed\"\nmodel = \"gpt-test\"\n";
+        std::fs::write(&native, original).unwrap();
+        let policy = HarnessPolicy {
+            managed_config: gh_service::ManagedConfig {
+                model: Some("gpt-test".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let implementation = &adapters::codex::v0_145_0::IMPLEMENTATION;
+        let plan = implementation
+            .plan(
+                &adapters::ReconcileInput {
+                    home: &home,
+                    policy: &policy,
+                    gateway: None,
+                    options: WriteOptions::default(),
+                    interval: &adapters::codex::IMPLEMENTATIONS[0].interval,
+                },
+                &adapters::ResolvedPackages::default(),
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&native).unwrap(), original);
+        assert!(plan.writes.iter().any(|write| write.path == native));
+        {
+            let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+            transaction.apply(&plan).unwrap();
+            assert_ne!(std::fs::read_to_string(&native).unwrap(), original);
+            // Dropping without commit simulates a later state-write fault.
+        }
+        assert_eq!(std::fs::read_to_string(&native).unwrap(), original);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn opencode_plan_remaps_session_plugin_out_of_render_home() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-opencode-plan-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let unmanaged = home.join(".config/blue/runtime/opencode/node_modules/vendor.js");
+        std::fs::create_dir_all(unmanaged.parent().unwrap()).unwrap();
+        std::fs::write(&unmanaged, "unmanaged").unwrap();
+        let options = WriteOptions {
+            session_upload_enabled: true,
+            ..WriteOptions::default()
+        };
+        let plan = adapters::opencode::v0_0_0::IMPLEMENTATION
+            .plan(
+                &adapters::ReconcileInput {
+                    home: &home,
+                    policy: &HarnessPolicy::default(),
+                    gateway: None,
+                    options,
+                    interval: &adapters::opencode::IMPLEMENTATIONS[0].interval,
+                },
+                &adapters::ResolvedPackages::default(),
+            )
+            .unwrap();
+        let plugin = plan
+            .writes
+            .iter()
+            .find(|write| {
+                write
+                    .path
+                    .ends_with("runtime/opencode/plugins/blue-session-upload.js")
+            })
+            .unwrap();
+        assert!(plugin.path.starts_with(&home));
+        assert!(!plugin.path.to_string_lossy().contains("blue-render-"));
+        assert!(plan
+            .writes
+            .iter()
+            .all(|write| !write.path.starts_with(unmanaged.parent().unwrap())));
+        assert!(plan
+            .remove_paths
+            .iter()
+            .all(|path| !path.starts_with(unmanaged.parent().unwrap())));
+        assert_eq!(std::fs::read_to_string(&unmanaged).unwrap(), "unmanaged");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn current_codex_launch_spec_is_read_only() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-codex-launch-spec-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let overlay = home.join(".codex/blue.config.toml");
+        std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
+        std::fs::write(&overlay, "[profiles.blue]\n").unwrap();
+        let before = std::fs::read(&overlay).unwrap();
+        let policy = HarnessPolicy::default();
+        let version = semver::Version::new(0, 149, 1);
+        let context = resolve_compatibility(
+            Harness::Codex,
+            Some(&version),
+            Some("codex-cli 0.149.1"),
+            &policy,
+        )
+        .unwrap();
+
+        let spec =
+            resolve_launch_spec_at(&home, &context, &policy, &[], None, WriteOptions::default())
+                .unwrap();
+
+        assert_eq!(
+            spec.launch_args,
+            vec![
+                "--profile",
+                "blue",
+                "--config",
+                "check_for_update_on_startup=false"
+            ]
+        );
+        assert_eq!(std::fs::read(&overlay).unwrap(), before);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn current_kimi_launch_spec_sets_the_managed_home() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-kimi-launch-spec-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let runtime = home.join(".config/blue/runtime/kimi");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            runtime.join("config.toml"),
+            "default_model = \"governed\"\n",
+        )
+        .unwrap();
+        let policy = HarnessPolicy::default();
+        let version = semver::Version::new(0, 39, 1);
+        let context = resolve_compatibility(
+            Harness::Kimi,
+            Some(&version),
+            Some("kimi version 0.39.1"),
+            &policy,
+        )
+        .unwrap();
+
+        let spec =
+            resolve_launch_spec_at(&home, &context, &policy, &[], None, WriteOptions::default())
+                .unwrap();
+
+        assert_eq!(
+            spec.env.get("KIMI_CODE_HOME"),
+            Some(&runtime.display().to_string())
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn every_file_commit_fault_restores_the_complete_snapshot() {
+        for fail_after in 1..=3 {
+            let home = std::env::temp_dir()
+                .join(format!("blue-fault-{}-{fail_after}", std::process::id()));
+            let removed = home.join("owned/obsolete.txt");
+            let existing = home.join("owned/config.txt");
+            let added = home.join("owned/new.txt");
+            std::fs::create_dir_all(removed.parent().unwrap()).unwrap();
+            std::fs::write(&removed, "old-obsolete").unwrap();
+            std::fs::write(&existing, "old-config").unwrap();
+            let plan = adapters::ReconcilePlan {
+                writes: vec![
+                    adapters::PlannedFile {
+                        path: existing.clone(),
+                        body: b"new-config".to_vec(),
+                        mode: None,
+                    },
+                    adapters::PlannedFile {
+                        path: added.clone(),
+                        body: b"new-file".to_vec(),
+                        mode: None,
+                    },
+                ],
+                remove_paths: vec![removed.clone()],
+                owned_paths: vec![home.join("owned")],
+                ..Default::default()
+            };
+            {
+                let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+                assert!(transaction
+                    .apply_with_fault(&plan, Some(fail_after))
+                    .is_err());
+            }
+            assert_eq!(std::fs::read_to_string(&removed).unwrap(), "old-obsolete");
+            assert_eq!(std::fs::read_to_string(&existing).unwrap(), "old-config");
+            assert!(!added.exists());
+            let _ = std::fs::remove_dir_all(home);
+        }
+    }
+
+    #[test]
+    fn profile_transition_restores_stale_files_when_state_write_fails() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-profile-transition-fault-{}",
+            std::process::id()
+        ));
+        let runtime = home.join(".config/blue/runtime/codex");
+        let stale = runtime.join("v1-only.toml");
+        let current = runtime.join("config.toml");
+        let state = runtime.join("compatibility-state.json");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(&stale, "stale-v1").unwrap();
+        std::fs::write(&current, "old-current").unwrap();
+        std::fs::write(&state, "old-state").unwrap();
+        let plan = adapters::ReconcilePlan {
+            writes: vec![
+                adapters::PlannedFile {
+                    path: current.clone(),
+                    body: b"new-current".to_vec(),
+                    mode: None,
+                },
+                adapters::PlannedFile {
+                    path: state.clone(),
+                    body: b"new-state".to_vec(),
+                    mode: None,
+                },
+            ],
+            remove_paths: vec![stale.clone()],
+            owned_paths: vec![runtime],
+            ..Default::default()
+        };
+        {
+            let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+            assert!(transaction.apply_with_fault(&plan, Some(3)).is_err());
+        }
+        assert_eq!(std::fs::read_to_string(stale).unwrap(), "stale-v1");
+        assert_eq!(std::fs::read_to_string(current).unwrap(), "old-current");
+        assert_eq!(std::fs::read_to_string(state).unwrap(), "old-state");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn unversioned_compatibility_state_migrates_to_v4_in_memory() {
+        let state: CompatibilityState = serde_json::from_value(serde_json::json!({
+            "profile_id": "codex-v1",
+            "version": "0.149.1",
+            "files": []
+        }))
+        .unwrap();
+        assert_eq!(state.schema_version, 4);
+        assert!(state.owned_paths.is_empty());
+    }
+
+    #[test]
+    fn managed_cleanup_removes_owned_overlays_but_preserves_native_config() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-managed-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let native = home.join(".codex/config.toml");
+        let overlay = home.join(".codex/blue.config.toml");
+        let runtime = home.join(".config/blue/runtime/claude/settings.json");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        std::fs::write(&native, "personal = true\n").unwrap();
+        std::fs::write(&overlay, "managed = true\n").unwrap();
+        std::fs::write(&runtime, "{}").unwrap();
+
+        // Without authenticated state cleanup must not guess ownership.
+        remove_all_managed_configuration_at(&home).unwrap();
+        assert!(overlay.exists());
+        assert!(runtime.exists());
+        for (harness, file) in [(Harness::Codex, &overlay), (Harness::Claude, &runtime)] {
+            let state_path = compatibility_state_path(&home, harness);
+            std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+            let registration = &adapters::definition(harness).implementations[0];
+            let state = CompatibilityState {
+                schema_version: 4,
+                profile_id: registration.interval.profile.into(),
+                version: "1.0.0".into(),
+                files: vec![file.clone()],
+                owned_paths: registration.implementation.paths(&home).owned_outputs,
+            };
+            std::fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        remove_all_managed_configuration_at(&home).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(native).unwrap(),
+            "personal = true\n"
+        );
+        assert!(!overlay.exists());
+        assert!(!runtime.exists());
+        let _ = std::fs::remove_dir_all(home);
+    }
+}
+
+#[cfg(test)]
+mod contract_tests;

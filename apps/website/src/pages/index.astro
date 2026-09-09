@@ -1,0 +1,271 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import BrandMark from "../components/BrandMark.astro";
+import FeatureShowcase from "../components/FeatureShowcase.astro";
+import Terminal from "../components/Terminal.astro";
+
+const docsBase = "https://docs.bluee.sh/next";
+const github = "https://github.com/BlocksOrg/blue";
+const externalLinkProps = { target: "_blank", rel: "noopener noreferrer" };
+const unixInstallCommand = "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BlocksOrg/blue/releases/latest/download/install.sh | sh";
+const windowsInstallCommand = "irm https://github.com/BlocksOrg/blue/releases/latest/download/install.ps1 | iex";
+
+const agents = [
+  { name: "Codex", icon: "/agents/codex.svg" },
+  { name: "Claude Code", icon: "/agents/claude.png" },
+  { name: "Kimi Code", icon: "/agents/kimi.png" },
+  { name: "OpenCode", icon: "/agents/opencode.png" },
+];
+
+const services = [
+  { name: "Docker Compose", icon: "/services/docker.svg" },
+  { name: "Kubernetes", icon: "/services/kubernetes.svg" },
+  { name: "OpenTofu", icon: "/services/opentofu.svg" },
+  { name: "PostgreSQL", icon: "/services/postgresql.webp" },
+  { name: "S3", icon: "/services/s3.svg" },
+  { name: "OpenAPI", icon: "/services/openapi.svg" },
+];
+
+const capabilities = [
+  {
+    number: "01",
+    title: "Harness governance",
+    body: "Choose which coding agents and versions can run, then reject incompatible installations before launch.",
+    href: `${docsBase}/concepts/harness-version-compatibility`,
+  },
+  {
+    number: "02",
+    title: "Managed extensions",
+    body: "Ship digest-pinned MCP servers, skills, plugins, hooks, subagents, and helper binaries from one catalog.",
+    href: `${docsBase}/admin/managed-packages`,
+  },
+  {
+    number: "03",
+    title: "Configuration policy",
+    body: "Reconcile organization settings into launch-scoped overlays without replacing developers’ personal configuration.",
+    href: `${docsBase}/concepts/configuration`,
+  },
+  {
+    number: "04",
+    title: "Identity and access",
+    body: "Connect CLI device authorization and dashboard access with invitations, OIDC, and SCIM provisioning.",
+    href: `${docsBase}/concepts/authentication`,
+  },
+  {
+    number: "05",
+    title: "Bring your own gateway",
+    body: "Connect your organization’s inference gateway and keep provider credentials server-side. LiteLLM is the first supported gateway.",
+    href: `${docsBase}/concepts/gateway-mode`,
+  },
+  {
+    number: "06",
+    title: "Session visibility",
+    body: "Opt in to native transcript capture using short-lived uploads to operator-controlled object storage.",
+    href: `${docsBase}/admin/session-capture`,
+  },
+];
+
+---
+
+<BaseLayout
+  title="Blue | One harness to rule them all"
+  description="Open-source governance for Codex, Claude Code, Kimi Code, and OpenCode without changing the native developer experience."
+>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="Blue home">
+      <BrandMark size={32} />
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="#product">Product</a>
+      <a href="#how-it-works">How it works</a>
+      <a href="#capabilities">Capabilities</a>
+      <a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a>
+      <a class="nav-github" href={github} {...externalLinkProps}>GitHub <span class="link-caret" aria-hidden="true"></span></a>
+    </nav>
+  </header>
+
+  <main id="main-content">
+    <section class="hero" id="top">
+      <div class="hero-visual reveal" aria-hidden="true">
+        <Terminal />
+      </div>
+      <p class="section-label hero-subheader reveal reveal-delay-1">Open-source governance for coding agents</p>
+      <h1 class="reveal reveal-delay-2">One harness to rule them all.</h1>
+      <p class="hero-copy reveal reveal-delay-3">
+        Give every team one trusted way to use Codex, Claude Code, Kimi Code, and OpenCode, while every developer keeps the native CLI they chose.
+      </p>
+      <div class="actions reveal reveal-delay-4">
+        <a class="button button-primary" href={`${docsBase}/quickstart`} {...externalLinkProps}>Get started</a>
+        <a class="text-link" href={github} {...externalLinkProps}>View on GitHub <span class="link-caret" aria-hidden="true"></span></a>
+      </div>
+    </section>
+
+    <section class="section intro" id="product">
+      <h2>Govern the work, not the way people work.</h2>
+      <p class="section-lede">
+        Blue sits between organization policy and the coding-agent CLIs developers already know. It adds control without replacing their tools or terminal experience.
+      </p>
+      <div class="agent-row" aria-label="Supported agents">
+        {agents.map((agent) => (
+          <span><img src={agent.icon} alt="" width="24" height="24" />{agent.name}</span>
+        ))}
+      </div>
+
+      <div class="audience-grid">
+        <article class="audience-card audience-card-dark">
+          <p class="card-kicker">For developers</p>
+          <h3>Your agent stays your agent.</h3>
+          <p>Keep personal configuration, native terminal behavior, and the CLI workflow you already use. Blue handles policy before launch and then gets out of the way.</p>
+          <a class="card-link" href={`${docsBase}/cli/harnesses`} {...externalLinkProps}>Explore supported harnesses <span class="link-caret" aria-hidden="true"></span></a>
+        </article>
+        <article class="audience-card audience-card-blue">
+          <p class="card-kicker">For platform teams</p>
+          <h3>One place to set the rules.</h3>
+          <p>Publish policy, manage extensions, control versions, connect identity, and see client health across every supported agent.</p>
+          <a class="card-link" href={`${docsBase}/admin/dashboard`} {...externalLinkProps}>Explore administration <span class="link-caret" aria-hidden="true"></span></a>
+        </article>
+      </div>
+    </section>
+
+    <section class="section showcase-section" id="how-it-works">
+      <h2>One terminal. Every governed workflow.</h2>
+      <p class="section-lede">
+        Authenticate, ship trusted tooling, move between agents, and pick up remote sessions without giving up the native CLI.
+      </p>
+      <FeatureShowcase />
+    </section>
+
+    <section class="section" id="capabilities">
+      <h2>Everything teams need to govern agentic coding.</h2>
+      <p class="section-lede">
+        Set policy once, ship trusted tooling, connect identity and inference, and maintain visibility across every supported coding agent.
+      </p>
+      <div class="capability-grid">
+        {capabilities.map((capability) => (
+          <a class="capability" href={capability.href} {...externalLinkProps}>
+            <span class="capability-number">{capability.number}</span>
+            <h3>{capability.title}</h3>
+            <p>{capability.body}</p>
+            <span class="capability-arrow" aria-hidden="true">↗</span>
+          </a>
+        ))}
+      </div>
+    </section>
+
+    <section class="modes-section">
+      <div class="section modes-inner">
+        <h2>Governance where you need it.<br />Gateway control when you want it.</h2>
+        <div class="modes-grid">
+          <article>
+            <div class="mode-heading"><span class="mode-dot"></span><h3>Governance-only</h3><span class="mode-tag">Default</span></div>
+            <p>Blue manages configuration while each agent talks directly to its provider using the developer’s existing credentials.</p>
+          </article>
+          <article>
+            <div class="mode-heading"><span class="mode-dot mode-dot-blue"></span><h3>Bring your own gateway</h3><span class="mode-tag">Optional</span></div>
+            <p>Connect your organization-operated gateway and route inference with an opaque per-user pseudotoken. LiteLLM is supported first; provider credentials remain on your server.</p>
+          </article>
+        </div>
+        <a class="text-link" href={`${docsBase}/concepts/gateway-mode`} {...externalLinkProps}>Compare operating modes <span class="link-caret" aria-hidden="true"></span></a>
+      </div>
+    </section>
+
+    <section class="section open-section">
+      <h2>Self-host the reference stack.<br />Replace the pieces you need.</h2>
+      <p class="section-lede">
+        Deploy with Docker Compose, Helm, and OpenTofu. Keep state in PostgreSQL and S3-compatible storage, or implement the published governance contract in your own services.
+      </p>
+      <div class="tech-row" aria-label="Deployment technologies">
+        {services.map((service) => (
+          <span><img src={service.icon} alt="" width="24" height="24" />{service.name}</span>
+        ))}
+      </div>
+      <a class="text-link" href={`${docsBase}/deployment/production`} {...externalLinkProps}>Read the deployment guide <span class="link-caret" aria-hidden="true"></span></a>
+    </section>
+
+    <section class="section final-cta">
+      <h2>Install Blue to get started.</h2>
+      <p class="section-lede">
+        Connect to your organization and keep using the coding-agent CLI you already know, now with governance built in.
+      </p>
+      <div
+        class="install-command"
+        data-unix-command={unixInstallCommand}
+        data-windows-command={windowsInstallCommand}
+      >
+        <div class="install-command-scroll">
+          <span class="install-prompt" aria-hidden="true">$</span>
+          <code>{unixInstallCommand}</code>
+        </div>
+        <button class="copy-command" type="button" aria-label="Copy install command">
+          <svg class="copy-icon" aria-hidden="true" viewBox="0 0 16 16"><rect x="5.25" y="5.25" width="7.5" height="7.5" rx="1.25"></rect><path d="M10.75 5.25v-2A1.25 1.25 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6a1.25 1.25 0 0 0 1.25 1.25h2"></path></svg>
+          <svg class="check-icon" aria-hidden="true" viewBox="0 0 16 16"><path d="m3 8.25 3.1 3.1L13 4.5"></path></svg>
+        </button>
+      </div>
+      <div class="actions">
+        <a class="button button-primary" href={`${docsBase}/quickstart`} {...externalLinkProps}>Get started</a>
+        <a class="text-link" href={github} {...externalLinkProps}>Explore the source <span class="link-caret" aria-hidden="true"></span></a>
+      </div>
+    </section>
+  </main>
+
+  <footer id="footer">
+    <div class="footer-columns">
+      <div class="footer-links">
+        <div class="footer-column">
+          <h4>Product</h4>
+          <ul><li><a href={`${docsBase}/introduction`} {...externalLinkProps}>Overview</a></li><li><a href={`${docsBase}/quickstart`} {...externalLinkProps}>Quickstart</a></li><li><a href={`${docsBase}/concepts/architecture`} {...externalLinkProps}>Architecture</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Operate</h4>
+          <ul><li><a href={`${docsBase}/admin/configuration`} {...externalLinkProps}>Configuration</a></li><li><a href={`${docsBase}/admin/managed-packages`} {...externalLinkProps}>Extensions</a></li><li><a href={`${docsBase}/admin/gateway-access`} {...externalLinkProps}>Bring your own gateway</a></li><li><a href={`${docsBase}/admin/session-capture`} {...externalLinkProps}>Sessions</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Deploy</h4>
+          <ul><li><a href={`${docsBase}/deployment/production`} {...externalLinkProps}>Production</a></li><li><a href={`${docsBase}/development/local-compose`} {...externalLinkProps}>Docker Compose</a></li><li><a href={`${github}/tree/main/deploy/helm`} {...externalLinkProps}>Helm</a></li><li><a href={`${github}/tree/main/deploy/tofu/aws`} {...externalLinkProps}>OpenTofu</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Project</h4>
+          <ul><li><a href={github} {...externalLinkProps}>GitHub</a></li><li><a href={`${github}/releases`} {...externalLinkProps}>Releases</a></li><li><a href={`${github}/blob/main/CONTRIBUTING.md`} {...externalLinkProps}>Contributing</a></li></ul>
+          <h4 class="footer-subheading">Trust</h4>
+          <ul><li><a href={`${github}/blob/main/SECURITY.md`} {...externalLinkProps}>Security</a></li><li><a href={`${github}/blob/main/LICENSE`} {...externalLinkProps}>MIT License</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Connect</h4>
+          <ul><li><a href={github} {...externalLinkProps}>GitHub</a></li><li><a href="https://blocks.team" {...externalLinkProps}>Blocks</a></li></ul>
+        </div>
+      </div>
+    </div>
+    <div class="footer-copyright"><span>Blue, an open-source project from Blocks.</span></div>
+  </footer>
+
+  <script>
+    const installCommand = document.querySelector<HTMLElement>(".install-command");
+    const copyButton = document.querySelector<HTMLButtonElement>(".copy-command");
+    const installCode = document.querySelector<HTMLElement>(".install-command code");
+    const installPrompt = document.querySelector<HTMLElement>(".install-prompt");
+
+    const navigatorWithUserAgentData = navigator as Navigator & {
+      userAgentData?: { platform?: string };
+    };
+    const platform =
+      navigatorWithUserAgentData.userAgentData?.platform ||
+      navigator.userAgent;
+
+    if (/windows|win32|win64/i.test(platform)) {
+      const windowsCommand = installCommand?.dataset.windowsCommand;
+      if (installCode && windowsCommand) installCode.textContent = windowsCommand;
+      if (installPrompt) installPrompt.textContent = "PS>";
+    }
+
+    copyButton?.addEventListener("click", async () => {
+      if (!installCode) return;
+      await navigator.clipboard.writeText(installCode.textContent?.trim() ?? "");
+      copyButton.setAttribute("aria-label", "Install command copied");
+      copyButton.classList.add("is-copied");
+      window.setTimeout(() => {
+        copyButton.setAttribute("aria-label", "Copy install command");
+        copyButton.classList.remove("is-copied");
+      }, 1600);
+    });
+  </script>
+</BaseLayout>

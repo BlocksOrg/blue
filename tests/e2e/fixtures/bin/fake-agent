@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+agent="$(basename "$0")"
+if [[ "${1:-}" == "--version" ]] || [[ "${1:-}" == "version" ]]; then
+  version_var="E2E_${agent^^}_VERSION"
+  version="${!version_var:-1.0.0}"
+  printf '%s %s\n' "$agent" "$version"
+  exit 0
+fi
+
+# OpenCode session restoration uses its native export/import contract. An
+# unknown export exits non-zero; import returns the new native session ID.
+if [[ "$agent" == "opencode" ]] && [[ "${1:-}" == "session" ]] && [[ "${2:-}" == "list" ]]; then
+  printf '[]\n'
+  exit 0
+fi
+if [[ "$agent" == "opencode" ]] && [[ "${1:-}" == "import" ]]; then
+  printf 'Imported session: e2e-opencode-imported\n'
+  exit 0
+fi
+
+log_dir="${E2E_AGENT_LOG_DIR:-/tmp/blue-e2e/agent-log}"
+mkdir -p "$log_dir"
+{
+  printf 'agent=%s\n' "$agent"
+  printf 'argc=%s\n' "$#"
+  index=0
+  for arg in "$@"; do
+    printf 'arg_%s=%s\n' "$index" "$arg"
+    index=$((index + 1))
+  done
+  for name in CODEX_HOME KIMI_CODE_HOME OPENCODE_CONFIG OPENCODE_AUTH_CONTENT HARNESS_CODEX_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN OPENAI_BASE_URL OPENAI_API_KEY; do
+    printf 'env_%s=%s\n' "$name" "${!name:-}"
+  done
+} > "$log_dir/$agent.env"
+
+if [[ -n "${E2E_AGENT_READ_STDIN:-}" ]]; then
+  IFS= read -r line || true
+  printf 'stdin=%s\n' "$line" >> "$log_dir/$agent.env"
+  printf 'fake-%s-stdin:%s\n' "$agent" "$line"
+fi
+if [[ -n "${E2E_AGENT_FRAGMENTED_ANSI:-}" ]]; then
+  printf '\033[38'
+  sleep 0.05
+  printf ';2;1;2;3mBLUE_ANSI_OK\033[0m\n'
+fi
+if [[ -n "${E2E_AGENT_FRAGMENTED_CLEAR:-}" ]]; then
+  printf '\033[?2026h\033[2'
+  sleep 0.05
+  printf 'J\033[HBLUE_CLEAR_OK\n\033[?2026l'
+fi
+if [[ -n "${E2E_AGENT_LEAK_TERMINAL_MODES:-}" ]]; then
+  # Deliberately omit the matching resets. Blue must restore the parent TTY.
+  printf '\033[?1003h\033[?1006h\033[?1004h\033[?2004h\033[?25l\033[>3u'
+fi
+printf 'fake-%s-ok\n' "$agent"
+exit "${E2E_AGENT_EXIT_CODE:-0}"

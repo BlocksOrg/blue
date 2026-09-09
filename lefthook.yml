@@ -1,0 +1,29 @@
+# Pre-commit hooks: the cheap checks that mirror CI, scoped to staged files.
+# One-time setup: `scripts/setup.sh` (installs these hooks via lefthook).
+# Bypass in a pinch: `git commit --no-verify`.
+#
+# Slow gates (cargo test, next build, docker/helm/tofu) stay in CI only.
+# Clippy is the heaviest step here; incremental + cached it is fast, but move it
+# to a `pre-push` block if you want commits to stay instant.
+
+pre-commit:
+  parallel: true
+  commands:
+    rust-fmt:
+      glob: "*.rs"
+      run: cargo fmt --all --check
+    rust-clippy:
+      glob: "*.rs"
+      run: cargo clippy --workspace --all-targets
+    dashboard-types:
+      root: apps/dashboard/
+      glob: "apps/dashboard/**/*.{ts,tsx}"
+      run: npm run lint
+    website-check:
+      root: apps/website/
+      glob: "apps/website/**/*.{ts,tsx,astro}"
+      run: npm run check
+    docs-contract:
+      glob: "{deploy/contract/governance.openapi.yaml,apps/docs/openapi/*.yaml,apps/docs/scripts/*contract.mjs}"
+      run: npm --prefix apps/docs run sync:contract && npm --prefix apps/docs run check:contract
+      stage_fixed: true

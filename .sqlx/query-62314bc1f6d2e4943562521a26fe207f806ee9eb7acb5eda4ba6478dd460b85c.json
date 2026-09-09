@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO captured_sessions (id,organization_id,user_id,harness,compatibility_profile,native_session_id,cwd,artifact_format,resumable,title,summary,source_captured_at,repository_root,repository_remote) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (user_id,harness,compatibility_profile,native_session_id) DO UPDATE SET cwd=EXCLUDED.cwd,artifact_format=EXCLUDED.artifact_format,resumable=EXCLUDED.resumable,title=EXCLUDED.title,summary=EXCLUDED.summary,source_captured_at=EXCLUDED.source_captured_at,repository_root=EXCLUDED.repository_root,repository_remote=EXCLUDED.repository_remote,updated_at=now() RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62314bc1f6d2e4943562521a26fe207f806ee9eb7acb5eda4ba6478dd460b85c"
+}

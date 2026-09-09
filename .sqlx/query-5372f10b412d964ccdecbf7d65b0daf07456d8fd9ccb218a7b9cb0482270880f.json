@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select distinct model as \"model!\" from gateway_request_logs where organization_id=$1 and expires_at>now() and ($2::uuid is null or user_id=$2) and model is not null order by model",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5372f10b412d964ccdecbf7d65b0daf07456d8fd9ccb218a7b9cb0482270880f"
+}

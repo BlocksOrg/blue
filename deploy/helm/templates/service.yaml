@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "blue.fullname" . }}-dashboard
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "blue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+  ports: [{ name: dashboard, port: {{ .Values.service.ports.dashboard }}, targetPort: dashboard }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "blue.fullname" . }}-control-api
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "blue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: control-api
+  ports: [{ name: control-api, port: {{ .Values.service.ports.controlApi }}, targetPort: control-api }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "blue.fullname" . }}-control-api-internal
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "blue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: control-api
+  ports: [{ name: gateway-internal, port: 8082, targetPort: gateway-internal }]
+{{- if .Values.blue.enableInferenceProxy }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "blue.fullname" . }}-inference-proxy
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "blue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: inference-proxy
+  ports: [{ name: inference, port: {{ .Values.service.ports.inferenceProxy }}, targetPort: inference }]
+{{- end }}

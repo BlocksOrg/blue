@@ -1,0 +1,245 @@
+name: Build images
+
+# The single authoritative image build, shared by the e2e suites and the release
+# workflow. Two modes, selected by inputs; the defaults preserve the e2e tarball
+# behavior so existing callers need no changes.
+#
+#   * Artifact mode (mode: artifact, the default) — builds the production image
+#     (deploy/Dockerfile) plus the `rust-artifacts` image on a native amd64
+#     runner and `docker save`s both into one tarball artifact. e2e / e2e-slim
+#     download it and `docker load`, so the workspace is compiled once per run
+#     instead of every suite recompiling.
+#
+#   * Registry mode (mode: registry) — builds each architecture on its OWN native
+#     runner in parallel (no QEMU emulation), pushes each by digest, then a merge
+#     job stitches the digests into one multi-arch manifest with the release tags
+#     and attests it. `enable-arm` adds the parallel linux/arm64 leg on a native
+#     `ubuntu-24.04-arm` runner; without it registry mode is amd64-only.
+#     `push: false` builds every arch without publishing (release dry-run).
+#
+# Every mode shares the `type=gha,scope=blue-images-<arch>` cache, so the
+# `cargo chef cook` dependency layer stays warm across every workflow that calls
+# this one — most importantly, the amd64 e2e build warms the amd64 release build.
+# The scope stays valid only because the Dockerfile pins the toolchain in the
+# chef stage (a rustc change invalidates every cooked artifact).
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "artifact (tarball for e2e) or registry (push multi-arch manifest)."
+        type: string
+        default: artifact
+      push:
+        description: Registry mode — push per-arch images and publish the manifest.
+        type: boolean
+        default: false
+      enable-arm:
+        description: Registry mode — also build linux/arm64 on a native arm runner (parallel job).
+        type: boolean
+        default: false
+      image-name:
+        description: Registry mode — target image repository. Defaults to the current repo.
+        type: string
+        default: ""
+      tag:
+        description: Registry mode — release tag (vX.Y.Z) the published image tags are derived from.
+        type: string
+        default: ""
+      deployment-version:
+        description: BLUE_DEPLOYMENT_VERSION build-arg baked into the image.
+        type: string
+        default: e2e
+      artifact-name:
+        description: Artifact mode — name of the uploaded image tarball artifact.
+        type: string
+        default: blue-images
+    outputs:
+      artifact-name:
+        description: Artifact mode — name of the uploaded image tarball artifact.
+        value: ${{ inputs.artifact-name }}
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # Expand the build matrix: one native runner per architecture. arm64 is only
+  # added in registry mode when enable-arm is set — the e2e tarball is amd64-only.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - id: matrix
+        shell: bash
+        run: |
+          amd64='{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}'
+          arm64='{"arch":"arm64","platform":"linux/arm64","runner":"ubuntu-24.04-arm"}'
+          if [ "${{ inputs.mode }}" = "registry" ] && [ "${{ inputs.enable-arm }}" = "true" ]; then
+            echo "matrix={\"include\":[${amd64},${arm64}]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"include\":[${amd64}]}" >> "$GITHUB_OUTPUT"
+          fi
+      # ghcr rejects uppercase repository names, so lowercase the fully-qualified
+      # image ref once here and reuse it for the push, the manifest, and the attest.
+      - id: image
+        shell: bash
+        env:
+          NAME: ${{ inputs.image-name != '' && inputs.image-name || github.repository }}
+        run: echo "image=${REGISTRY}/${NAME,,}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # ---- Registry mode: build one arch on its native runner, push by digest ----
+      - if: inputs.mode == 'registry' && inputs.push
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: inputs.mode == 'registry'
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ needs.setup.outputs.image }}
+      - if: inputs.mode == 'registry'
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        # Skip the `.dockerbuild` build-record artifact — the release publish job
+        # can't extract it, and nothing consumes it.
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: BLUE_DEPLOYMENT_VERSION=${{ inputs.deployment-version }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=blue-images-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=blue-images-${{ matrix.arch }}
+          push: ${{ inputs.push }}
+          outputs: ${{ inputs.push && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', needs.setup.outputs.image) || '' }}
+      - if: inputs.mode == 'registry' && inputs.push
+        name: Export digest
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${RUNNER_TEMP}/digests/${digest#sha256:}"
+      - if: inputs.mode == 'registry' && inputs.push
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+      # ---- Artifact mode (e2e): production image + rust-artifacts, one tarball ----
+      # Production `all` image — the exact target release ships. Full e2e layers
+      # its custom-provisioner overlay on top of this.
+      - if: inputs.mode == 'artifact'
+        name: Build deployment image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          load: true
+          tags: blue-e2e-base:local
+          build-args: BLUE_DEPLOYMENT_VERSION=${{ inputs.deployment-version }}
+          cache-from: type=gha,scope=blue-images-amd64
+          cache-to: type=gha,mode=max,scope=blue-images-amd64
+      # Just the compiled binaries (`rust-artifacts` = FROM scratch). Reuses the
+      # `rust-build` layers above (same build graph), so it adds no extra compile.
+      # Full e2e's Playwright runner builds FROM this for the CLI.
+      - if: inputs.mode == 'artifact'
+        name: Build rust-artifacts image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: rust-artifacts
+          load: true
+          tags: blue-e2e-rust:local
+          cache-from: type=gha,scope=blue-images-amd64
+      # `docker save` dedupes the shared layers across both images into one tar
+      # (~190 MB compressed).
+      - if: inputs.mode == 'artifact'
+        name: Export images
+        run: docker save blue-e2e-base:local blue-e2e-rust:local -o "${RUNNER_TEMP}/blue-images.tar"
+      - if: inputs.mode == 'artifact'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ runner.temp }}/blue-images.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  # Registry mode only: stitch the per-arch digests into one multi-arch manifest,
+  # tag it, and attest the manifest digest.
+  merge:
+    if: inputs.mode == 'registry' && inputs.push
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ needs.setup.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}},value=${{ inputs.tag }}
+            type=raw,value=latest
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.setup.outputs.image }}
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+      - id: digest
+        name: Read manifest digest
+        env:
+          IMAGE: ${{ needs.setup.outputs.image }}
+        run: |
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${{ steps.meta.outputs.version }}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ needs.setup.outputs.image }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true

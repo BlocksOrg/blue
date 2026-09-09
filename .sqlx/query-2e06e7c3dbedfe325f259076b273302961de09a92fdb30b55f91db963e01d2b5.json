@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"user\" set \"governanceRole\"=$1,\"updatedAt\"=now() where id=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2e06e7c3dbedfe325f259076b273302961de09a92fdb30b55f91db963e01d2b5"
+}

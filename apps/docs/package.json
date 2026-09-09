@@ -1,0 +1,16 @@
+{
+  "name": "blue-docs",
+  "private": true,
+  "scripts": {
+    "dev": "mint dev",
+    "validate": "mint openapi-check openapi/next.yaml && mint broken-links && node scripts/check-content.mjs && node scripts/check-contract.mjs",
+    "links": "mint broken-links",
+    "check:content": "node scripts/check-content.mjs",
+    "sync:contract": "node scripts/sync-contract.mjs",
+    "check:contract": "node scripts/check-contract.mjs",
+    "release:docs": "node scripts/release-version.mjs"
+  },
+  "devDependencies": {
+    "mint": "4.2.836"
+  }
+}

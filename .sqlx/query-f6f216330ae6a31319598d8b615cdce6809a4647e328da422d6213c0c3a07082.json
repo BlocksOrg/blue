@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select i.id,i.email,i.role,i.status,i.\"expiresAt\" as expires_at,i.\"createdAt\" as created_at,u.email as inviter_email from auth.\"invitation\" i left join auth.\"user\" u on u.id=i.\"inviterId\" where i.\"organizationId\"=$1 and i.id=$2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "inviter_email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f6f216330ae6a31319598d8b615cdce6809a4647e328da422d6213c0c3a07082"
+}

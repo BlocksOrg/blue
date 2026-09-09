@@ -1,0 +1,53 @@
+name: Deploy Blue
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/blue-deployment
+
+jobs:
+  deploy:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: tofu -chdir=infra/aws init
+      - run: tofu -chdir=infra/aws apply -auto-approve
+      - run: tofu -chdir=infra/aws output -json helm_values > generated-values.json
+      - run: docker build --build-arg BLUE_VERSION=0.1.0 -t "$IMAGE:${GITHUB_SHA}" .
+      - run: docker push "$IMAGE:${GITHUB_SHA}"
+      - run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}"
+      - name: Sync generated runtime secret
+        run: |
+          runtime_secret_arn="$(tofu -chdir=infra/aws output -raw runtime_secret_arn)"
+          secret_json="$(aws secretsmanager get-secret-value --secret-id "$runtime_secret_arn" --query SecretString --output text)"
+          kubectl create namespace blue --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n blue create secret generic blue-runtime \
+            --from-literal=HARNESS_DATABASE_URL="$(jq -r .HARNESS_DATABASE_URL <<<"$secret_json")" \
+            --from-literal=BETTER_AUTH_SECRET="$(jq -r .BETTER_AUTH_SECRET <<<"$secret_json")" \
+            --from-literal=HARNESS_BOOTSTRAP_ADMIN_EMAIL="$(jq -r .HARNESS_BOOTSTRAP_ADMIN_EMAIL <<<"$secret_json")" \
+            --from-literal=HARNESS_BOOTSTRAP_ADMIN_PASSWORD="$(jq -r .HARNESS_BOOTSTRAP_ADMIN_PASSWORD <<<"$secret_json")" \
+            --dry-run=client -o yaml | kubectl apply -f -
+      - run: >-
+          helm upgrade --install blue chart/blue --namespace blue
+          -f values.yaml -f generated-values.json
+          --set-string image.repository="$IMAGE"
+          --set-string image.tag="$GITHUB_SHA"
+          --wait --timeout 10m
+      - run: kubectl -n blue rollout status deployment/blue-blue --timeout=5m

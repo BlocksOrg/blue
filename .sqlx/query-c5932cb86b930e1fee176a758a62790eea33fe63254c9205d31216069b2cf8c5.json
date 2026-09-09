@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update users set email=$1,status=$2,active=$3,tokens_valid_after=case when $3 then tokens_valid_after else now() end,updated_at=now() where id=$4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c5932cb86b930e1fee176a758a62790eea33fe63254c9205d31216069b2cf8c5"
+}

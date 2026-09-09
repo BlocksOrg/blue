@@ -1,0 +1,179 @@
+{{- if .Values.networkPolicy.enabled }}
+# Baseline isolation: every pod is denied unless a workload policy below grants
+# the exact peer and port. Cluster CIDRs extend, but never replace, these rules.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "blue.fullname" . }}-default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- range $component := list "dashboard" "control-api" "worker" "migration" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "blue.fullname" $ }}-{{ $component }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "blue.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if or (eq $component "dashboard") (eq $component "control-api") }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml $.Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $.Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ if eq $component "dashboard" }}3000{{ else }}8080{{ end }}
+    {{- end }}
+    {{- if eq $component "control-api" }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: dashboard
+      ports: [{ protocol: TCP, port: 8080 }]
+    {{- if $.Values.blue.enableInferenceProxy }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: inference-proxy
+      ports: [{ protocol: TCP, port: 8082 }]
+    {{- end }}
+    {{- end }}
+    {{- if eq $component "dashboard" }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: control-api
+        {{- if $.Values.blue.enableInferenceProxy }}
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: inference-proxy
+        {{- end }}
+      ports: [{ protocol: TCP, port: 3000 }]
+    {{- end }}
+    {{- if $.Values.networkPolicy.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml $.Values.networkPolicy.monitoring.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $.Values.networkPolicy.monitoring.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ if eq $component "dashboard" }}3000{{ else }}8080{{ end }}
+    {{- end }}
+{{ if and (or (eq $component "worker") (eq $component "migration")) (not $.Values.networkPolicy.monitoring.enabled) }}    []
+{{ end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml $.Values.networkPolicy.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $.Values.networkPolicy.dns.podSelector | nindent 12 }}
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    {{- if eq $component "dashboard" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: control-api
+      ports: [{ protocol: TCP, port: 8080 }]
+    {{- end }}
+    {{- if eq $component "control-api" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: dashboard
+      ports: [{ protocol: TCP, port: 3000 }]
+    {{- if $.Values.blue.enableInferenceProxy }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: inference-proxy
+      ports: [{ protocol: TCP, port: 8081 }]
+    {{- end }}
+    {{- end }}
+    {{- range $.Values.networkPolicy.databaseCidrs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: {{ $.Values.networkPolicy.databasePort }} }]
+    {{- end }}
+    {{- if ne $component "migration" }}
+    {{- range $.Values.networkPolicy.redisCidrs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: {{ $.Values.networkPolicy.redisPort }} }]
+    {{- end }}
+    {{- range $.Values.networkPolicy.externalHttpsCidrs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- with $.Values.networkPolicy.extraEgress }}{{ toYaml . | nindent 4 }}{{- end }}
+    {{- end }}
+{{- end }}
+{{- if .Values.blue.enableInferenceProxy }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "blue.fullname" . }}-inference-proxy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "blue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: inference-proxy
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+      ports: [{ protocol: TCP, port: 8081 }]
+    {{- if .Values.networkPolicy.monitoring.enabled }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.monitoring.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.monitoring.podSelector | nindent 12 }}
+      ports: [{ protocol: TCP, port: 8081 }]
+    {{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: control-api
+      ports: [{ protocol: TCP, port: 8082 }]
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "blue.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: dashboard
+      ports: [{ protocol: TCP, port: 3000 }]
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 12 }}
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    {{- range .Values.networkPolicy.redisCidrs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: {{ $.Values.networkPolicy.redisPort }} }]
+    {{- end }}
+    {{- range .Values.networkPolicy.externalHttpsCidrs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}{{ toYaml . | nindent 4 }}{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from scim_group_members where group_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c4934a643a85e968ea2b1e800d3f7b9b04ec99f06ccbe7fb5067375ca1743bb"
+}

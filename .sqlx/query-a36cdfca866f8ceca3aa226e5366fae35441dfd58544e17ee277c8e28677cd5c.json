@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into public.gateway_key_revocations(id,external_id) values($1,$2) on conflict(external_id) do nothing",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a36cdfca866f8ceca3aa226e5366fae35441dfd58544e17ee277c8e28677cd5c"
+}

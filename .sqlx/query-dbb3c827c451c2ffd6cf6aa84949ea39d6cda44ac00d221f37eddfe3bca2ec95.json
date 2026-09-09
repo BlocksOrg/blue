@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update users set tokens_valid_after=now() where id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dbb3c827c451c2ffd6cf6aa84949ea39d6cda44ac00d221f37eddfe3bca2ec95"
+}

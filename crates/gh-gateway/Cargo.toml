@@ -1,0 +1,13 @@
+[package]
+name = "gh-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gh-common = { workspace = true }
+gh-service = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,89 @@
+{
+  "args": [
+    "--profile",
+    "blue",
+    "--config",
+    "check_for_update_on_startup=false"
+  ],
+  "env": {
+    "HARNESS_CODEX_KEY": "fixture-token",
+    "HARNESS_PACKAGE_COMPONENTS_SETTINGS": "{\"color\":\"blue\"}",
+    "PATH": "$HOME/package/bin:$PATH"
+  },
+  "files": [
+    "$HOME/.codex/blue.config.toml",
+    "$HOME/.codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills/1.0.0",
+    "$HOME/.config/blue/runtime/codex/agents",
+    "$HOME/.config/blue/runtime/codex/hooks",
+    "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/.agents/plugins/marketplace.json",
+    "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/plugins/blue-managed-standalone-skills/.codex-plugin/plugin.json",
+    "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/plugins/blue-managed-standalone-skills/skills",
+    "$HOME/.config/blue/runtime/codex/marketplaces/governance-fixture-plugin"
+  ],
+  "ownership": [
+    "$HOME/.codex/blue.config.toml",
+    "$HOME/.codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills",
+    "$HOME/.config/blue/runtime/codex"
+  ],
+  "removals": [
+    "$HOME/.codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills/1.0.0",
+    "$HOME/.config/blue/runtime/codex/agents",
+    "$HOME/.config/blue/runtime/codex/hooks",
+    "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/plugins/blue-managed-standalone-skills/skills"
+  ],
+  "warnings": [
+    "codex v0_0_0 does not support the session-upload lifecycle hook"
+  ],
+  "writes": [
+    {
+      "body": "approval_policy = \"on-request\"\nmodel = \"fixture-model\"\nmodel_provider = \"governed\"\n\n[marketplaces.governance-fixture-plugin]\nsource = \"$HOME/.config/blue/runtime/codex/marketplaces/governance-fixture-plugin\"\nsource_type = \"local\"\n\n[mcp_servers.fixture]\nargs = [\"--stdio\"]\ncommand = \"fixture-mcp\"\n\n[model_providers.governed]\nbase_url = \"https://gateway.example\"\nenv_key = \"HARNESS_CODEX_KEY\"\nname = \"Governed (harness)\"\nwire_api = \"responses\"\n\n[plugins.\"fixture-plugin@governance-fixture-plugin\"]\nenabled = true\n",
+      "mode": 384,
+      "path": "$HOME/.codex/blue.config.toml"
+    },
+    {
+      "body": "[marketplaces.governance-blue-managed-standalone-skills]\nsource = \"$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills\"\nsource_type = \"local\"\n\n[plugins.\"blue-managed-standalone-skills@governance-blue-managed-standalone-skills\"]\nenabled = true\n",
+      "mode": 384,
+      "path": "$HOME/.codex/config.toml"
+    },
+    {
+      "body": "{\n  \"author\": {\n    \"name\": \"Blue\"\n  },\n  \"description\": \"Organization-managed skills distributed by Blue.\",\n  \"interface\": {\n    \"capabilities\": [],\n    \"category\": \"Productivity\",\n    \"defaultPrompt\": \"Help me use an organization-managed skill.\",\n    \"developerName\": \"Blue\",\n    \"displayName\": \"Managed Skills\",\n    \"longDescription\": \"Skills selected and distributed through Blue governance.\",\n    \"shortDescription\": \"Organization-managed Codex skills.\"\n  },\n  \"name\": \"blue-managed-standalone-skills\",\n  \"skills\": \"./skills/\",\n  \"version\": \"1.0.0\"\n}\n",
+      "mode": 384,
+      "path": "$HOME/.codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills/1.0.0/.codex-plugin/plugin.json"
+    },
+    {
+      "body": "# Example\n\nA managed skill.\n",
+      "mode": 420,
+      "path": "$HOME/.codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills/1.0.0/skills/example/SKILL.md"
+    },
+    {
+      "body": "---\nname: reviewer\ndescription: Review changes\n---\nReview carefully.\n",
+      "mode": 420,
+      "path": "$HOME/.config/blue/runtime/codex/agents/reviewer.md"
+    },
+    {
+      "body": "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"fixture-hook\"}]}]}}",
+      "mode": 420,
+      "path": "$HOME/.config/blue/runtime/codex/hooks/hooks.json"
+    },
+    {
+      "body": "{\n  \"interface\": {\n    \"displayName\": \"Blue Managed Skills\"\n  },\n  \"name\": \"governance-blue-managed-standalone-skills\",\n  \"plugins\": [\n    {\n      \"category\": \"Productivity\",\n      \"name\": \"blue-managed-standalone-skills\",\n      \"policy\": {\n        \"authentication\": \"ON_INSTALL\",\n        \"installation\": \"AVAILABLE\"\n      },\n      \"source\": {\n        \"path\": \"./plugins/blue-managed-standalone-skills\",\n        \"source\": \"local\"\n      }\n    }\n  ]\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/.agents/plugins/marketplace.json"
+    },
+    {
+      "body": "{\n  \"author\": {\n    \"name\": \"Blue\"\n  },\n  \"description\": \"Organization-managed skills distributed by Blue.\",\n  \"interface\": {\n    \"capabilities\": [],\n    \"category\": \"Productivity\",\n    \"defaultPrompt\": \"Help me use an organization-managed skill.\",\n    \"developerName\": \"Blue\",\n    \"displayName\": \"Managed Skills\",\n    \"longDescription\": \"Skills selected and distributed through Blue governance.\",\n    \"shortDescription\": \"Organization-managed Codex skills.\"\n  },\n  \"name\": \"blue-managed-standalone-skills\",\n  \"skills\": \"./skills/\",\n  \"version\": \"1.0.0\"\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/plugins/blue-managed-standalone-skills/.codex-plugin/plugin.json"
+    },
+    {
+      "body": "# Example\n\nA managed skill.\n",
+      "mode": 420,
+      "path": "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/plugins/blue-managed-standalone-skills/skills/example/SKILL.md"
+    },
+    {
+      "body": "{\n  \"interface\": {\n    \"displayName\": \"Governance: fixture-plugin\"\n  },\n  \"name\": \"governance-fixture-plugin\",\n  \"plugins\": [\n    {\n      \"name\": \"fixture-plugin\",\n      \"policy\": {\n        \"authentication\": \"ON_INSTALL\",\n        \"installation\": \"AVAILABLE\"\n      },\n      \"source\": {\n        \"path\": \"$HOME/package/plugin\",\n        \"source\": \"local\"\n      }\n    }\n  ]\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/codex/marketplaces/governance-fixture-plugin/.agents/plugins/marketplace.json"
+    }
+  ]
+}

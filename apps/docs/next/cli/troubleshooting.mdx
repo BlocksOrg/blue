@@ -1,0 +1,62 @@
+---
+title: "Troubleshooting"
+description: "Diagnose authentication, reconciliation, gateway streaming, and session upload failures."
+icon: "wrench"
+---
+
+Start with these commands:
+
+```bash
+blue doctor
+blue status
+blue verify
+```
+
+Set `HARNESS_LOG=debug` for more client diagnostics.
+
+<AccordionGroup>
+  <Accordion title="The CLI says a harness is not installed">
+    Run the native binary with `--version`, then confirm its directory is on the same `PATH` used to launch `blue`. `doctor` prints the path it detected for every supported harness.
+  </Accordion>
+  <Accordion title="The harness version is blocked">
+    Run the native CLI with `--version`, then use `blue apply`, `blue status`, or `blue run` to compare the inventory's normalized native harness version and compatibility result with the organization's `version_requirement`. `blue doctor` reports the configuration source, session, revision, allowed harnesses, and each detected path, version, and allowed/denied state, but not the compatibility profile. In an interactive terminal, approve Blue's repair prompt to install the highest published release inside the policy and certified range, or ask an administrator to change the range.
+  </Accordion>
+  <Accordion title="A harness repair installed a version but Blue still detects another one">
+    Blue suppresses native update checks and automatic updates during wrapped launches so a repaired version remains certified. Running the harness directly or using an external package manager can still replace it. If the prompt returns, run `command -v kimi`, `command -v opencode`, or the corresponding command for the affected harness, then compare that path with the package manager's global binary directory. Multiple installations can shadow one another on `PATH`. Current Blue repairs verify the same executable path detected before installation; npm-owned binaries use npm, OpenCode uses its detected upgrade command, and standalone Kimi uses its pinned official installer. If an older Blue client created a shadowed npm installation, remove that unused installation through its package manager after confirming it is not the active path.
+  </Accordion>
+  <Accordion title="A package has no matching adapter variant">
+    Compare the installed native harness version with the package adapter's variant ranges. Ranges must not overlap. Blue uses the adapter's fallback fields when no variant matches; a variant-only adapter must contain a matching range. The last usable package activation is retained while the affected launch remains blocked.
+  </Accordion>
+  <Accordion title="Apply asks about the same merge every time">
+    Run `blue verify` and inspect whether another process changes the managed overlay after reconciliation. Identical desired and current values are skipped; recurring prompts indicate a real file or revision difference.
+  </Accordion>
+  <Accordion title="A direct agent launch still uses governed settings">
+    Run `blue apply` to reconcile managed values, and confirm you are not invoking an installed shim. Governed settings should live only in launch-scoped overlays.
+  </Accordion>
+  <Accordion title="Gateway access is denied">
+    The governance and LiteLLM users must have the same email. The deployment provisions and reconciles one managed key for that user; run `blue gateway` to retry it before fetching personalized policy.
+  </Accordion>
+  <Accordion title="The agent reconnects or the stream ends early">
+    Check the inference proxy and LiteLLM logs, confirm the proxy listens on the URL delivered by `blue config`, and verify that the managed key allows the configured model and wire protocol.
+  </Accordion>
+  <Accordion title="Captured sessions do not appear">
+    Confirm the global policy has a top-level `session_upload` block, apply the current revision, and finish a native agent session so its lifecycle hook runs. Then check Control API and object-storage logs for presign, upload, verification, and completion errors.
+  </Accordion>
+  <Accordion title="A managed package failed to activate">
+    Run `blue status` to identify the package and harness. Confirm the archive URL is reachable, its configured SHA-256 matches the exact bytes, every adapter path exists, and a helper asset covers the current OS and architecture. A previous working version remains available when its adapter is still compatible, but the affected governed launch stays blocked until reconciliation succeeds.
+  </Accordion>
+  <Accordion title="A removed package is quarantined">
+    Reconciliation detected local changes in metaharness-owned content and disabled the package without deleting those changes. Inspect the quarantine path reported by client status, preserve anything needed, and remove it manually when it is no longer useful.
+  </Accordion>
+</AccordionGroup>
+
+## Reset authentication
+
+```bash
+blue logout
+blue login
+```
+
+This removes stale local tokens and starts a new device authorization flow. It does not delete configuration overlays or captured sessions.
+
+To disconnect the deployment itself, use `blue reset`. Reset archives non-secret tenant state, removes active Blue-owned overlays, and prompts for a Control API URL the next time you run bare `blue` or an interactive `blue <agent>` command. See [Reset a deployment](/next/cli/commands#reset-a-deployment).

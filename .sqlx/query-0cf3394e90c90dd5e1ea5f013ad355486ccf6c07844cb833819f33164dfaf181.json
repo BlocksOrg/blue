@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select g.display_name from scim_groups g join scim_group_members m on m.group_id=g.id where m.user_id=$1 order by lower(g.display_name)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0cf3394e90c90dd5e1ea5f013ad355486ccf6c07844cb833819f33164dfaf181"
+}

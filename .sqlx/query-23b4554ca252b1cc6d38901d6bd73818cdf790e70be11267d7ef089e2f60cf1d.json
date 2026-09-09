@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update auth.\"invitation\" set \"inviterId\"=$1 where \"inviterId\"=$2 and status='pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "23b4554ca252b1cc6d38901d6bd73818cdf790e70be11267d7ef089e2f60cf1d"
+}

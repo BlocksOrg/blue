@@ -1,0 +1,14 @@
+name: Question
+description: Ask a question about using or deploying Blue
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [docs](https://docs.bluee.sh) first. For security reports, see SECURITY.md — do not open a public issue.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true

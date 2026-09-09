@@ -1,0 +1,135 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select l.id,l.user_id,u.email as user_email,l.profile_id,l.profile_name,l.occurred_at,l.method,l.path,l.model,l.http_status,l.result,l.upstream_latency_ms, l.harness,l.repository,l.branch,l.commit_sha,l.dirty,l.run_id from gateway_request_logs l join users u on u.id=l.user_id where l.organization_id=$1 and l.expires_at>now() and ($2::uuid is null or l.user_id=$2) and ($3::text is null or l.profile_id=$3) and ($4::text is null or l.model=$4) and ($5::text is null or l.harness=$5) and ($6::text is null or l.result=$6) and ($7::text is null or lower(l.path) like $7 escape E'\\\\' or lower(coalesce(l.model,'')) like $7 escape E'\\\\' or lower(coalesce(l.repository,'')) like $7 escape E'\\\\' or lower(coalesce(l.branch,'')) like $7 escape E'\\\\' or lower(coalesce(l.run_id,'')) like $7 escape E'\\\\' or lower(coalesce(l.profile_name,'')) like $7 escape E'\\\\') and ($8::timestamptz is null or l.occurred_at >= $8) and ($9::timestamptz is null or l.occurred_at < $9) order by case when $10='occurred_asc' then l.occurred_at end asc, case when $10='occurred_asc' then l.id end asc, case when $10='occurred_desc' then l.occurred_at end desc, case when $10='occurred_desc' then l.id end desc offset $11 limit $12",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "profile_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "profile_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "occurred_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "method",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "model",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "http_status",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "result",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "upstream_latency_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "harness",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "repository",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "branch",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "commit_sha",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "dirty",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 17,
+        "name": "run_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "663b2a755c622ec84ad3f5d3ef9a637cb8fcb4aed43201d6c13981140b33dbb3"
+}

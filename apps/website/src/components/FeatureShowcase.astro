@@ -1,0 +1,181 @@
+---
+const showcases = [
+  {
+    id: "resume",
+    label: "Resume anywhere",
+    lines: [
+      { kind: "command", marker: "›", text: "/resume" },
+      { kind: "heading", text: "Resume remote session · 4 available" },
+      { kind: "selected", text: "Refactor OAuth refresh · Codex", detail: "owned by you · ~/work/blue · 2 minutes ago" },
+      { kind: "option", text: "Diagnose deploy drift · Claude Code", detail: "shared by maya@acme.dev · ~/work/platform" },
+      { kind: "option", text: "Improve gateway tracing · Kimi Code", detail: "owned by you · ~/work/proxy" },
+      { kind: "option", text: "Ship auth docs · OpenCode", detail: "shared by ren@acme.dev · ~/work/docs" },
+      { kind: "status", marker: "✓", text: "Portable bundle downloaded and verified" },
+      { kind: "status", marker: "✓", text: "Native Codex session restored atomically" },
+      { kind: "launch", text: "Launching Codex · codex resume 0195…" },
+    ],
+  },
+  {
+    id: "authenticate",
+    label: "Authenticate",
+    lines: [
+      { kind: "command", marker: "$", text: "blue login" },
+      { kind: "text", text: "Confirmation code: BLUE-7K9P" },
+      { kind: "muted", text: "Opened your browser to authorize the CLI." },
+      { kind: "status", marker: "✓", text: "Device authorization approved" },
+      { kind: "status", marker: "✓", text: "Rotating credentials stored with owner-only permissions" },
+      { kind: "launch", text: "Logged in as alex@acme.dev (org acme)." },
+    ],
+  },
+  {
+    id: "launch",
+    label: "Governed launch",
+    lines: [
+      { kind: "command", marker: "$", text: "blue codex -- --model gpt-5" },
+      { kind: "status", marker: "✓", text: "Identity verified · alex@acme.dev" },
+      { kind: "status", marker: "✓", text: "Personalized policy revision 42 loaded" },
+      { kind: "status", marker: "✓", text: "Codex 0.145.0 is installed, allowed, and verified" },
+      { kind: "status", marker: "✓", text: "Managed overlay reconciled; personal config preserved" },
+      { kind: "status", marker: "✓", text: "6 managed extensions ready" },
+      { kind: "launch", text: "Launching the native Codex CLI" },
+    ],
+  },
+  {
+    id: "extensions",
+    label: "Extensions",
+    lines: [
+      { kind: "command", marker: "$", text: "blue apply" },
+      { kind: "status", marker: "✓", text: "secure-review@8c41f7 · SHA-256 verified" },
+      { kind: "status", marker: "✓", text: "Linear MCP server activated" },
+      { kind: "status", marker: "✓", text: "Skills, hooks, and plugins projected for Codex" },
+      { kind: "status", marker: "✓", text: "Unmanaged local extensions left untouched" },
+      { kind: "launch", text: "Applied revision 42 · all managed packages healthy" },
+    ],
+  },
+  {
+    id: "agents",
+    label: "Switch agents",
+    lines: [
+      { kind: "command", marker: "›", text: "/agent" },
+      { kind: "heading", text: "Choose your default coding agent" },
+      { kind: "option", text: "Codex", detail: "current default" },
+      { kind: "option", text: "Claude Code", detail: "installed and allowed" },
+      { kind: "selected", text: "Kimi Code", detail: "installed and allowed" },
+      { kind: "option", text: "OpenCode", detail: "installed and allowed" },
+      { kind: "heading", text: "Quit and reload the agent with the selection?" },
+      { kind: "selected", text: "Quit and reload now", detail: "gracefully stop the current agent" },
+      { kind: "launch", text: "Launching the native Kimi Code CLI" },
+    ],
+  },
+  {
+    id: "routing",
+    label: "Gateway / direct",
+    lines: [
+      { kind: "status", marker: "✓", text: "Current route · organization gateway" },
+      { kind: "muted", text: "Opaque pseudotoken active · provider credentials stay server-side" },
+      { kind: "command", marker: "›", text: "/direct" },
+      { kind: "heading", text: "Quit and reload the agent with direct credentials?" },
+      { kind: "option", text: "Keep current session", detail: "use direct mode after the next Blue restart" },
+      { kind: "selected", text: "Quit and reload now", detail: "gracefully stop the current agent" },
+      { kind: "status", marker: "✓", text: "Direct mode selected · governance remains active" },
+      { kind: "muted", text: "Run /direct again to restore organization gateway routing." },
+    ],
+  },
+];
+---
+
+<div class="feature-showcase" data-feature-showcase>
+  <div class="showcase-tabs-scroll">
+    <div class="showcase-tabs" role="tablist" aria-label="Blue CLI examples">
+      {showcases.map((showcase, index) => (
+        <button
+          class="showcase-tab"
+          id={`showcase-tab-${showcase.id}`}
+          type="button"
+          role="tab"
+          aria-selected={index === 0 ? "true" : "false"}
+          aria-controls={`showcase-panel-${showcase.id}`}
+          tabindex={index === 0 ? 0 : -1}
+        >
+          {showcase.label}
+        </button>
+      ))}
+    </div>
+  </div>
+
+  <div class="showcase-panels">
+    {showcases.map((showcase, panelIndex) => (
+      <div
+        class:list={["showcase-panel", panelIndex === 0 && "is-playing"]}
+        id={`showcase-panel-${showcase.id}`}
+        role="tabpanel"
+        aria-labelledby={`showcase-tab-${showcase.id}`}
+        hidden={panelIndex !== 0}
+      >
+        <div class="terminal showcase-terminal" aria-label={`${showcase.label} CLI example`}>
+          <div class="showcase-terminal-body">
+            {showcase.lines.map((line, lineIndex) => (
+              <div
+                class:list={["showcase-line", `showcase-line-${line.kind}`]}
+                style={`--line-index: ${lineIndex}`}
+              >
+                {line.marker && <span class="showcase-line-marker" aria-hidden="true">{line.marker}</span>}
+                <span class="showcase-line-content">
+                  <span>{line.text}</span>
+                  {line.detail && <small>{line.detail}</small>}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    ))}
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll<HTMLElement>("[data-feature-showcase]").forEach((showcase) => {
+    const tabs = Array.from(showcase.querySelectorAll<HTMLButtonElement>("[role='tab']"));
+    const panels = Array.from(showcase.querySelectorAll<HTMLElement>("[role='tabpanel']"));
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    const activate = (nextTab: HTMLButtonElement, moveFocus = false) => {
+      tabs.forEach((tab) => {
+        const selected = tab === nextTab;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+      });
+
+      panels.forEach((panel) => {
+        const selected = panel.id === nextTab.getAttribute("aria-controls");
+        panel.hidden = !selected;
+        panel.classList.remove("is-playing");
+        if (selected) {
+          void panel.offsetWidth;
+          panel.classList.add("is-playing");
+        }
+      });
+
+      nextTab.scrollIntoView({
+        behavior: reducedMotion.matches ? "auto" : "smooth",
+        block: "nearest",
+        inline: "nearest",
+      });
+      if (moveFocus) nextTab.focus();
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => activate(tab));
+      tab.addEventListener("keydown", (event) => {
+        let nextIndex: number | undefined;
+        if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+        if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+        if (event.key === "Home") nextIndex = 0;
+        if (event.key === "End") nextIndex = tabs.length - 1;
+        if (nextIndex === undefined) return;
+        event.preventDefault();
+        activate(tabs[nextIndex], true);
+      });
+    });
+  });
+</script>

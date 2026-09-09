@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into scim_group_members(group_id,user_id) values($1,$2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "837c346010e3c0bdc34c3926265f0cf723b4f4f02e25140fe4c79acd06089eed"
+}

@@ -1,0 +1,10 @@
+# Build overlay: builds the full deployment image from the shared
+# deploy/Dockerfile (final stage — the same image `images.yml` publishes as
+# blue-e2e-base). Kept separate so `up` can run with `--no-build` against a
+# prebuilt image (CI `docker load`s the tarball and skips this overlay).
+services:
+  control-api:
+    image: ${BLUE_E2E_SLIM_IMAGE:-blue-e2e-base:local}
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile

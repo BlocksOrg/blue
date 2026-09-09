@@ -1,0 +1,145 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id,s.user_id,u.email AS user_email,s.harness,s.compatibility_profile,s.native_session_id,s.cwd,s.artifact_format,s.resumable,s.title,s.summary,s.source_captured_at,s.repository_root,s.repository_remote,s.sharing_mode,s.updated_at, a.status AS \"artifact_status?\",a.size_bytes AS \"size_bytes?\",a.content_type AS \"content_type?\",a.retention_expires_at AS \"retention_expires_at?\" FROM captured_sessions s JOIN users u ON u.id=s.user_id LEFT JOIN session_artifacts a ON a.id=s.current_artifact_id WHERE s.organization_id=$1 AND s.current_artifact_id IS NOT NULL AND ($2::uuid IS NULL OR s.user_id=$2 OR s.sharing_mode='workspace' OR EXISTS (SELECT 1 FROM captured_session_grants g JOIN users recipient ON recipient.id=g.user_id WHERE g.captured_session_id=s.id AND g.user_id=$2 AND recipient.active=true)) AND ($3::text IS NULL OR s.harness=$3) AND ($4::text IS NULL OR a.status=$4) AND ($5::text IS NULL OR lower(s.native_session_id) LIKE $5 ESCAPE E'\\\\' OR lower(coalesce(s.cwd,'')) LIKE $5 ESCAPE E'\\\\' OR lower(coalesce(s.title,'')) LIKE $5 ESCAPE E'\\\\' OR lower(coalesce(s.summary,'')) LIKE $5 ESCAPE E'\\\\') AND ($6::timestamptz IS NULL OR s.updated_at >= $6) AND ($7::timestamptz IS NULL OR s.updated_at < $7) ORDER BY CASE WHEN $8='updated_asc' THEN s.updated_at END ASC, CASE WHEN $8='updated_asc' THEN s.id END ASC, CASE WHEN $8='updated_desc' THEN s.updated_at END DESC, CASE WHEN $8='updated_desc' THEN s.id END DESC OFFSET $9 LIMIT $10",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "harness",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "compatibility_profile",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "native_session_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "cwd",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "artifact_format",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "resumable",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "source_captured_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "repository_root",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "repository_remote",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "sharing_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "artifact_status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "size_bytes?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 18,
+        "name": "content_type?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 19,
+        "name": "retention_expires_at?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "9377027d84d253071a40f3d4f2f934081c63a5e60d8e452227a1e41cfcd7d129"
+}

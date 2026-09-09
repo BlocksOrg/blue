@@ -1,0 +1,37 @@
+---
+title: "Dashboard administration"
+description: "Manage users, policy revisions, clients, and captured sessions in the dashboard."
+icon: "gauge-high"
+---
+
+The dashboard is the browser interface for organization administrators. In the reference Compose stack it runs at `http://127.0.0.1:3000`.
+
+## Areas
+
+| Area | Purpose |
+| --- | --- |
+| Gateway | When gateway policy is active, see routing readiness and the signed-in user's single managed gateway key. |
+| Harnesses | Edit the managed model and execution settings for Codex, Claude, Kimi, and OpenCode. |
+| [Extensions](/next/admin/managed-packages) | Select skills, hooks, subagents, plugins, helper binaries, and MCP servers for managed distribution. |
+| Current deployment configuration | Open the user-menu dialog to copy or download effective deployment YAML. |
+| [Members](/next/admin/user-management) | Invite users, manage roles and access state, revoke credentials, and retain account history. |
+| Clients | See machine, harness, package, revision, drift, and managed-file health. |
+| Sessions | Search captured sessions by native title or preview, download artifacts, and manage private, workspace, or selected-member sharing. |
+
+## Roles and visibility
+
+Administrative routes require the user's governance role to be `admin`. All dashboard data is scoped to the user's organization. Members can see sessions they own or that were shared with them and managed Gateway key status, but cannot edit organization policy. Only a session owner can change its sharing grants; recipients cannot edit, delete, or re-share it. Revocation does not remove copies that a recipient already restored locally.
+
+Portable session bundles can contain raw prompts, tool results, filesystem paths, and other sensitive conversation data. The Sessions detail page displays this disclosure before sharing controls. Legacy single-file captures remain downloadable audit records and are never advertised as resumable.
+
+The Extensions page displays curated and custom digest-pinned packages plus organization-managed MCP servers. Package selections, per-harness overrides, and MCP targets create the same immutable governance revisions as policy edits. Packages containing hooks, plugins, or helper binaries are marked as executable before administrators authorize them.
+
+## Bootstrap account
+
+Compose creates one local administrator from `HARNESS_BOOTSTRAP_ADMIN_EMAIL` and `HARNESS_BOOTSTRAP_ADMIN_PASSWORD`. Defaults are for loopback development only. Production deployment must supply a unique password, a strong `BETTER_AUTH_SECRET`, and public issuer/audience URLs.
+
+The bootstrap administrator is protected from demotion, suspension, and deletion. See [Manage users and invitations](/next/admin/user-management) for the complete lifecycle and API behavior.
+
+<Warning>
+  Do not expose a deployment that still uses the documented development password or Better Auth secret.
+</Warning>

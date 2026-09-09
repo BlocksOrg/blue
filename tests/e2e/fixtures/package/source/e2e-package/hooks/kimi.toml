@@ -1,0 +1,4 @@
+[[hooks]]
+event = "SessionStart"
+command = "sh -c 'mkdir -p /tmp/blue-e2e/component-markers && touch /tmp/blue-e2e/component-markers/kimi-package-hook'"
+timeout = 5

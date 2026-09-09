@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gh-common",
+    "crates/gh-service",
+    "crates/gh-config",
+    "crates/gh-harness",
+    "crates/gh-gateway",
+    "crates/gh-gateway-provisioner",
+    "crates/gh-agent",
+    "crates/gh-telemetry",
+    "crates/gh-proxy",
+    "crates/gh-cli",
+    "services/control-api",
+    "services/inference-proxy",
+]
+# NB: tests/e2e-slim is intentionally NOT a member — it is its own workspace so
+# its test-only dependencies stay out of the deployment image's cargo-chef
+# recipe. See tests/e2e-slim/Cargo.toml for the rationale.
+
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/BlocksOrg/blue"
+rust-version = "1.95"
+
+[workspace.dependencies]
+# Internal crates
+gh-common = { path = "crates/gh-common" }
+gh-service = { path = "crates/gh-service" }
+gh-config = { path = "crates/gh-config" }
+gh-harness = { path = "crates/gh-harness" }
+gh-gateway = { path = "crates/gh-gateway" }
+gh-gateway-provisioner = { path = "crates/gh-gateway-provisioner" }
+gh-agent = { path = "crates/gh-agent" }
+gh-telemetry = { path = "crates/gh-telemetry" }
+gh-proxy = { path = "crates/gh-proxy" }
+
+# Third-party
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+serde_yaml = "0.9"
+semver = { version = "1", features = ["serde"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+cliclack = "=0.3.6"
+console = "=0.15.11"
+similar = "=2.7.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+portable-pty = "0.8"
+vt100 = "0.15"
+vte = "0.11"
+crossterm = "0.28"
+ratatui = { version = "0.28", default-features = false, features = ["crossterm"] }
+tui-input = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+axum = "0.7"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "time", "migrate", "macros", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.8"
+aws-config = { version = "=1.11.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "=1.117.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+base64 = "0.22"
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+async-trait = "0.1"
+futures-util = "0.3"
+jsonwebtoken = "9"
+webbrowser = { version = "=1.2.4", features = ["hardened"] }
+
+[profile.release]
+lto = "thin"
+strip = true

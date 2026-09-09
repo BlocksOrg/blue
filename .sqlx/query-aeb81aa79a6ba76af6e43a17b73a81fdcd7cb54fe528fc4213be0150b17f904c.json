@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update users set status='removed',active=false,tokens_valid_after=now(),updated_at=now() where id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aeb81aa79a6ba76af6e43a17b73a81fdcd7cb54fe528fc4213be0150b17f904c"
+}

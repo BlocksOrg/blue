@@ -1,0 +1,28 @@
+# Suite selection is explicit per CI job (run.sh passes --profile) so the two
+# jobs never conflate: the governance tests exercise the secret-free
+# control-api path, the certification tests drive real inference through the
+# gateway. Each test still self-skips when its stack env is unset, so a bare
+# `cargo test` / default-profile nextest run stays green with nothing running.
+
+# governance: everything except the per-agent certification tests.
+[profile.governance]
+default-filter = 'not binary(agent_certification)'
+
+# gateway: only the per-agent certification tests. The governance tests already
+# ran in the e2e-slim-governance job of the same workflow; re-running them here
+# both duplicates coverage and races the certification runs (their session-upload
+# hooks land real sessions in the same control-api list).
+[profile.gateway]
+default-filter = 'binary(agent_certification)'
+
+# The certification tests drive real, non-deterministic LLM inference through
+# OpenRouter, so a single dropped/garbled turn (model didn't call the tool, a
+# transient upstream 5xx) shouldn't fail the whole run. Retry only those tests;
+# the deterministic governance-only tests keep zero retries.
+[[profile.default.overrides]]
+filter = 'test(certifies)'
+retries = 2
+
+[[profile.gateway.overrides]]
+filter = 'test(certifies)'
+retries = 2

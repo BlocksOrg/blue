@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select distinct harness as \"harness!\" from gateway_request_logs where organization_id=$1 and expires_at>now() and ($2::uuid is null or user_id=$2) and harness is not null order by harness",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "harness!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e4ab44362113af0ae7e86c803801f3fa3958a47ecbcca78cdd6a90b374f4a53e"
+}

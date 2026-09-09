@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select u.id,u.email from users u join scim_group_members m on m.user_id=u.id where m.group_id=$1 order by lower(u.email)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2fd88b95f37804b82bdbd8113b2ab0b554cd7c51ad813611702a563e94d40a64"
+}

@@ -1,0 +1,96 @@
+control_api:
+  listen: 0.0.0.0:8080
+  database_url: os.environ/HARNESS_DATABASE_URL
+  bootstrap:
+    organization_slug: e2e
+    organization_name: Blue E2E
+    admin_subject: e2e-admin
+    admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL
+  auth:
+    public_url: os.environ/HARNESS_AUTH_PUBLIC_URL
+    session_url: os.environ/HARNESS_AUTH_SESSION_URL
+    jwks_url: os.environ/HARNESS_AUTH_JWKS_URL
+    issuer: os.environ/HARNESS_AUTH_ISSUER
+    audience: os.environ/HARNESS_AUTH_AUDIENCE
+    client_id: blue-cli
+  identity:
+    mode: password
+  blob_storage:
+    provider: s3
+    bucket: raw-sessions
+    region: us-east-1
+    endpoint: http://minio:9000
+    public_endpoint: http://minio:9000
+    force_path_style: true
+    presign_ttl_seconds: 300
+    retention_days: 30
+    auth:
+      mode: iam
+  package_artifacts:
+    bucket: package-artifacts
+
+# Deliberately no top-level `gateway:` block: this is the regression fixture.
+governance:
+  revision: "e2e-1"
+  contract_version: 2
+  required_capabilities:
+    - adapter_intervals
+    - compiled_harness_registry
+    - transactional_reconcile
+    - versioned_state
+  minimum_client_version: "0.1.0"
+  ttl_seconds: 5
+  allowed_harnesses: [codex, claude, kimi, opencode]
+  packages:
+    - &e2e_package
+      id: e2e-skill
+      name: E2E Skill
+      version: "1.0.0"
+      source_ref: file:///fixtures/e2e-package.tar.gz
+      sha256: f84937b7e4221f795d8603b954cff846c266276fe2bc38e8e98c9812f4c1593f
+      adapters:
+        codex:
+          plugin_dir: e2e-package/codex-plugin
+          skills_dir: e2e-package/codex-plugin/skills
+        claude:
+          plugin_dir: e2e-package/claude-plugin
+          skills_dir: e2e-package/claude-plugin/skills
+        kimi:
+          skills_dir: &skills e2e-package/skills
+          agents_dir: &agents e2e-package/agents
+          hooks_file: e2e-package/hooks/kimi.toml
+        opencode:
+          skills_dir: *skills
+          agents_dir: *agents
+          plugins: [e2e-package/opencode-plugin.js]
+  session_upload:
+    presign_url: http://127.0.0.1:8080/session-uploads/presign
+  harnesses:
+    codex:
+      managed_config:
+        model: gpt-e2e
+        reasoning_effort: low
+        approval_policy: never
+        sandbox_mode: workspace-write
+      mcp: &e2e_mcp
+        - name: e2e-remote
+          command: node
+          args: ["/work/tests/e2e/fixtures/mcp-server.mjs"]
+    claude:
+      version_requirement: ">=2.0.12, <2.1.253-0"
+      managed_config:
+        model: claude-e2e
+        auto_approve: true
+      mcp: *e2e_mcp
+    kimi:
+      managed_config:
+        model: kimi-e2e
+        auto_approve: true
+      mcp: *e2e_mcp
+    opencode:
+      managed_config:
+        model: e2e/model
+      mcp: *e2e_mcp
+
+package_catalog:
+  packages: [*e2e_package]

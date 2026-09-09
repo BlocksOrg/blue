@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update public.gateway_key_selections set gateway_user_id=null,source_key_hash=null,source_key_alias=null,source_models='[]'::jsonb,proxy_key_alias=null,provisioner_config_hash=null,provisioner_metadata='{}'::jsonb,credential_expires_at=null,credential_ciphertext=null,credential_nonce=null,credential_wrapped_key=null,encryption_key_id=null,credential_version=gen_random_uuid(),credential_state='invalid',invalidated_at=now(),invalidation_reason=$3,recovery_attempts=0,next_recovery_at=null,recovery_lease_until=null,last_reconciled_at=null,provisioning_error=null,updated_at=now() where user_id=$1 and credential_version=$2 and credential_ciphertext is not null",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ae00a225d3d4e3dc8bcd69a220ac9f0d7e878e4979e82dfa07a3c203929e359e"
+}

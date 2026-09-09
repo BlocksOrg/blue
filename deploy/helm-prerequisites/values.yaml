@@ -1,0 +1,10 @@
+networkPolicy:
+  databaseCidrs: []
+  databasePort: 5432
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns

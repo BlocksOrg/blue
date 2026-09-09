@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from auth.\"oauthRefreshToken\" where \"userId\"=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a70710c74e166ea7c87385f551c4a7124370fc3ecf0cdf40cc9f7569a5cd6948"
+}

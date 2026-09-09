@@ -1,0 +1,36 @@
+{
+  "args": [
+    "--settings",
+    "$HOME/.config/blue/runtime/claude/settings.json",
+    "--mcp-config",
+    "$HOME/.config/blue/runtime/claude/mcp.json"
+  ],
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "HARNESS_PACKAGE_COMPONENTS_SETTINGS": "{\"color\":\"blue\"}",
+    "PATH": "$HOME/package/bin:$PATH"
+  },
+  "files": [
+    "$HOME/.config/blue/runtime/claude/mcp.json",
+    "$HOME/.config/blue/runtime/claude/settings.json"
+  ],
+  "ownership": [
+    "$HOME/.config/blue/runtime/claude"
+  ],
+  "removals": [],
+  "warnings": [
+    "Claude hooks-only interval does not uniformly support SessionEnd (introduced in 1.0.85); automatic session upload is disabled"
+  ],
+  "writes": [
+    {
+      "body": "{\n  \"mcpServers\": {\n    \"fixture\": {\n      \"args\": [\n        \"--stdio\"\n      ],\n      \"command\": \"fixture-mcp\"\n    }\n  }\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/claude/mcp.json"
+    },
+    {
+      "body": "{\n  \"env\": {\n    \"ANTHROPIC_AUTH_TOKEN\": \"fixture-token\",\n    \"ANTHROPIC_BASE_URL\": \"https://gateway.example\"\n  },\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"command\": \"fixture-hook\",\n            \"type\": \"command\"\n          }\n        ]\n      }\n    ]\n  },\n  \"model\": \"fixture-model\"\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/claude/settings.json"
+    }
+  ]
+}

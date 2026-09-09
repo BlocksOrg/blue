@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id as \"id!\",u.email as \"email!\" FROM public.client_status c JOIN users u ON u.id=c.user_id WHERE c.organization_id=$1 AND ($2::text IS NULL OR lower(u.email) LIKE $2 ESCAPE E'\\\\') GROUP BY u.id,u.email ORDER BY (u.id=$3) DESC,u.email LIMIT 10",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "bc8bbd91fe27ed2191a701439b5e5e1600649a12d44df77a8bc6376298929382"
+}

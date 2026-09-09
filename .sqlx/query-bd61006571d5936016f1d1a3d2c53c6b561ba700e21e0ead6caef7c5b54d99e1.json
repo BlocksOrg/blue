@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.revision,r.created_at,u.email AS \"created_by_email?\",r.origin FROM governance_config_revisions r LEFT JOIN users u ON u.id=r.created_by WHERE r.organization_id=$1 ORDER BY r.id DESC LIMIT 100",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "revision",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_by_email?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "origin",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bd61006571d5936016f1d1a3d2c53c6b561ba700e21e0ead6caef7c5b54d99e1"
+}

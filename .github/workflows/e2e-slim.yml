@@ -1,0 +1,124 @@
+name: End-to-end (slim)
+
+# Slim e2e in two disjoint jobs (selection via nextest profiles, see
+# tests/e2e-slim/.config/nextest.toml):
+#   * e2e-slim-governance — secret-free governance-only path (Postgres + MinIO +
+#     JWKS sidecar + control-api), bootstrap/config/session-upload tests.
+#   * e2e-slim-gateway — secret-gated real-inference path (adds LiteLLM fed by
+#     OpenRouter + inference-proxy), per-agent certification tests only.
+# Both reuse the single authoritative deployment image built once by `images.yml`
+# (same one the full e2e suite loads) — every job below `docker load`s that
+# tarball and runs in prebuilt mode.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-slim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Authoritative one-shot build of the production image + compiled binaries,
+  # shared with the full e2e suite. Both slim jobs consume its artifact.
+  build:
+    uses: ./.github/workflows/images.yml
+    permissions:
+      contents: read
+
+  e2e-slim-governance:
+    needs: build
+    runs-on: Yellow
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Publish suite README to the run summary
+        if: always()
+        run: cat tests/e2e-slim/README.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: ${{ runner.temp }}/images
+      - run: docker load -i "${RUNNER_TEMP}/images/blue-images.tar"
+      - run: tests/e2e-slim/run.sh
+        env:
+          BLUE_E2E_SLIM_PREBUILT: "1"
+          E2E_SLIM_INSTALL_AGENTS: "1"
+          # Tier A: the free, no-inference config matrix across every blessed CLI
+          # version. Runs on every PR (incl. fork PRs, where the gateway secret —
+          # and thus Tier B — is absent) so there is per-version coverage always.
+          E2E_SLIM_MATRIX: "1"
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-slim-governance-${{ github.run_id }}
+          path: tests/e2e-slim/artifacts
+          if-no-files-found: ignore
+
+  # Gate the gateway job on the presence of the OPENROUTER_API_KEY secret. The
+  # `secrets` context is not usable in a job-level `if`, so a tiny guard job reads
+  # it into an output. Absent (e.g. fork PRs) -> the gateway job is skipped and the
+  # secret-free `e2e-slim-governance` job above is the whole suite.
+  gateway-secret:
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -n "$OPENROUTER_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  e2e-slim-gateway:
+    needs: [build, gateway-secret]
+    if: needs.gateway-secret.outputs.present == 'true'
+    runs-on: Yellow
+    # Tier B is the full certification grid (a real OpenRouter round-trip per
+    # (agent, version) cell × up to 3 attempts), so it needs more wall-clock than
+    # the old 4-cert job.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: ${{ runner.temp }}/images
+      - run: docker load -i "${RUNNER_TEMP}/images/blue-images.tar"
+      - run: tests/e2e-slim/run.sh
+        env:
+          # Injecting the secret flips run.sh into the gateway path (real LiteLLM
+          # fed by OpenRouter + inference-proxy, per-agent certification tests).
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          BLUE_E2E_SLIM_PREBUILT: "1"
+          E2E_SLIM_INSTALL_AGENTS: "1"
+          # Tier B: certify the FULL matrix — every blessed CLI version per agent,
+          # not just the pin — through real inference (cost accepted).
+          E2E_SLIM_MATRIX: "1"
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-slim-gateway-${{ github.run_id }}
+          path: tests/e2e-slim/artifacts
+          if-no-files-found: ignore

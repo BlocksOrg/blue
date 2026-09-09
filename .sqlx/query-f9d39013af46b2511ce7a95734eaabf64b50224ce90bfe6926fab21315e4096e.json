@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE deployment_branding SET logo_url=$1, favicon_url=$2, updated_by=$3, updated_at=now() WHERE singleton=true RETURNING logo_url, favicon_url",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "logo_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "favicon_url",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "f9d39013af46b2511ce7a95734eaabf64b50224ce90bfe6926fab21315e4096e"
+}

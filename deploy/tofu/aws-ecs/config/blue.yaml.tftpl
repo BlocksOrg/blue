@@ -1,0 +1,92 @@
+# Rendered by the aws-ecs OpenTofu module and written to BLUE_CONFIG_FILE
+# (/etc/blue/blue.yaml) inside the control-api and worker containers. Values
+# marked os.environ/NAME are resolved from the container environment (plain env
+# or Secrets Manager). Override wholesale via the blue_config_yaml variable.
+
+control_api:
+  listen: 0.0.0.0:8080
+  database_url: os.environ/HARNESS_DATABASE_URL
+
+  bootstrap:
+    organization_slug: dev
+    organization_name: Development
+    admin_subject: admin
+    admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL
+
+  auth:
+    public_url: os.environ/HARNESS_AUTH_PUBLIC_URL
+    session_url: os.environ/HARNESS_AUTH_SESSION_URL
+    jwks_url: os.environ/HARNESS_AUTH_JWKS_URL
+    issuer: os.environ/HARNESS_AUTH_ISSUER
+    audience: os.environ/HARNESS_AUTH_AUDIENCE
+    client_id: os.environ/HARNESS_OAUTH_CLIENT_ID
+
+  identity:
+    mode: os.environ/HARNESS_AUTH_MODE
+    scim_bearer_token: os.environ/HARNESS_SCIM_BEARER_TOKEN
+    group_role_mappings: os.environ/HARNESS_SCIM_GROUP_ROLE_MAPPINGS
+
+  blob_storage:
+    provider: s3
+    bucket: os.environ/HARNESS_BLOB_BUCKET
+    region: os.environ/HARNESS_BLOB_REGION
+    presign_ttl_seconds: 300
+    retention_days: 30
+    auth:
+      mode: iam
+
+  package_artifacts:
+    bucket: os.environ/HARNESS_PACKAGE_BUCKET
+
+  gateway_request_logs:
+    retention_days: 30
+%{ if enable_gateway ~}
+
+# Gateway mode. `type` is the single switch that turns on the inference proxy
+# runtime. Secrets are never returned to clients. For a production gateway you
+# will likely want to supply a full provisioner block via blue_config_yaml.
+gateway:
+  type: ${gateway_type}
+  url: os.environ/HARNESS_GATEWAY_URL
+  inference_proxy_url: os.environ/HARNESS_INFERENCE_PROXY_URL
+  inference_proxy_health_url: os.environ/HARNESS_INFERENCE_PROXY_HEALTH_URL
+  internal_allowed_client_id: ${inference_proxy_client_id}
+  secret_encryption:
+    provider: environment
+    key: os.environ/HARNESS_GATEWAY_ENCRYPTION_KEY
+%{ endif ~}
+
+# Organization policy seeded into the database. Gateway `type` is projected into
+# this policy; runtime settings and secrets never leave the server.
+governance:
+  revision: "2026-08-28.1"
+  contract_version: 2
+  required_capabilities:
+    - adapter_intervals
+    - compiled_harness_registry
+    - transactional_reconcile
+    - versioned_state
+  minimum_client_version: "0.1.0"
+  ttl_seconds: 300
+  allowed_harnesses: [codex, claude, kimi, opencode]
+
+  harnesses:
+    codex:
+      managed_config:
+        model: gpt-5.6-sol
+        reasoning_effort: low
+        fast_mode: false
+        approval_policy: never
+        sandbox_mode: workspace-write
+    claude:
+      version_requirement: ">=2.0.12, <2.1.253-0"
+      managed_config:
+        model: claude-opus-4-8
+        auto_approve: true
+    kimi:
+      managed_config:
+        model: moonshot-ai/kimi-k2.6
+        auto_approve: true
+    opencode:
+      managed_config:
+        model: anthropic/claude-opus-4-8

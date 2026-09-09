@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update users set role=$1,tokens_valid_after=now(),updated_at=now() where id=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c44c05b1d24f1a5581abf1880ed39e7cc2e8c055ea3bec500cd834822e6ee860"
+}

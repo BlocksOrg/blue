@@ -1,0 +1,74 @@
+---
+title: "Architecture"
+description: "See how the CLI, dashboard, Control API, inference proxy, database, and blob storage interact."
+icon: "diagram-project"
+---
+
+The repository contains one Rust CLI, a Rust Control API, a Rust inference proxy, and a Next.js administration dashboard. PostgreSQL stores identities, policy revisions, client state, gateway selections, and session metadata. Raw session bytes live in S3-compatible object storage.
+
+```mermaid
+flowchart LR
+  Developer --> CLI[harness CLI]
+  Admin --> Dashboard
+  Dashboard --> Auth[Better Auth]
+  Dashboard --> API[Control API]
+  CLI --> Auth
+  CLI --> API
+  API --> Catalog[Package catalog]
+  API --> DB[(PostgreSQL)]
+  API --> Blob[(S3 or MinIO)]
+  CLI --> Agent[Codex / Claude / Kimi / OpenCode]
+  Agent --> Proxy[Inference proxy]
+  Proxy --> API
+  Proxy --> Gateway[Your LiteLLM gateway]
+```
+
+## Configuration delivery
+
+```mermaid
+sequenceDiagram
+  participant Admin
+  participant Dashboard
+  participant API as Control API
+  participant CLI as harness CLI
+  Admin->>Dashboard: Save harness settings or publish extension changes
+  Dashboard->>API: PUT /admin/harnesses/{harness}/managed-config or PUT /admin/governance-extensions
+  API->>API: Validate and create revision
+  CLI->>API: GET /governance-config
+  API->>API: Inject proxy URL and user pseudotoken
+  API-->>CLI: Personalized configuration
+  CLI->>CLI: Verify packages and merge launch-scoped overlays
+```
+
+The database revision is the source of truth for organization policy. Gateway `proxy_url` and `pseudotoken` are not stored in that YAML: the Control API injects them into an authenticated user's response at delivery time.
+
+## Package ownership
+
+The package catalog supplies reviewed, immutable metadata; package archives remain external HTTPS artifacts. The client verifies each archive digest, rejects unsafe entries, and stores content by package ID and digest under the metaharness root. An ownership manifest records activation and recursive hashes.
+
+Harness adapters expose package content only through governed launches: Claude plugin arguments, a Codex governed profile, Kimi's isolated home and skill arguments, or OpenCode's explicit overlay. Teardown first removes those references, then deletes unchanged owned content or quarantines drifted content.
+
+## Gateway inference
+
+Blue's optional inference proxy connects governed agents to an upstream gateway operated by your organization. Blue does not bundle that gateway; LiteLLM is the first and currently supported adapter.
+
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant Proxy as Inference proxy
+  participant API as Control API
+  participant LiteLLM as Your LiteLLM gateway
+  participant Provider
+  Agent->>Proxy: Request with pseudotoken
+  Proxy->>API: Resolve pseudotoken
+  API-->>Proxy: Server-side virtual key
+  Proxy->>LiteLLM: Request with virtual key
+  LiteLLM->>Provider: Request with provider credential
+  Provider-->>Agent: Streamed response through both proxies
+```
+
+Neither the LiteLLM virtual key nor provider credentials are written to the developer machine.
+
+## Replaceable boundaries
+
+The reference backend is optional. Another service can replace it if it implements the published service contract and OAuth expectations. Blob uploads use provider-neutral presign responses even though the reference implementation uses the S3 API.

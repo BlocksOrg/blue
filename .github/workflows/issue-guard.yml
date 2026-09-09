@@ -1,0 +1,85 @@
+name: Issue guard
+
+# Backs the CONTRIBUTING "issues first" policy: flag empty / placeholder-only /
+# low-effort issues, give the author a grace period to fix them, then close.
+# Template usage, required fields, and blank-issue blocking are enforced natively
+# by .github/ISSUE_TEMPLATE (issue forms + config.yml); this only catches the
+# low-effort cases forms can't.
+
+on:
+  issues:
+    types: [opened, edited]
+  schedule:
+    - cron: "0 * * * *" # hourly sweep for the grace-period close
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-guard-${{ github.event.issue.number || 'sweep' }}
+  cancel-in-progress: false
+
+env:
+  NEEDS_INFO_LABEL: needs-info
+  GRACE_HOURS: "2"
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = process.env.NEEDS_INFO_LABEL;
+            const GRACE = Number(process.env.GRACE_HOURS) * 60 * 60 * 1000;
+            const { owner, repo } = context.repo;
+            const guide = `https://github.com/${owner}/${repo}/blob/HEAD/CONTRIBUTING.md#issues-first`;
+
+            async function ensureLabel() {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: LABEL });
+              } catch {
+                await github.rest.issues.createLabel({
+                  owner, repo, name: LABEL, color: "d93f0b",
+                  description: "Needs a template or more detail before review",
+                });
+              }
+            }
+
+            // Event path: evaluate the opened/edited issue.
+            if (context.eventName === "issues") {
+              const issue = context.payload.issue;
+              if (issue.pull_request) return;
+              const body = (issue.body || "").replace(/<!--[\s\S]*?-->/g, "").trim();
+              const placeholder = /\b(TODO|TBD|fill in|lorem ipsum|xxx)\b/i;
+              const tooThin = body.length < 30 || placeholder.test(body);
+              const flagged = (issue.labels || []).some(l => (l.name || l) === LABEL);
+
+              if (tooThin && !flagged) {
+                await ensureLabel();
+                await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: [LABEL] });
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issue.number,
+                  body: `Thanks for opening this. It doesn't yet meet our [contributing guidelines](${guide}): please use a template and fill in the required detail — no placeholders or AI-generated walls of text.\n\nEdit the issue within **${process.env.GRACE_HOURS} hours** and the \`${LABEL}\` flag clears automatically; otherwise it will be closed. You can always edit and reopen once fixed.`,
+                });
+              } else if (!tooThin && flagged) {
+                // Author fixed it — clear the flag.
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: LABEL }).catch(() => {});
+              }
+              return;
+            }
+
+            // Scheduled path: close still-flagged issues past the grace window.
+            const flagged = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", labels: LABEL, per_page: 100,
+            });
+            const now = Date.now();
+            for (const issue of flagged) {
+              if (issue.pull_request) continue;
+              if (now - new Date(issue.updated_at).getTime() < GRACE) continue;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issue.number,
+                body: `Closing automatically — this issue still doesn't meet the [contributing guidelines](${guide}) after the grace period. Edit it and reopen, and a maintainer will take another look.`,
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: "closed", state_reason: "not_planned" });
+            }

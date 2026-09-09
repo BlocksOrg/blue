@@ -1,0 +1,25 @@
+[package]
+name = "gh-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gh-common = { workspace = true }
+gh-service = { workspace = true }
+gh-gateway = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+flate2 = "1"
+tar = "0.4"
+semver = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select count(*) as \"count!\" from scim_groups where organization_id=$1 and ($2::text is null or ($2='displayName' and display_name=$3) or ($2='externalId' and external_id=$3))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "645297f3e6ff5b6da2d5b88b18e437a6220c1c3b6918f3bdca036c1ca737534f"
+}

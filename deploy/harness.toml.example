@@ -1,0 +1,21 @@
+[service]
+url = "http://127.0.0.1:8080"
+
+[identity]
+mode = "oidc"
+issuer = "http://127.0.0.1:3000/api/auth/"
+client_id = "blue-cli"
+scopes = [
+  "openid",
+  "profile",
+  "email",
+  "offline_access",
+  "governance:read",
+  "session:write",
+  "client-status:write",
+]
+
+[mode]
+# Safe default: `blue apply` asks before merging existing files, while the
+# daemon/wrapper refuses silent existing-config changes.
+allow_noninteractive_merge = false

@@ -1,0 +1,4 @@
+use super::*;
+static SUPPORT: GenerationSupport = GenerationSupport { capabilities: &["mcp", "packages", "hooks", "helpers", "gateway"], component_rules: ComponentRules { agents_require_plugin: false, hooks_require_plugin: false, hooks_as_plugin_modules: false } };
+pub static SPEC: VersionSpec = VersionSpec { operations: &HOOKS_ONLY_OPERATIONS, session_upload: Feature::Unsupported("Claude hooks-only interval does not uniformly support SessionEnd (introduced in 1.0.85); automatic session upload is disabled"), session_start: Feature::Unsupported("Claude hooks-only interval does not uniformly support SessionStart (introduced in 1.0.62); automatic session tracking is disabled"), session_resume: Feature::Unsupported("this Claude interval has no portable capture contract"), support: &SUPPORT };
+pub static IMPLEMENTATION: Implementation = Implementation::new(&SPEC);

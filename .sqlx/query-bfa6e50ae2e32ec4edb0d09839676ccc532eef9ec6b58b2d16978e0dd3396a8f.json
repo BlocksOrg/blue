@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update api_sessions set revoked_at=coalesce(revoked_at,now()) where user_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bfa6e50ae2e32ec4edb0d09839676ccc532eef9ec6b58b2d16978e0dd3396a8f"
+}

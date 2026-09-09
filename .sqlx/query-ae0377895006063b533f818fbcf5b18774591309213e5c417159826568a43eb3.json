@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select min(id) from public.gateway_cache_events",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "min",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ae0377895006063b533f818fbcf5b18774591309213e5c417159826568a43eb3"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select exists(select 1 from auth.\"invitation\" where \"organizationId\"=$1 and lower(email)=lower($2) and status='pending') as \"exists!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "177ddbb4f09ef90557110b76366e378709a610a7f2511dc0c05807f3c95c34b3"
+}

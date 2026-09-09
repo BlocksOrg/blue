@@ -1,0 +1,40 @@
+image:
+  repository: ghcr.io/blocksorg/governance-harness
+  # Replace this placeholder with the immutable digest for the selected release.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+blue:
+  existingSecret: blue-runtime
+  # Required with enableInferenceProxy; must match gateway.type in blue.yaml.
+  gatewayType: ""
+  config:
+    existingConfigMap: blue-config
+  provisionerExecutable:
+    enabled: false
+    image:
+      repository: ghcr.io/your-organization/blue-gateway-provisioner
+      digest: ""
+      pullPolicy: IfNotPresent
+    executableSha256: ""
+  publicUrls:
+    dashboard: https://blue.example.com
+    controlApi: https://api.blue.example.com
+    docs: https://docs.example.com
+  env:
+    HARNESS_AUTH_MODE: password
+    HARNESS_SCIM_BEARER_TOKEN: ""
+    HARNESS_SCIM_GROUP_ROLE_MAPPINGS: ""
+    HARNESS_BOOTSTRAP_ORG_ID: production
+    HARNESS_BOOTSTRAP_ORG_NAME: Production
+    HARNESS_OAUTH_CLIENT_ID: blue-cli
+    HARNESS_AUTH_ISSUER: https://blue.example.com/api/auth
+    HARNESS_AUTH_AUDIENCE: https://api.blue.example.com
+
+ingress:
+  enabled: true
+  className: alb
+  hosts:
+    - host: blue.example.com
+      paths: [{ path: /, pathType: Prefix, port: dashboard }]
+    - host: api.blue.example.com
+      paths: [{ path: /, pathType: Prefix, port: control-api }]
