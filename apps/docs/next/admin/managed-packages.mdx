@@ -77,7 +77,7 @@ packages:
         skills_dir: agent-extensions-0123456789abcdef0123456789abcdef01234567/skills/secure-code-review
 ```
 
-Public clients must be able to reach the recorded host. Blue does not mirror public sources into organization artifact storage. If an archive URL later serves different bytes, reconciliation fails digest verification instead of activating changed content.
+Public clients must be able to reach the recorded host directly. Blue does not use environment proxy settings for public package downloads: it resolves every address, rejects the entire request if any answer is non-public, and connects only to the validated addresses without following redirects. Public URLs cannot contain embedded credentials or fragments, and diagnostics omit query strings. Blue does not mirror public sources into organization artifact storage. If an archive URL later serves different bytes, reconciliation fails digest verification instead of activating changed content.
 
 ### Scope a package to harness versions
 
@@ -310,7 +310,7 @@ Package failures are isolated: other packages can still converge. A governed har
 
 ## Installation and teardown
 
-Archives are downloaded with a 100 MiB limit, verified against their configured SHA-256 digest, and extracted only after rejecting absolute paths, path traversal, links, and special files. Installed versions live under the harness-managed XDG configuration directory rather than user-owned native extension directories.
+Archives are downloaded with a 100 MiB compressed limit and verified against their configured SHA-256 digest. Extraction allows at most 10,000 entries, 512 MiB of expanded regular-file data, 128 MiB per file, 32 path components, and 4,096 encoded path bytes. Blue rejects duplicate or non-portable paths, absolute paths, traversal, links, and special files before activation. Random owner-only staging directories are removed after failures, installed files are owner-only, and only manifest-declared helpers become executable. Installed versions live under the harness-managed XDG configuration directory rather than user-owned native extension directories.
 
 When a package is removed from the managed configuration, the CLI removes its harness activation. Unreferenced content is deleted only when it still matches the recorded tree hash. Locally modified content is quarantined and reported on the **Clients** page instead of being silently deleted.
 

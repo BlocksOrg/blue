@@ -135,6 +135,7 @@ Ingress or load balancer.
 - Terminate TLS for dashboard, API, inference, and object-storage URLs.
 - Restrict the internal gateway resolver to the inference proxy and rotate its OAuth client secret; the proxy authenticates with a short-lived client-credentials token verified against the better-auth JWKS.
 - Use least-privilege database roles and object-storage permissions.
+- Keep default-deny egress enabled and allow only approved package/provider CIDRs. Application-level DNS validation and address pinning protect public package requests; NetworkPolicy remains defense in depth.
 - Encrypt database backups and session objects.
 - Publish collection and retention policy before enabling session upload.
 - Monitor failed authentication, failed pseudotoken resolution, upload completion failures, and stale client revisions.
