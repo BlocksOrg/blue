@@ -1,7 +1,13 @@
-//! Transparent wrap & launch. After gating + config write, we `exec` the native
-//! CLI under a PTY, forwarding argv, stdin/stdout, terminal size (SIGWINCH), and
-//! the child's exit code — so an interactive TUI agent behaves exactly as if run
-//! directly. This is the "use it normally" requirement (plan §6).
+//! Transparent wrap & launch. After gating + config write we run the native CLI
+//! with its argv, stdio and exit code passed straight through, so the agent
+//! behaves exactly as if it had been run directly. This is the "use it
+//! normally" requirement (plan §6).
+//!
+//! The pieces here serve two callers. An interactive terminal is driven by
+//! `gh-cli`'s supervisor, which builds a [`PtySession`] and holds the parent
+//! terminal in [`RawGuard`]/[`TerminalModeGuard`] while it does. Redirected or
+//! piped execution goes to [`launch_inherited`], which needs no pseudo-terminal
+//! at all.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{IsTerminal, Read, Write};
@@ -288,73 +294,24 @@ fn create_kill_on_close_job(process_id: Option<u32>) -> Result<usize, GhError> {
     Ok(job as usize)
 }
 
-/// Launch `bin` with `args`, injecting `extra_env` (e.g. the Codex inference JWT).
-/// Blocks until the child exits and returns its exit code.
-pub fn launch(
+/// Run `bin` with `args`, injecting `extra_env` (e.g. the Codex inference JWT),
+/// on the parent's own stdio. Blocks until the child exits and returns its exit
+/// code.
+///
+/// No pseudo-terminal is allocated: the only caller is the redirected or piped
+/// path, which has no terminal to mirror. An interactive terminal goes to the
+/// supervisor instead, which drives a [`PtySession`] directly.
+pub fn launch_inherited(
     bin: &Path,
     args: &[String],
     extra_env: &BTreeMap<String, String>,
 ) -> Result<i32, GhError> {
-    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
-        let mut command = std::process::Command::new(bin);
-        command.args(args).envs(extra_env);
-        let status = command
-            .status()
-            .map_err(|e| GhError::other(format!("spawning {}: {e}", bin.display())))?;
-        return Ok(status.code().unwrap_or(1));
-    }
-    let (rows, cols) = terminal_size();
-    let session = Arc::new(PtySession::spawn(bin, args, extra_env, rows, cols)?);
-
-    // Put the *parent* terminal in raw mode so keystrokes (incl. Ctrl-C/Z)
-    // pass through as bytes to the child's line discipline. Restored on drop.
-    let _raw = RawGuard::enter();
-    let _terminal_modes = TerminalModeGuard::enter();
-    install_winch_handler();
-    spawn_resize_thread(session.clone());
-
-    // stdin → child (detached; the process exits when we return).
-    let input_session = session.clone();
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin();
-        let mut buf = [0u8; 4096];
-        loop {
-            match stdin.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if input_session.write_input(&buf[..n]).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    // child → stdout (main thread). Ends at EOF when the child closes the pty.
-    let mut stdout = std::io::stdout();
-    let mut output_closed = false;
-    let mut exit_code = None;
-    loop {
-        for event in session.drain_events() {
-            match event {
-                PtyEvent::Output(bytes) => {
-                    if stdout.write_all(&bytes).is_err() || stdout.flush().is_err() {
-                        break;
-                    }
-                }
-                PtyEvent::Closed | PtyEvent::Error(_) => output_closed = true,
-            }
-        }
-        if exit_code.is_none() {
-            exit_code = session.try_wait()?;
-        }
-        if output_closed {
-            if let Some(code) = exit_code {
-                return Ok(code);
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let status = std::process::Command::new(bin)
+        .args(args)
+        .envs(extra_env)
+        .status()
+        .map_err(|e| GhError::other(format!("spawning {}: {e}", bin.display())))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 // ---- terminal helpers (unix) ----
@@ -390,9 +347,6 @@ pub fn terminal_size() -> (u16, u16) {
 pub fn terminal_size() -> (u16, u16) {
     (24, 80)
 }
-
-#[cfg(unix)]
-static RESIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(unix)]
 static RAW_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -470,55 +424,6 @@ fn install_restore_handlers() {
         }
     }
 }
-
-#[cfg(unix)]
-extern "C" fn on_winch(_sig: libc::c_int) {
-    RESIZED.store(true, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[cfg(unix)]
-fn install_winch_handler() {
-    unsafe {
-        libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t);
-    }
-}
-
-#[cfg(not(unix))]
-fn install_winch_handler() {}
-
-#[cfg(unix)]
-fn spawn_resize_thread(session: Arc<PtySession>) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        if RESIZED.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            let (rows, cols) = terminal_size();
-            let _ = session.resize(rows, cols);
-        }
-    });
-}
-
-#[cfg(windows)]
-fn spawn_resize_thread(session: Arc<PtySession>) {
-    std::thread::spawn(move || {
-        let mut previous = terminal_size();
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            let current = terminal_size();
-            if current != previous {
-                if session.resize(current.0, current.1).is_err() {
-                    break;
-                }
-                previous = current;
-            }
-            if session.try_wait().ok().flatten().is_some() {
-                break;
-            }
-        }
-    });
-}
-
-#[cfg(not(any(unix, windows)))]
-fn spawn_resize_thread(_session: Arc<PtySession>) {}
 
 /// RAII raw-mode guard for the parent terminal.
 #[cfg(unix)]
@@ -636,6 +541,44 @@ impl RawGuard {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The piped path is the whole of `launch_inherited`: the child writes to
+    /// the parent's own handles and its exit code comes back untranslated.
+    #[test]
+    fn inherited_launch_passes_through_stdio_and_the_exit_code() {
+        let script = "printf out; exit 7";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::inherited_launch_child_helper",
+                "--nocapture",
+            ])
+            .env("BLUE_INHERITED_LAUNCH_SCRIPT", script)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "the helper itself should pass");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("out"),
+            "the child should have written to the inherited stdout"
+        );
+    }
+
+    /// Runs inside the child spawned by
+    /// `inherited_launch_passes_through_stdio_and_the_exit_code`, whose piped
+    /// stdio it inherits in turn.
+    #[test]
+    fn inherited_launch_child_helper() {
+        let Some(script) = std::env::var_os("BLUE_INHERITED_LAUNCH_SCRIPT") else {
+            return;
+        };
+        let code = launch_inherited(
+            Path::new("/bin/sh"),
+            &["-c".into(), script.to_string_lossy().into_owned()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(code, 7);
+    }
 
     #[test]
     fn terminal_reset_unwinds_enhanced_keyboard_mode() {

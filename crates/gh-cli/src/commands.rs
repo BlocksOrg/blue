@@ -2507,7 +2507,7 @@ fn run_prepared(name: &str, args: &[String], prepared: PreparedLaunch) -> Result
             }
         }
     } else {
-        gh_harness::launch(&detected_path, &launch_args, &launch_env)
+        gh_harness::launch_inherited(&detected_path, &launch_args, &launch_env)
             .context("launching harness")?
     };
     if let Some(message) =
