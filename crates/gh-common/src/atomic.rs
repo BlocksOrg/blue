@@ -292,9 +292,14 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(source, destination)
 }
 
+/// Bounded retries for a contended replace; roughly 1.3s of total backoff.
+#[cfg(windows)]
+const REPLACE_ATTEMPTS: u32 = 12;
+
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
@@ -304,19 +309,36 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    // SAFETY: both paths are valid, nul-terminated UTF-16 buffers.
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    // Windows refuses the replace while anything else holds the destination
+    // open: a concurrent publisher, a running harness reading its own config,
+    // the search indexer, or antivirus. The window is short and the caller
+    // cannot act on the failure, so retry briefly before giving up.
+    let mut backoff = std::time::Duration::from_millis(1);
+    for attempt in 0..REPLACE_ATTEMPTS {
+        // SAFETY: both paths are valid, nul-terminated UTF-16 buffers.
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        let contended = matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == ERROR_ACCESS_DENIED as i32 || code == ERROR_SHARING_VIOLATION as i32
+        );
+        if !contended || attempt + 1 == REPLACE_ATTEMPTS {
+            return Err(error);
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(std::time::Duration::from_millis(250));
     }
+    Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
 }
 
 #[cfg(unix)]
