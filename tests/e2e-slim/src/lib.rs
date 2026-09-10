@@ -150,6 +150,7 @@ impl Stack {
             scope: &'a str,
             iat: i64,
             exp: i64,
+            sid: &'a str,
         }
         let now = now_unix();
         let claims = Claims {
@@ -162,6 +163,7 @@ impl Stack {
             scope: SCOPES,
             iat: now,
             exp: now + 3600,
+            sid: sub,
         };
         let mut header = Header::new(ALG);
         header.kid = Some(KID.to_owned());
@@ -216,7 +218,26 @@ impl Stack {
         let jwt = self.mint_jwt(&org_id, &sub, &email);
         let home = Home::create(self, &jwt, &org_id, &email, governance_only, path_prepend);
         home.ensure_user();
+        self.ensure_backing_session(&sub, &email);
         home
+    }
+
+    fn ensure_backing_session(&self, sub: &str, email: &str) {
+        let mut client = postgres::Client::connect(&self.database_url, postgres::NoTls)
+            .expect("connecting to Postgres for backing OAuth session");
+        client
+            .execute(
+                "INSERT INTO auth.\"user\"(id,name,email,\"emailVerified\",\"updatedAt\") VALUES($1,$2,$3,true,now()) ON CONFLICT(id) DO NOTHING",
+                &[&sub, &email, &email],
+            )
+            .expect("creating backing Better Auth user");
+        let session_token = format!("e2e-session-token-{sub}");
+        client
+            .execute(
+                "INSERT INTO auth.\"session\"(id,\"expiresAt\",token,\"updatedAt\",\"userId\") VALUES($1,now() + interval '1 hour',$2,now(),$3) ON CONFLICT(id) DO UPDATE SET \"expiresAt\"=excluded.\"expiresAt\",\"updatedAt\"=now()",
+                &[&sub, &session_token, &sub],
+            )
+            .expect("creating backing Better Auth session");
     }
 }
 
@@ -693,8 +714,8 @@ impl GatewayStack {
     /// correlates the entry to that test's inference — model names are shared
     /// across agents and cannot. Callers assert the entry's `model` (LiteLLM
     /// records the resolved upstream model here, not the requested name) and
-    /// that `api_key` is a hashed virtual key (never the `psk_` pseudotoken the
-    /// agent sent) — proof the proxy swapped the pseudotoken for a real key.
+    /// that `api_key` is a hashed virtual key (never the inference JWT the
+    /// agent sent) — proof the proxy swapped client authentication for a real key.
     pub fn spend_log_for_user(&self, email: &str) -> serde_json::Value {
         let user_id = self.litellm_user_id(email).unwrap_or_else(|| {
             panic!("no LiteLLM user for {email} (the executable provisioner creates it during `blue apply`/`blue run`)")

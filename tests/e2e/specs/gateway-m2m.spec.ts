@@ -1,7 +1,15 @@
-import { expect, test } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Browser,
+  type BrowserContext,
+  type Page,
+} from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
+import YAML from "yaml";
 import { collect, prepareClient, readClientFile, runCli, spawnCli, waitForOutput } from "../support/cli.js";
 import { loginAsAdmin } from "../support/dashboard.js";
 
@@ -16,11 +24,131 @@ import { loginAsAdmin } from "../support/dashboard.js";
 const PROXY = "http://127.0.0.1:8081";
 const UPSTREAM = "http://fake-upstream:4010";
 const CONTROL = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+const DASHBOARD = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
 
 function parseMetric(body: string, name: string): number {
   const match = body.match(new RegExp(`^${name}\\s+(\\d+)`, "m"));
   expect(match, `metric ${name} present in:\n${body}`).toBeTruthy();
   return Number(match![1]);
+}
+
+function jwtClaims(token: string): Record<string, unknown> {
+  return JSON.parse(
+    Buffer.from(token.split(".")[1], "base64url").toString("utf8"),
+  );
+}
+
+async function signInMember(
+  browser: Browser,
+  email: string,
+): Promise<{ context: BrowserContext; page: Page }> {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(`${DASHBOARD}/login`, { waitUntil: "commit" });
+  await page.getByLabel("Email").fill(email);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Password").fill("member-password-e2e");
+  await Promise.all([
+    page.waitForURL(/\/sessions/, { waitUntil: "commit", timeout: 30_000 }),
+    page.getByRole("button", { name: "Sign in" }).click({ noWaitAfter: true }),
+  ]);
+  return { context, page };
+}
+
+async function createMember(
+  admin: Page,
+  browser: Browser,
+): Promise<{ email: string; userId: string }> {
+  const email = `gateway-revocation-${Date.now()}@example.com`;
+  const invited = await admin.request.post(`${CONTROL}/admin/invitations`, {
+    data: { email, role: "member" },
+  });
+  expect(invited.status(), await invited.text()).toBe(201);
+  const invitation = await invited.json();
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await page.goto(`${DASHBOARD}/accept-invitation?id=${invitation.id}`);
+    await page.getByLabel("Password").fill("member-password-e2e");
+    await page.getByRole("button", { name: "Create account" }).click();
+    await expect(page).toHaveURL(/\/sessions/);
+    const me = await context.request.get(`${CONTROL}/auth/me`);
+    expect(me.status(), await me.text()).toBe(200);
+    return { email, userId: (await me.json()).id };
+  } finally {
+    await context.close();
+  }
+}
+
+async function mintInferenceToken(
+  home: string,
+  page: Page,
+): Promise<string> {
+  const login = spawnCli(home, ["login"]);
+  const deviceUrl = await waitForOutput(
+    login,
+    /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/,
+  );
+  await page.goto(deviceUrl);
+  await page.getByRole("button", { name: "Authorize" }).click();
+  await expect(page.getByText("CLI authorized")).toBeVisible();
+  const loginResult = await collect(login);
+  expect(loginResult.code, loginResult.stderr).toBe(0);
+
+  const gateway = await runCli(home, ["gateway"]);
+  expect(gateway.code, gateway.stderr).toBe(0);
+  const session = JSON.parse(
+    await readClientFile(home, ".config/blue/session.json"),
+  );
+  expect(jwtClaims(session.token).sid).toEqual(expect.any(String));
+  const config = await page.request.get(`${CONTROL}/governance-config`, {
+    headers: {
+      authorization: `Bearer ${session.token}`,
+      "x-blue-contract-version": "3",
+      "x-blue-capabilities":
+        "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt",
+    },
+  });
+  expect(config.status(), await config.text()).toBe(200);
+  const token = (await config.json()).gateway?.token ?? "";
+  expect(token).toBeTruthy();
+  return token;
+}
+
+async function inferenceStatus(
+  request: APIRequestContext,
+  token: string,
+): Promise<number> {
+  return (
+    await request.post(`${PROXY}/v1/chat/completions`, {
+      headers: { authorization: `Bearer ${token}` },
+      data: {
+        model: "gpt-e2e",
+        messages: [{ role: "user", content: "revocation-check" }],
+      },
+    })
+  ).status();
+}
+
+async function expectRevoked(
+  request: APIRequestContext,
+  token: string,
+  invalidationsBefore: number,
+): Promise<void> {
+  await expect
+    .poll(async () =>
+      parseMetric(
+        await (await request.get(`${PROXY}/metrics`)).text(),
+        "gateway_proxy_invalidation_events_total",
+      ),
+    )
+    .toBeGreaterThan(invalidationsBefore);
+  await expect
+    .poll(() => inferenceStatus(request, token), {
+      timeout: 10_000,
+      intervals: [50, 100, 250],
+    })
+    .toBe(401);
 }
 
 type InternalResult = { status?: number; error?: string };
@@ -30,6 +158,8 @@ async function callInternal(options: {
   key?: Buffer;
   authorization?: string;
   plaintext?: boolean;
+  path?: string;
+  method?: "GET" | "POST";
 }): Promise<InternalResult> {
   const transport = options.plaintext ? http : https;
   const ca = options.plaintext ? undefined : await readFile("/certs/ca.crt");
@@ -38,8 +168,8 @@ async function callInternal(options: {
       {
         hostname: "127.0.0.1",
         port: 8082,
-        path: "/internal/gateway/resolve",
-        method: "POST",
+        path: options.path ?? "/internal/gateway/resolve",
+        method: options.method ?? "POST",
         ca,
         cert: options.cert,
         key: options.key,
@@ -55,28 +185,48 @@ async function callInternal(options: {
       },
     );
     request.once("error", (error) => resolve({ error: `${(error as NodeJS.ErrnoException).code ?? ""} ${error.message}` }));
-    request.end(JSON.stringify({ pseudotoken: "not-a-real-token" }));
+    request.end(options.method === "GET" ? undefined : JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000", blue_oauth_session_id: "not-a-real-session" }));
   });
+}
+
+async function serviceToken(request: APIRequestContext): Promise<string> {
+  const credentials = Buffer.from(
+    "blue-inference-proxy:e2e-proxy-oauth-secret",
+  ).toString("base64");
+  const response = await request.post(`${DASHBOARD}/api/auth/oauth2/token`, {
+    headers: { authorization: `Basic ${credentials}`, origin: DASHBOARD },
+    form: {
+      grant_type: "client_credentials",
+      scope: "gateway:resolve",
+      resource: CONTROL,
+    },
+  });
+  expect(response.status(), await response.text()).toBe(200);
+  return (await response.json()).access_token as string;
 }
 
 test.describe.serial("Gateway M2M auth", () => {
   let home: string;
-  let pseudotoken: string;
+  let inferenceToken: string;
 
   test.beforeAll(async () => {
     home = await prepareClient("gateway-m2m");
   });
 
-  test("mints a pseudotoken over the M2M-authenticated resolver", async ({ page }) => {
+  test("mints an inference JWT and uses the M2M-authenticated resolver", async ({ page }) => {
     await loginAsAdmin(page);
     const currentResponse = await page.request.get(`${CONTROL}/admin/governance-config`);
     expect(currentResponse.status(), await currentResponse.text()).toBe(200);
     const current = await currentResponse.json();
-    const managedYaml = String(current.managed_yaml).replace(
-      /^harnesses:\s*$/m,
-      "gateway:\n  type: litellm\nharnesses:",
+    const managedConfig = YAML.parse(String(current.managed_yaml));
+    managedConfig.gateway = { type: "litellm" };
+    managedConfig.required_capabilities = Array.from(
+      new Set([
+        ...(managedConfig.required_capabilities ?? []),
+        "gateway_inference_jwt",
+      ]),
     );
-    expect(managedYaml).not.toBe(current.managed_yaml);
+    const managedYaml = YAML.stringify(managedConfig);
     const updateResponse = await page.request.put(`${CONTROL}/admin/governance-config`, {
       data: { base_revision: current.revision, managed_yaml: managedYaml },
     });
@@ -94,7 +244,7 @@ test.describe.serial("Gateway M2M auth", () => {
     expect(gateway.stdout).toContain("status          : ready");
 
     // Provisioning changes the server-authored runtime policy. Reconcile once
-    // more so this isolated client receives the newly minted pseudotoken.
+    // more so this isolated client receives the newly minted inference JWT.
     const preferred = await runCli(home, ["agent", "codex"]);
     expect(preferred.code, preferred.stderr).toBe(0);
     const applied = await runCli(home, ["apply", "--yes"]);
@@ -103,30 +253,34 @@ test.describe.serial("Gateway M2M auth", () => {
     // Fetch the same personalized response the CLI consumes. Runtime gateway
     // credentials are intentionally not persisted in Blue's config cache.
     const session = JSON.parse(await readClientFile(home, ".config/blue/session.json"));
+    const accessClaims = JSON.parse(
+      Buffer.from(session.token.split(".")[1], "base64url").toString("utf8"),
+    );
+    expect(accessClaims.sid).toEqual(expect.any(String));
     const configResponse = await page.request.get(
       `${CONTROL}/governance-config`,
       {
         headers: {
           authorization: `Bearer ${session.token}`,
-          "x-blue-contract-version": "2",
+          "x-blue-contract-version": "3",
           "x-blue-capabilities":
-            "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state",
+            "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt",
         },
       },
     );
     expect(configResponse.status(), await configResponse.text()).toBe(200);
-    pseudotoken = (await configResponse.json()).gateway?.pseudotoken ?? "";
-    expect(pseudotoken).toBeTruthy();
+    inferenceToken = (await configResponse.json()).gateway?.token ?? "";
+    expect(inferenceToken).toBeTruthy();
 
     // Sanity: an authorized request resolves through the M2M-secured hop.
     const ok = await page.request.post(`${PROXY}/v1/chat/completions`, {
-      headers: { authorization: `Bearer ${pseudotoken}` },
+      headers: { authorization: `Bearer ${inferenceToken}` },
       data: { model: "gpt-e2e", messages: [{ role: "user", content: "hello" }] },
     });
     expect(ok.status(), await ok.text()).toBe(200);
   });
 
-  test("enforces TLS, the trusted proxy certificate, and OAuth independently", async () => {
+  test("enforces TLS, the trusted proxy certificate, and OAuth independently", async ({ page }) => {
     const [clientCert, clientKey, rogueCert, rogueKey] = await Promise.all([
       readFile("/certs/client.crt"),
       readFile("/certs/client.key"),
@@ -158,10 +312,30 @@ test.describe.serial("Gateway M2M auth", () => {
     const noOauth = await callInternal({ cert: clientCert, key: clientKey });
     expect(noOauth.error).toBeUndefined();
     expect(noOauth.status).toBe(401);
+
+    const noOauthJwks = await callInternal({
+      cert: clientCert,
+      key: clientKey,
+      path: "/internal/gateway/jwks",
+      method: "GET",
+    });
+    expect(noOauthJwks.error).toBeUndefined();
+    expect(noOauthJwks.status).toBe(401);
+
+    const token = await serviceToken(page.request);
+    const trustedJwks = await callInternal({
+      cert: clientCert,
+      key: clientKey,
+      authorization: `Bearer ${token}`,
+      path: "/internal/gateway/jwks",
+      method: "GET",
+    });
+    expect(trustedJwks.error).toBeUndefined();
+    expect(trustedJwks.status).toBe(200);
   });
 
   test("serves sustained load across token refreshes without auth failures", async ({ page }) => {
-    expect(pseudotoken).toBeTruthy();
+    expect(inferenceToken).toBeTruthy();
     await page.request.post(`${UPSTREAM}/_e2e/reset`);
 
     const beforeMetrics = await (await page.request.get(`${PROXY}/metrics`)).text();
@@ -171,7 +345,7 @@ test.describe.serial("Gateway M2M auth", () => {
     const send = () =>
       page.request
         .post(`${PROXY}/v1/chat/completions`, {
-          headers: { authorization: `Bearer ${pseudotoken}` },
+          headers: { authorization: `Bearer ${inferenceToken}` },
           data: { model: "gpt-e2e", messages: [{ role: "user", content: "load" }] },
         })
         .then((response) => response.status());
@@ -201,7 +375,7 @@ test.describe.serial("Gateway M2M auth", () => {
   });
 
   test("collapses a concurrent burst into a single-flight token fetch", async ({ page }) => {
-    expect(pseudotoken).toBeTruthy();
+    expect(inferenceToken).toBeTruthy();
 
     const before = parseMetric(await (await page.request.get(`${PROXY}/metrics`)).text(), "gateway_proxy_oauth_token_fetches_total");
 
@@ -211,7 +385,7 @@ test.describe.serial("Gateway M2M auth", () => {
       Array.from({ length: 200 }, () =>
         page.request
           .post(`${PROXY}/v1/chat/completions`, {
-            headers: { authorization: `Bearer ${pseudotoken}` },
+            headers: { authorization: `Bearer ${inferenceToken}` },
             data: { model: "gpt-e2e", messages: [{ role: "user", content: "burst" }] },
           })
           .then((response) => response.status()),
@@ -223,5 +397,102 @@ test.describe.serial("Gateway M2M auth", () => {
     expect(statuses.filter((status) => status !== 200)).toEqual([]);
     // At most one rollover can fall inside a burst this short.
     expect(after - before).toBeLessThanOrEqual(2);
+  });
+
+  test("revokes cached inference access for every session and user lifecycle path", async ({ page, browser }) => {
+    test.setTimeout(240_000);
+    await loginAsAdmin(page);
+    const member = await createMember(page, browser);
+    let sequence = 0;
+
+    const memberLogin = async () => {
+      const login = await signInMember(browser, member.email);
+      const home = await prepareClient(`gateway-revocation-${sequence++}`);
+      const token = await mintInferenceToken(home, login.page);
+      expect(await inferenceStatus(login.context.request, token)).toBe(200);
+      const metrics = await (await login.context.request.get(`${PROXY}/metrics`)).text();
+      const invalidations = parseMetric(
+        metrics,
+        "gateway_proxy_invalidation_events_total",
+      );
+      return { ...login, home, token, invalidations };
+    };
+
+    const cliLogout = await memberLogin();
+    const logout = await runCli(cliLogout.home, ["logout"]);
+    expect(logout.code, logout.stderr).toBe(0);
+    await expectRevoked(
+      cliLogout.context.request,
+      cliLogout.token,
+      cliLogout.invalidations,
+    );
+    await cliLogout.context.close();
+
+    const browserDeletion = await memberLogin();
+    const signOut = await browserDeletion.context.request.post(
+      `${DASHBOARD}/api/auth/sign-out`,
+      { headers: { origin: DASHBOARD }, data: {} },
+    );
+    expect(signOut.status(), await signOut.text()).toBe(200);
+    await expectRevoked(
+      browserDeletion.context.request,
+      browserDeletion.token,
+      browserDeletion.invalidations,
+    );
+    await browserDeletion.context.close();
+
+    const adminRevocation = await memberLogin();
+    const revoked = await page.request.post(
+      `${CONTROL}/admin/users/${member.userId}/sessions/revoke`,
+    );
+    expect(revoked.status(), await revoked.text()).toBe(204);
+    await expectRevoked(
+      adminRevocation.context.request,
+      adminRevocation.token,
+      adminRevocation.invalidations,
+    );
+    await adminRevocation.context.close();
+
+    const suspension = await memberLogin();
+    const concurrent = Array.from({ length: 40 }, async (_, index) => {
+      await new Promise((resolve) => setTimeout(resolve, (index % 8) * 15));
+      return inferenceStatus(suspension.context.request, suspension.token);
+    });
+    const suspended = await page.request.patch(
+      `${CONTROL}/admin/users/${member.userId}`,
+      { data: { status: "suspended" } },
+    );
+    expect(suspended.status(), await suspended.text()).toBe(200);
+    await Promise.all(concurrent);
+    await expectRevoked(
+      suspension.context.request,
+      suspension.token,
+      suspension.invalidations,
+    );
+    expect(
+      await Promise.all(
+        Array.from({ length: 20 }, () =>
+          inferenceStatus(suspension.context.request, suspension.token),
+        ),
+      ),
+    ).toEqual(Array(20).fill(401));
+    await suspension.context.close();
+
+    const reactivated = await page.request.patch(
+      `${CONTROL}/admin/users/${member.userId}`,
+      { data: { status: "active" } },
+    );
+    expect(reactivated.status(), await reactivated.text()).toBe(200);
+    const removal = await memberLogin();
+    const removed = await page.request.delete(
+      `${CONTROL}/admin/users/${member.userId}`,
+    );
+    expect(removed.status(), await removed.text()).toBe(204);
+    await expectRevoked(
+      removal.context.request,
+      removal.token,
+      removal.invalidations,
+    );
+    await removal.context.close();
   });
 });

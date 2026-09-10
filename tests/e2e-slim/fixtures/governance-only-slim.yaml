@@ -48,7 +48,7 @@ control_api:
 # Deliberately no top-level `gateway:` block: this is the governance-only stack.
 governance:
   revision: "e2e-slim-1"
-  contract_version: 2
+  contract_version: 3
   required_capabilities:
     - adapter_intervals
     - compiled_harness_registry
