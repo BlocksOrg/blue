@@ -1583,6 +1583,16 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Windows rejects `:` in a path, and the test harness names each thread
+    /// after its full test path (`module::test_name`).
+    fn test_directory(prefix: &str) -> std::path::PathBuf {
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
+        std::env::temp_dir().join(format!("{prefix}-{}-{thread}", std::process::id()))
+    }
+
     static SPACE_PROBES: AtomicUsize = AtomicUsize::new(0);
 
     fn encoded_files(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -2236,11 +2246,7 @@ mod tests {
         let manifest = br#"{"name":"recovery-kit","version":"1.0.0"}"#;
         let bytes = encoded_files(&[("plugin/.codex-plugin/plugin.json", manifest)]);
         let digest = hex::encode(Sha256::digest(&bytes));
-        let root = std::env::temp_dir().join(format!(
-            "gh-package-publish-recovery-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_directory("gh-package-publish-recovery");
         let base = root.join("store");
         let content = base.join("recovery-kit").join(&digest).join("content");
         extract_safe(&bytes, &content, "recovery-kit").unwrap();

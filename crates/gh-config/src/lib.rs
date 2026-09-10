@@ -927,6 +927,16 @@ mod transaction_tests {
     use super::*;
     use crate::adapters::HarnessImplementation;
 
+    /// Windows rejects `:` in a path, and the test harness names each thread
+    /// after its full test path (`module::test_name`).
+    fn test_directory(prefix: &str) -> std::path::PathBuf {
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
+        std::env::temp_dir().join(format!("{prefix}-{}-{thread}", std::process::id()))
+    }
+
     #[test]
     fn reconcile_lock_probe_child_helper() {
         let Some(path) = std::env::var_os("BLUE_RECONCILE_LOCK_TEST_PATH") else {
@@ -942,11 +952,7 @@ mod transaction_tests {
 
     #[test]
     fn reconcile_lock_preserves_stable_path_and_cross_process_exclusion() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-reconcile-lock-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-reconcile-lock");
         std::fs::create_dir_all(&home).unwrap();
         let _lock = ReconcileLock::acquire(&home, Harness::Codex).unwrap();
         let path = home.join(".config/blue/locks/codex.lock");
@@ -1138,11 +1144,7 @@ mod transaction_tests {
 
     #[test]
     fn committed_cleanup_failure_retains_journal_and_retries_on_recovery() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-cleanup-retry-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-cleanup-retry");
         let target = home.join("managed/config.json");
         let plan = adapters::ReconcilePlan {
             writes: vec![adapters::PlannedFile {
@@ -1183,11 +1185,7 @@ mod transaction_tests {
 
     #[test]
     fn stray_entries_in_the_transaction_root_are_skipped_not_fatal() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-stray-entry-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-stray-entry");
         let transactions = home.join(".blue-transactions");
         std::fs::create_dir_all(&transactions).unwrap();
         // One Finder visit is enough to leave this behind.
@@ -1220,11 +1218,7 @@ mod transaction_tests {
     fn cleanup_failing_again_during_recovery_still_lets_a_transaction_begin() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let home = std::env::temp_dir().join(format!(
-            "blue-cleanup-recovery-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-cleanup-recovery");
         let managed = home.join("managed");
         std::fs::create_dir_all(&managed).unwrap();
         let target = managed.join("config.json");
@@ -1277,11 +1271,7 @@ mod transaction_tests {
 
     #[test]
     fn rollback_preserves_concurrent_content_in_transaction_created_directories() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-concurrent-directory-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-concurrent-directory");
         let target = home.join("fresh/nested/config.json");
         let concurrent = home.join("fresh/concurrent.txt");
         let plan = adapters::ReconcilePlan {
@@ -1336,11 +1326,7 @@ mod transaction_tests {
 
     #[test]
     fn codex_plan_is_pure_and_native_migration_rolls_back() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-codex-plan-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-codex-plan");
         let native = home.join(".codex/config.toml");
         std::fs::create_dir_all(native.parent().unwrap()).unwrap();
         let original = "model_provider = \"governed\"\nmodel = \"gpt-test\"\n";
@@ -1379,11 +1365,7 @@ mod transaction_tests {
 
     #[test]
     fn opencode_plan_remaps_session_plugin_out_of_render_home() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-opencode-plan-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-opencode-plan");
         let unmanaged = home.join(".config/blue/runtime/opencode/node_modules/vendor.js");
         std::fs::create_dir_all(unmanaged.parent().unwrap()).unwrap();
         std::fs::write(&unmanaged, "unmanaged").unwrap();
@@ -1428,11 +1410,7 @@ mod transaction_tests {
 
     #[test]
     fn current_codex_launch_spec_is_read_only() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-codex-launch-spec-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-codex-launch-spec");
         let overlay = home.join(".codex/blue.config.toml");
         std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
         std::fs::write(&overlay, "[profiles.blue]\n").unwrap();
@@ -1466,11 +1444,7 @@ mod transaction_tests {
 
     #[test]
     fn current_kimi_launch_spec_sets_the_managed_home() {
-        let home = std::env::temp_dir().join(format!(
-            "blue-kimi-launch-spec-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let home = test_directory("blue-kimi-launch-spec");
         let runtime = home.join(".config/blue/runtime/kimi");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::write(
