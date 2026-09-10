@@ -72,6 +72,8 @@ npm run release:docs -- 0.1.0
 
 The command refuses version mismatches and existing releases, freezes the MDX and API contract, and makes the new stable release the default Mintlify version. Do not edit a frozen release except to correct a material documentation or security error.
 
+Commit the generated `apps/docs/<version>` directory, OpenAPI snapshot, and `docs.json` update before creating the release tag. The release workflow validates that the committed version is an exact snapshot of `Next` and stops before publishing binaries or images when it is missing or stale.
+
 ## Extend the product
 
 Adding a harness requires a common harness variant, a single-writer configuration adapter, detection metadata, and gateway wiring. Adding a gateway requires a compiled `GatewayAdapter` plus any provider-specific proxy and credential lifecycle support; harness writers should not contain gateway-specific selection logic.

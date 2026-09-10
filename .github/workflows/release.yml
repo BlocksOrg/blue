@@ -38,6 +38,17 @@ jobs:
             echo "publish=$publish"
             echo "ref=$GITHUB_SHA"
           } >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/docs/package-lock.json
+      - run: npm ci
+        working-directory: apps/docs
+      - run: npm run check:release -- "${{ steps.version.outputs.version }}"
+        working-directory: apps/docs
+      - run: npm run validate
+        working-directory: apps/docs
 
   binaries:
     needs: validate
