@@ -577,8 +577,8 @@ impl RawGuard {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::Console::{
             GetConsoleMode, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
-            ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
-            ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            ENABLE_MOUSE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT,
         };
         let input = std::io::stdin().as_raw_handle();
         let output = std::io::stdout().as_raw_handle();
@@ -588,7 +588,16 @@ impl RawGuard {
         {
             return None;
         }
-        let raw = (input_mode & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT))
+        // Mouse and buffer-resize records are left enabled by default, and each
+        // one wakes a waiter on the input handle without ever producing a byte
+        // to read. Nothing here consumes them — resizes are polled — so turn
+        // them off, matching what `cfmakeraw` gives us on Unix.
+        let raw = (input_mode
+            & !(ENABLE_ECHO_INPUT
+                | ENABLE_LINE_INPUT
+                | ENABLE_PROCESSED_INPUT
+                | ENABLE_MOUSE_INPUT
+                | ENABLE_WINDOW_INPUT))
             | ENABLE_VIRTUAL_TERMINAL_INPUT;
         if unsafe { SetConsoleMode(input, raw) } == 0 {
             return None;
