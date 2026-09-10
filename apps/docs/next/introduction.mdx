@@ -23,7 +23,7 @@ It supports Codex, Claude Code, Kimi Code, and OpenCode. Developers keep each ag
 - Managed model, approval, sandbox, and harness-specific settings.
 - Additive organization-managed MCP server definitions.
 - Digest-pinned skills, plugins, hooks, subagent definitions, and helper binaries.
-- Launch-scoped gateway routing with per-user pseudotokens.
+- Gateway routing with session-bound inference JWTs.
 - Opt-in native session capture and upload to S3-compatible storage.
 
 ## Dynamic extensions are a core capability
@@ -52,6 +52,6 @@ Blue is configuration governance, not an operating-system sandbox. A determined 
 | Mode | Inference | Credentials on the client |
 | --- | --- | --- |
 | Governance-only | Agent talks directly to its configured provider | Native agent credentials |
-| Bring your own gateway | Agent talks to the Blue inference proxy, which forwards to your gateway | An opaque per-user pseudotoken |
+| Bring your own gateway | Agent talks to the Blue inference proxy, which forwards to your gateway | A session-bound inference JWT |
 
 Read [Architecture](/next/concepts/architecture) for the complete data flow.

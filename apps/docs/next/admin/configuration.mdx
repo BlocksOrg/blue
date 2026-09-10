@@ -19,7 +19,7 @@ Store organization decisions in the deployment `governance` section:
 
 Packages, skills, subagents, hooks, plugins, helpers, and MCP servers can be managed from **Extensions** and are included in the exported deployment YAML.
 
-Do not store the deployed inference proxy URL or a user pseudotoken. The Control API injects both when serving `GET /governance-config` to an authenticated user.
+Do not store the deployed inference proxy URL or an inference JWT. The Control API injects both when serving `GET /governance-config` to an authenticated user with an active OAuth session.
 
 ## Publishing a change
 

@@ -8,7 +8,7 @@ Configuration moves through four stages: an administrator saves an organization 
 
 ## Policy and runtime values
 
-The dashboard owns managed harness settings, MCP entries, and extension packages. The mounted `blue.yaml` owns allowed harnesses, session-upload policy, the gateway section, and the optional curated package catalog. The Control API generates and stores each user's pseudotoken mapping to the provisioned server-side gateway credential.
+The dashboard owns managed harness settings, MCP entries, and extension packages. The mounted `blue.yaml` owns allowed harnesses, session-upload policy, the gateway section, and the optional curated package catalog. The Control API binds inference access to the source OAuth session while keeping the provisioned gateway credential server-side.
 
 ```yaml
 control_api:
@@ -38,7 +38,7 @@ governance:
         fast_mode: false
 ```
 
-The Control API projects `gateway.type` into policy and adds `gateway.proxy_url` and `gateway.pseudotoken` only to the delivered client response. Server credentials never enter the governance document. The gateway has no model field; each agent uses its managed model when present or leaves model selection to the agent. `gateway.provisioner.type` selects the built-in LiteLLM implementation or the pinned executable. Gateway-specific key models, teams, budgets, resets, and API behavior belong in that implementation, not in `blue.yaml`.
+The Control API projects `gateway.type` into policy and adds `gateway.proxy_url` and the runtime-only `gateway.token` only to the delivered client response. Server credentials never enter the governance document. The token is a session-bound inference JWT and is never persisted by the Control API. The gateway has no model field; each agent uses its managed model when present or leaves model selection to the agent. `gateway.provisioner.type` selects the built-in LiteLLM implementation or the pinned executable. Gateway-specific key models, teams, budgets, resets, and API behavior belong in that implementation, not in `blue.yaml`.
 
 ## Revisions and caching
 

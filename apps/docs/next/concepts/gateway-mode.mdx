@@ -12,7 +12,7 @@ Gateway mode lets you bring your own organization-operated inference gateway. Bl
 | --- | --- | --- |
 | Enabled by | Omitting top-level `gateway` | Adding one top-level `gateway` section |
 | Inference route | Agent directly to its native provider or configured endpoint | Agent to Blue inference proxy, then your LiteLLM gateway, then provider |
-| Client credential | The agent's native credential | An opaque per-user pseudotoken |
+| Client credential | The agent's native credential | A session-bound inference JWT |
 | Provider and gateway keys | Managed by the developer's native agent setup | Remain in your server-side gateway deployment |
 | Governance policy | Models, approvals, MCP, packages, and other managed configuration | The same policy plus launch-scoped gateway wiring |
 
@@ -27,8 +27,9 @@ sequenceDiagram
   participant API as Control API
   participant LiteLLM
   participant Provider
-  Agent->>Proxy: Inference request + pseudotoken
-  Proxy->>API: Resolve pseudotoken
+  Agent->>Proxy: Inference request + inference JWT
+  Proxy->>Proxy: Validate signature and claims
+  Proxy->>API: Resolve OAuth session + Blue user
   API-->>Proxy: Proxy-only LiteLLM virtual key
   Proxy->>LiteLLM: Request + virtual key
   Proxy--)API: Request metadata (async)
@@ -38,7 +39,7 @@ sequenceDiagram
 
 The Control API matches the signed-in governance user to a LiteLLM user by exact, case-insensitive email. The deployment provisions one managed key per user according to provisioner policy. The shipped LiteLLM provisioners use `blue:<email>` as the base key alias and add a numeric suffix if that alias is occupied. The Control API stores the resulting server-side virtual key only in PostgreSQL.
 
-When the client fetches policy, the Control API injects the inference proxy URL and an opaque pseudotoken into the global gateway block. The wrapper writes agent-specific routing for the default agent and for other allowed agents when they are launched through Blue. Models remain agent-specific: each writer uses that agent's managed model when present, or leaves model selection unset. The inference proxy resolves the pseudotoken on every request and substitutes the server-side virtual key. LiteLLM then applies its configured provider credential.
+When the client fetches policy, the Control API requires its OAuth token's `sid`, verifies and renews the active backing Better Auth session, and injects the inference proxy URL plus a session-bound inference JWT into the global gateway block. Each new Blue launch receives a fresh JWT limited to `gateway:infer` and at most 12 hours; an already-running agent keeps its fixed launch expiry. The JWT is never persisted by the Control API. The wrapper writes agent-specific routing for allowed agents. The inference proxy validates the JWT, resolves its Blue user and OAuth session through the M2M channel, and substitutes the server-side virtual key.
 
 <Note>
   Gateway routing applies when an allowed agent is launched through `blue`. Starting the native agent command directly uses its native configuration and credentials.
@@ -46,7 +47,7 @@ When the client fetches policy, the Control API injects the inference proxy URL 
 
 ## How governance-only mode works
 
-With no top-level `gateway` block, Blue can still manage models, approval behavior, MCP servers, packages, and session-upload policy. It does not set gateway base URLs or pseudotokens. Native agents own authentication and send inference to their normal providers or locally configured endpoints.
+With no top-level `gateway` block, Blue can still manage models, approval behavior, MCP servers, packages, and session-upload policy. It does not set gateway base URLs or inference tokens. Native agents own authentication and send inference to their normal providers or locally configured endpoints.
 
 For an entirely governance-only deployment:
 
@@ -54,7 +55,7 @@ For an entirely governance-only deployment:
 - Do not start the Compose `gateway` profile.
 - Configure provider credentials using each agent's native setup.
 
-When the organization offers gateway mode, open Blue control and run `/direct` to switch the local client to native provider credentials. Blue removes gateway routing and pseudotokens from its managed agent profile while continuing to apply models, approval behavior, MCP servers, packages, and session-upload policy. If an agent is running, Blue offers to quit and reload it; keeping the current session delays the runtime change until the next Blue restart. Run `/direct` again to restore organization gateway routing.
+When the organization offers gateway mode, open Blue control and run `/direct` to switch the local client to native provider credentials. Blue removes gateway routing and inference tokens from its managed agent profile while continuing to apply models, approval behavior, MCP servers, packages, and session-upload policy. If an agent is running, Blue offers to quit and reload it; keeping the current session delays the runtime change until the next Blue restart. Run `/direct` again to restore organization gateway routing.
 
 The selection is persisted as `force_governance_only` under `[mode]` in `blue.toml`. A client can only disable gateway routing offered by the service; it cannot enable gateway mode when the service has not declared it.
 
@@ -79,6 +80,12 @@ gateway:
   url: env://HARNESS_GATEWAY_URL
   inference_proxy_url: env://HARNESS_INFERENCE_PROXY_URL
   internal_allowed_client_id: blue-inference-proxy
+  inference_jwt:
+    issuer: https://api.blue.example.com
+    audience: blue-inference-proxy
+    active_kid: gateway-2026-09
+    private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
+    jwks_file: /var/run/blue/gateway-jwt/jwks.json
   secret_encryption:
     provider: aws-kms
     key_id: arn:aws:kms:us-west-2:123456789012:key/example
@@ -117,6 +124,8 @@ gaps before selecting it.
 | Provisioner | In-process built-in or pinned deployment-trusted executable selected by `gateway.provisioner.type` |
 | Secret encryption | Environment key for development or AWS KMS key ID for production envelope encryption |
 | `HARNESS_PROXY_OAUTH_CLIENT_SECRET` | Client-credentials secret the inference proxy uses to obtain a Control API token (shared with the dashboard seed) |
+| Gateway JWT key ring | Active RS256 private key plus a JWKS containing its public key and retained rotation keys |
+| `HARNESS_GATEWAY_JWKS_URL` | M2M-protected internal Control API endpoint used by the proxy to verify inference JWTs |
 | `internal_allowed_client_id` | OAuth client id (`sub`) the Control API accepts on the internal resolver; defaults to `blue-inference-proxy` |
 | `HARNESS_GATEWAY_LOG_URL` | Internal Control API request-log ingestion endpoint; omit to disable egress |
 | `HARNESS_GATEWAY_EVENT_URL` | Internal credential-invalidation event stream; defaults from the resolver URL |
@@ -151,5 +160,5 @@ Changing provisioner configuration reconciles the managed credential and revokes
 | Agent still connects directly | Launch it through `blue` and ensure the global `gateway` policy is present. |
 
 <Warning>
-  Keep the LiteLLM admin key, the inference proxy's OAuth client secret, virtual keys, and provider credentials out of governance YAML and client configuration. Only the pseudotoken and client-reachable proxy URL are delivered to a developer machine.
+  Keep the LiteLLM admin key, inference-proxy OAuth secret, JWT signing key, virtual keys, and provider credentials out of governance YAML and client configuration. Only the session-bound inference JWT and client-reachable proxy URL are delivered to a developer machine.
 </Warning>
