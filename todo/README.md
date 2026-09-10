@@ -16,8 +16,7 @@ a hostile local administrator.
 | Plan | Priority | Status | Depends on |
 | --- | --- | --- | --- |
 | [Package and filesystem security](package-and-filesystem-security.md) | Pilot blocker | Planned | — |
-| [Gateway inference authentication](gateway-inference-authentication.md) | Pilot blocker | In progress | Package and filesystem security |
-| [Gateway coding-session attribution](gateway-coding-session-attribution.md) | Pilot blocker | Planned | Gateway inference authentication |
+| [Gateway coding-session attribution](gateway-coding-session-attribution.md) | Pilot blocker | Planned | Implemented gateway inference authentication |
 | [Windows platform parity](windows-platform-parity.md) | Pilot blocker | Planned | Package and filesystem security |
 | [Dashboard contract and build hardening](dashboard-contract-and-build-hardening.md) | Pilot blocker | Planned | — |
 | [Control-plane telemetry](control-plane-telemetry.md) | Post-baseline | Planned | Gateway attribution; dashboard contracts |
@@ -32,15 +31,13 @@ this table; do not use a plan document in place of the issue required by
 
 1. **Remaining safety baseline:** package and filesystem security. Production
    safety defaults are implemented in the application and deployment examples.
-2. **Trusted gateway authentication:** session-bound inference JWTs after the
-   package and filesystem security baseline.
-3. **Trusted attribution:** coding-session attribution after gateway
-   authentication.
-4. **Client and operator parity, in parallel:** Windows support and dashboard
+2. **Trusted attribution:** coding-session attribution on top of the implemented
+   session-bound gateway authentication.
+3. **Client and operator parity, in parallel:** Windows support and dashboard
    hardening.
-5. **Post-baseline capability:** authenticated control-plane telemetry after
+4. **Post-baseline capability:** authenticated control-plane telemetry after
    coding-session attribution.
-6. **Structural work throughout:** extract a domain when it is already being
+5. **Structural work throughout:** extract a domain when it is already being
    changed, then complete the remaining modularization after pilot blockers.
 
 No later workstream may weaken the production-default failure behavior to

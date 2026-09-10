@@ -2,11 +2,10 @@
 
 ## Purpose
 
-Add trustworthy per-launch attribution after
-[gateway inference authentication](gateway-inference-authentication.md) is
-complete. This workstream starts from an authenticated, session-bound inference
-JWT and adds only coding-session identity and server-owned metadata. It does not
-redesign gateway authentication or credential resolution.
+Add trustworthy per-launch attribution on top of the implemented,
+session-bound gateway inference authentication. This workstream adds only
+coding-session identity and server-owned metadata. It does not redesign gateway
+authentication or credential resolution.
 
 ## Coding-session lifecycle
 
