@@ -1,6 +1,7 @@
 import { toNextJsHandler } from "better-auth/next-js";
 import {
   auth,
+  bindDeviceAuthorizationSession,
   createDeviceBrowserLink,
   ensureAuthBootstrap,
   invalidateDeviceBrowserLink,
@@ -42,6 +43,18 @@ function ready(handler: (request: Request) => Promise<Response>) {
     ) {
       return Response.json({ error: "invitation required" }, { status: 403 });
     }
+    if (
+      pathname.endsWith("/device/approve") &&
+      deviceDecision?.userCode &&
+      !(await bindDeviceAuthorizationSession(
+        String(deviceDecision.userCode),
+        request.headers,
+      ))
+    )
+      return Response.json(
+        { error: "device authorization session binding failed" },
+        { status: 400 },
+      );
     const response = await handler(request);
     if (pathname.endsWith("/device/code") && response.ok) {
       const body = (await response.clone().json()) as {
