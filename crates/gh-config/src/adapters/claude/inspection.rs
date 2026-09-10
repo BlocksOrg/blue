@@ -34,7 +34,7 @@ fn names(value: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
 
 pub(crate) fn claude_current(_: &HarnessPolicy, files: &[PathBuf]) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
-    if let Some(settings) = find(files, ".config/blue/runtime/claude/settings.json")
+    if let Some(settings) = find(files, "runtime/claude/settings.json")
         .or_else(|| find(files, ".claude/settings.json"))
         .and_then(json)
     {
@@ -59,7 +59,7 @@ pub(crate) fn claude_current(_: &HarnessPolicy, files: &[PathBuf]) -> BTreeMap<S
             values.insert("session_upload_hook".into(), "enabled".into());
         }
     }
-    if let Some(root) = find(files, ".config/blue/runtime/claude/mcp.json")
+    if let Some(root) = find(files, "runtime/claude/mcp.json")
         .or_else(|| find(files, ".claude.json"))
         .and_then(json)
     {

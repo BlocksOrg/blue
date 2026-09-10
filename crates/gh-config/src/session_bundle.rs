@@ -611,7 +611,7 @@ fn reject_symlinked_destination(home: &Path, relative: &Path) -> Result<(), GhEr
     for component in relative.components() {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if destination_is_link_or_reparse(&metadata) => {
                 return Err(invalid(format!(
                     "native destination traverses symlink {}",
                     current.display()
@@ -634,6 +634,20 @@ fn reject_symlinked_destination(home: &Path, relative: &Path) -> Result<(), GhEr
         }
     }
     Ok(())
+}
+
+fn destination_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 pub fn ensure_safe_home_destination(home: &Path, target: &Path) -> Result<(), GhError> {

@@ -22,6 +22,83 @@ pub fn create_owner_only_dir(path: &Path) -> Result<(), GhError> {
     })
 }
 
+/// Exclusively create and durably write an owner-only file. This is for
+/// immutable identities where replacing an existing destination would be a
+/// correctness bug rather than an update.
+pub fn write_owner_only_new(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), GhError> {
+    if let Some(parent) = path.parent() {
+        create_owner_only_dir_all(parent)?;
+    }
+    let mut file = create_owner_only(path).map_err(|source| GhError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let Err(source) = file
+        .write_all(contents.as_ref())
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(GhError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    sync_parent(path)
+}
+
+pub fn create_owner_only_dir_all(path: &Path) -> Result<(), GhError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && !metadata_is_reparse(&metadata) =>
+        {
+            return Ok(())
+        }
+        Ok(_) => {
+            return Err(GhError::config(format!(
+                "owner-only directory path is not a directory: {}",
+                path.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(GhError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty() && *parent != path)
+    {
+        create_owner_only_dir_all(parent)?;
+    }
+    match create_owner_only_dir(path) {
+        Ok(()) => Ok(()),
+        Err(GhError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse(_: &fs::Metadata) -> bool {
+    false
+}
+
 #[cfg(unix)]
 fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;

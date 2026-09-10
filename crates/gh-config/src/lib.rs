@@ -25,6 +25,20 @@ use serde::{Deserialize, Serialize};
 
 use transaction::FileTransaction;
 
+/// Resolve Blue's mutable data root while preserving hermetic `_at(home)` test
+/// APIs. Production callers use the native `ClientPaths` roots.
+pub(crate) fn managed_data_dir(home: &std::path::Path) -> PathBuf {
+    if paths::home_dir().is_ok_and(|current| current == home) {
+        paths::blue_data_dir().unwrap_or_else(|_| home.join(".config/blue"))
+    } else {
+        home.join(".config/blue")
+    }
+}
+
+pub(crate) fn managed_runtime_dir(home: &std::path::Path) -> PathBuf {
+    managed_data_dir(home).join("runtime")
+}
+
 pub use compat::{
     resolve as resolve_compatibility, supported_install, validate_package_adapter_for_policy,
     validate_package_adapters_for_policy, CompatibilityFailure, HarnessContext, ProfileStatus,
@@ -342,9 +356,22 @@ pub(crate) fn validate_home_path(
     allow_final_symlink: bool,
 ) -> Result<(), GhError> {
     use std::path::Component;
-    let relative = path
-        .strip_prefix(home)
-        .map_err(|_| GhError::config(format!("path escaped user home: {}", path.display())))?;
+    let mut authorities = vec![home.to_path_buf()];
+    if paths::home_dir().is_ok_and(|current| current == home) {
+        if let Ok(client) = paths::ClientPaths::resolve() {
+            authorities.extend([client.config, client.data]);
+        }
+    }
+    authorities.sort_by_key(|root| std::cmp::Reverse(root.components().count()));
+    let (authority, relative) = authorities
+        .iter()
+        .find_map(|root| relative_under(path, root).map(|relative| (root, relative)))
+        .ok_or_else(|| {
+            GhError::config(format!(
+                "path escaped declared client roots: {}",
+                path.display()
+            ))
+        })?;
     if relative.as_os_str().is_empty()
         || relative
             .components()
@@ -355,12 +382,12 @@ pub(crate) fn validate_home_path(
             path.display()
         )));
     }
-    let mut current = home.to_path_buf();
+    let mut current = authority.to_path_buf();
     let components = relative.components().collect::<Vec<_>>();
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
         match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if is_link_or_reparse(&metadata) => {
                 if !(allow_final_symlink && index + 1 == components.len()) {
                     return Err(GhError::config(format!(
                         "managed path traverses symlink: {}",
@@ -379,6 +406,46 @@ pub(crate) fn validate_home_path(
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn relative_under(path: &std::path::Path, root: &std::path::Path) -> Option<PathBuf> {
+    let path_components = path.components().collect::<Vec<_>>();
+    let root_components = root.components().collect::<Vec<_>>();
+    if root_components.len() > path_components.len()
+        || !root_components
+            .iter()
+            .zip(&path_components)
+            .all(|(left, right)| {
+                left.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+            })
+    {
+        return None;
+    }
+    Some(path_components[root_components.len()..].iter().collect())
+}
+
+#[cfg(not(windows))]
+fn relative_under(path: &std::path::Path, root: &std::path::Path) -> Option<PathBuf> {
+    path.strip_prefix(root)
+        .ok()
+        .map(std::path::Path::to_path_buf)
+}
+
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn validate_plan(
@@ -427,7 +494,7 @@ fn validate_plan(
                 path.display()
             )));
         }
-        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| is_link_or_reparse(&metadata))
             && !declared.owned_outputs.contains(path)
             && !declared.native_migrations.contains(path)
             && !previous.owned_paths.contains(path)
@@ -467,8 +534,8 @@ impl ReconcileLock {
                 harness,
             });
         }
-        let path = home
-            .join(".config/blue/locks")
+        let path = managed_data_dir(home)
+            .join("locks")
             .join(format!("{}.lock", harness.key()));
         validate_home_path(home, &path, false)?;
         if let Some(parent) = path.parent() {
@@ -638,8 +705,8 @@ impl RevisionLocks {
             locks,
         } = self;
         let mut affected = vec![
-            home.join(".config/blue/package-state.json"),
-            home.join(".config/blue/package-state"),
+            managed_data_dir(&home).join("package-state.json"),
+            managed_data_dir(&home).join("package-state"),
         ];
         let shared_state_paths = affected.len();
         for context in &contexts {
@@ -720,7 +787,7 @@ fn definition_state_path(
     home: &std::path::Path,
     definition: &adapters::HarnessDefinition,
 ) -> PathBuf {
-    home.join(".config/blue/runtime")
+    managed_runtime_dir(home)
         .join(definition.metadata.key)
         .join("compatibility-state.json")
 }

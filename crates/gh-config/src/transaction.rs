@@ -135,7 +135,7 @@ impl FileTransaction {
             }
         }
 
-        let transactions = home.join(".blue-transactions");
+        let transactions = transaction_root(home);
         validate_home_path(home, &transactions, false)?;
         create_owner_only_ancestors(home, &transactions)?;
         let (id, root) = create_transaction_root(&transactions)?;
@@ -362,9 +362,17 @@ impl Drop for FileTransaction {
 
 fn package_state_paths(home: &Path) -> [PathBuf; 2] {
     [
-        home.join(".config/blue/package-state.json"),
-        home.join(".config/blue/package-state"),
+        crate::managed_data_dir(home).join("package-state.json"),
+        crate::managed_data_dir(home).join("package-state"),
     ]
+}
+
+fn transaction_root(home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if gh_common::paths::home_dir().is_ok_and(|current| current == home) {
+        return crate::managed_data_dir(home).join(".blue-transactions");
+    }
+    home.join(".blue-transactions")
 }
 
 type OperationPaths = (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>);
@@ -594,7 +602,7 @@ fn validate_journal(home: &Path, root: &Path, journal: &TransactionJournal) -> R
 }
 
 fn recover_incomplete_transactions(home: &Path) -> Result<(), GhError> {
-    let transactions = home.join(".blue-transactions");
+    let transactions = transaction_root(home);
     match std::fs::symlink_metadata(&transactions) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}

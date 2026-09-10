@@ -14,8 +14,8 @@ pub mod network;
 pub mod paths;
 
 pub use atomic::{
-    create_owner_only_dir, prepare_atomic, prepare_atomic_in, write_atomic, write_config_atomic,
-    PreparedAtomicWrite,
+    create_owner_only_dir, create_owner_only_dir_all, prepare_atomic, prepare_atomic_in,
+    write_atomic, write_config_atomic, write_owner_only_new, PreparedAtomicWrite,
 };
 pub use client_config::{BlueToml, IdentityConfig, ModeConfig, ServiceConfig};
 pub use error::{GhError, Result};

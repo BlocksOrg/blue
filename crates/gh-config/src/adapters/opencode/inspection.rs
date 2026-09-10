@@ -34,7 +34,7 @@ fn names(value: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
 
 pub(crate) fn opencode_current(_: &HarnessPolicy, files: &[PathBuf]) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
-    if let Some(config) = find(files, ".config/blue/runtime/opencode/opencode.json")
+    if let Some(config) = find(files, "runtime/opencode/opencode.json")
         .or_else(|| find(files, ".config/opencode/opencode.json"))
         .and_then(json)
     {

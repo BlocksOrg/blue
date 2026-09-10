@@ -26,7 +26,7 @@ pub fn write(
     let native_path = home.join(".config").join("opencode").join("opencode.json");
     migrate_legacy_global_config(plan, home, &native_path, policy)?;
     let native = plan.read_json_object(&native_path)?;
-    let runtime = home.join(".config/blue/runtime/opencode");
+    let runtime = crate::managed_runtime_dir(home).join("opencode");
     let cfg_path = runtime.join("opencode.json");
     let mut root = Map::new();
     root.insert("$schema".to_string(), json!(SCHEMA));
@@ -87,8 +87,8 @@ pub fn write(
         env.insert(GATEWAY_TOKEN_ENV.into(), w.token.clone());
     }
 
-    let plugin_path = home
-        .join(".config/blue/runtime/opencode")
+    let plugin_path = crate::managed_runtime_dir(home)
+        .join("opencode")
         .join("plugins")
         .join("blue-session-upload.js");
     if let Some(plugin) = session_upload_plugin {
@@ -145,7 +145,7 @@ pub fn apply_packages(
     hooks_files: &[std::path::PathBuf],
     helpers: &std::collections::BTreeMap<String, std::path::PathBuf>,
 ) -> Result<(), GhError> {
-    let runtime = home.join(".config/blue/runtime/opencode");
+    let runtime = crate::managed_runtime_dir(home).join("opencode");
     // OpenCode 1.17+ can accept legacy `plugin` array entries without loading
     // them. Files directly under an OPENCODE_CONFIG_DIR plugins directory are
     // the stable, auto-discovered form. Preserve Blue's built-in upload plugin

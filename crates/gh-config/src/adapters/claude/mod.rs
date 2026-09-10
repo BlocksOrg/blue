@@ -241,7 +241,7 @@ impl HarnessImplementation for Implementation {
 }
 
 fn launch_base(home: &Path, mut spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
-    let runtime = home.join(".config/blue/runtime/claude");
+    let runtime = crate::managed_runtime_dir(home).join("claude");
     let settings = runtime.join("settings.json");
     let mcp = runtime.join("mcp.json");
     if !settings.is_file() || !mcp.is_file() {
@@ -258,7 +258,7 @@ fn disable_auto_updates(_: &Path, spec: &mut crate::HarnessLaunchSpec) -> Result
 
 fn launch_plugins(home: &Path, mut spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
     spec = launch_base(home, spec)?;
-    let standalone = home.join(".config/blue/runtime/claude/standalone-skills-plugin");
+    let standalone = crate::managed_runtime_dir(home).join("claude/standalone-skills-plugin");
     if standalone.is_dir() {
         spec.launch_args
             .extend(["--plugin-dir".to_owned(), standalone.display().to_string()]);
@@ -316,7 +316,7 @@ fn plan(
 fn paths(home: &Path) -> ImplementationPaths {
     ImplementationPaths {
         read_only_sources: vec![home.join(".claude/settings.json"), home.join(".claude.json")],
-        owned_outputs: vec![home.join(".config/blue/runtime/claude")],
+        owned_outputs: vec![crate::managed_runtime_dir(home).join("claude")],
         native_migrations: vec![home.join(".claude/settings.json")],
     }
 }
@@ -514,7 +514,7 @@ fn apply_hook_packages(
     if components.hooks_files.is_empty() {
         return Ok(());
     }
-    let settings = home.join(".config/blue/runtime/claude/settings.json");
+    let settings = crate::managed_runtime_dir(home).join("claude/settings.json");
     let mut document = plan.read_json_object(&settings)?;
     let hooks = document
         .entry("hooks")

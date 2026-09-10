@@ -21,7 +21,7 @@ pub fn write(
     _enforced: bool,
 ) -> Result<HarnessWrite, GhError> {
     migrate_legacy_global_config(plan, home, policy)?;
-    let runtime = home.join(".config/blue/runtime/claude");
+    let runtime = crate::managed_runtime_dir(home).join("claude");
     let settings_path = runtime.join("settings.json");
     let settings = build_settings(policy, wiring, session_upload_hooks, session_start_hooks)?;
     plan.write(&settings_path, json_pretty(&settings)?)?;
@@ -78,7 +78,7 @@ pub fn apply_packages(
     skills_dirs: &[std::path::PathBuf],
     helpers: &std::collections::BTreeMap<String, std::path::PathBuf>,
 ) -> Result<(), GhError> {
-    let runtime = home.join(".config/blue/runtime/claude");
+    let runtime = crate::managed_runtime_dir(home).join("claude");
     let standalone_plugin = runtime.join("standalone-skills-plugin");
     if standalone_plugin.exists() {
         plan.remove(&standalone_plugin)?;

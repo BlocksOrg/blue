@@ -818,15 +818,15 @@ pub fn statuses() -> Result<Vec<PackageStatus>, GhError> {
 }
 
 fn package_base() -> Result<PathBuf, GhError> {
-    Ok(paths::blue_config_dir()?.join("packages"))
+    Ok(paths::blue_data_dir()?.join("packages"))
 }
 
 fn legacy_state_path() -> Result<PathBuf, GhError> {
-    Ok(paths::blue_config_dir()?.join("package-state.json"))
+    Ok(paths::blue_data_dir()?.join("package-state.json"))
 }
 
 fn state_dir() -> Result<PathBuf, GhError> {
-    Ok(paths::blue_config_dir()?.join("package-state"))
+    Ok(paths::blue_data_dir()?.join("package-state"))
 }
 
 fn harness_state_path(harness: &str) -> Result<PathBuf, GhError> {
@@ -1099,9 +1099,9 @@ fn resolve_adapter(
         let path = checked_join(root, relative)?;
         if prepare_helpers {
             make_executable(&path)?;
-        } else if !path.is_file() {
+        } else if !valid_managed_helper(&path) {
             return Err(GhError::config(format!(
-                "managed helper `{name}` is missing at {}",
+                "managed helper `{name}` is missing or not runnable at {}",
                 path.display()
             )));
         }
@@ -1121,6 +1121,34 @@ fn resolve_adapter(
     out.hooks_files = components.hooks_files;
     out.plugin_modules = components.plugin_modules;
     Ok(out)
+}
+
+fn valid_managed_helper(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+            return false;
+        };
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        return pathext.split(';').any(|candidate| {
+            candidate
+                .trim_start_matches('.')
+                .eq_ignore_ascii_case(extension)
+        });
+    }
+    #[cfg(not(windows))]
+    path.is_file()
 }
 
 fn validate_harness_adapter(

@@ -106,7 +106,7 @@ fn plan_v1(implementation: &Implementation, input: &ReconcileInput<'_>, packages
 }
 
 fn launch(home: &Path, mut spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
-    let runtime = home.join(".config/blue/runtime/kimi");
+    let runtime = crate::managed_runtime_dir(home).join("kimi");
     if !runtime.join("config.toml").is_file() {
         return Err(GhError::config("managed Kimi configuration is missing"));
     }
@@ -119,7 +119,7 @@ fn disable_auto_updates(_: &Path, spec: &mut crate::HarnessLaunchSpec) -> Result
         .insert(DISABLE_AUTO_UPDATE_ENV.into(), "1".into());
     Ok(())
 }
-fn paths(home: &Path) -> ImplementationPaths { ImplementationPaths { read_only_sources: vec![home.join(".kimi-code/config.toml"), home.join(".kimi-code/mcp.json")], owned_outputs: vec![home.join(".config/blue/runtime/kimi")], native_migrations: vec![home.join(".kimi-code/config.toml")] } }
+fn paths(home: &Path) -> ImplementationPaths { ImplementationPaths { read_only_sources: vec![home.join(".kimi-code/config.toml"), home.join(".kimi-code/mcp.json")], owned_outputs: vec![crate::managed_runtime_dir(home).join("kimi")], native_migrations: vec![home.join(".kimi-code/config.toml")] } }
 fn native_migration_needs_review(path: &Path, policy: &HarnessPolicy) -> bool { std::fs::read_to_string(path).is_ok_and(|body| body.contains("governed") || body.contains("session-upload") || policy.managed_config.model.as_ref().is_some_and(|model| body.contains(model))) }
 fn gateway_wiring(gateway: &GatewayConfig) -> Result<GatewayWiring, GhError> { gh_gateway::wire_with(gateway, AuthPlacement::InFile, Some("openai")) }
 fn validate_components(_: &PackageAdapter) -> Result<(), GhError> { Ok(()) }
@@ -180,7 +180,7 @@ fn session_file_equivalent(role: &str, existing: &[u8], bundled: &[u8]) -> bool 
 
 fn transcript_path(home: &Path, session_id: &str, payload: &serde_json::Value) -> Result<PathBuf, GhError> {
     if let Some(path) = payload.get("transcript_path").and_then(serde_json::Value::as_str).filter(|path| !path.is_empty()) { return Ok(PathBuf::from(path)); }
-    for root in [home.join(".config/blue/runtime/kimi/sessions"), home.join(".kimi-code/sessions")] { if let Some(transcript) = find_transcript(&root, session_id, 0)? { return Ok(transcript); } }
+    for root in [crate::managed_runtime_dir(home).join("kimi/sessions"), home.join(".kimi-code/sessions")] { if let Some(transcript) = find_transcript(&root, session_id, 0)? { return Ok(transcript); } }
     Err(GhError::config("Kimi hook payload has no usable transcript_path in its managed or native session roots"))
 }
 fn find_transcript(root: &Path, session_id: &str, depth: usize) -> Result<Option<PathBuf>, GhError> {
