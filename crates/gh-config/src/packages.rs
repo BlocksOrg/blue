@@ -1583,14 +1583,21 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Windows rejects `:` in a path, and the test harness names each thread
-    /// after its full test path (`module::test_name`).
+    /// A per-test scratch directory. The harness names each thread after its
+    /// full test path, which contains `:` and is long enough to push nested
+    /// transaction files past `MAX_PATH`, so hash it into a short component.
     fn test_directory(prefix: &str) -> std::path::PathBuf {
-        let thread = std::thread::current()
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::thread::current()
             .name()
             .unwrap_or("test")
-            .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
-        std::env::temp_dir().join(format!("{prefix}-{}-{thread}", std::process::id()))
+            .hash(&mut hasher);
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{:x}",
+            std::process::id(),
+            hasher.finish()
+        ))
     }
 
     static SPACE_PROBES: AtomicUsize = AtomicUsize::new(0);
