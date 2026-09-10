@@ -21,35 +21,11 @@ impl ClientPaths {
     }
 
     pub fn resolve_for_profile(profile: PathBuf) -> Result<Self, GhError> {
-        #[cfg(windows)]
-        {
-            let roaming = explicit_xdg("XDG_CONFIG_HOME")?
-                .unwrap_or(known_folder(KnownFolder::RoamingAppData)?);
-            let local = known_folder(KnownFolder::LocalAppData)?;
-            let cache_home = explicit_xdg("XDG_CACHE_HOME")?.unwrap_or_else(|| local.clone());
-            return Ok(Self {
-                profile,
-                config: roaming.join("Blue"),
-                data: local.join("Blue").join("Data"),
-                cache: cache_home.join("Blue").join("Cache"),
-                shims: local.join("Blue").join("bin"),
-            });
-        }
-        #[cfg(not(windows))]
-        {
-            let config_home =
-                explicit_xdg("XDG_CONFIG_HOME")?.unwrap_or_else(|| profile.join(".config"));
-            let cache_home =
-                explicit_xdg("XDG_CACHE_HOME")?.unwrap_or_else(|| profile.join(".cache"));
-            let config = config_home.join("blue");
-            Ok(Self {
-                profile: profile.clone(),
-                data: config.clone(),
-                config,
-                cache: cache_home.join("blue"),
-                shims: profile.join(".local").join("bin"),
-            })
-        }
+        layout(
+            profile,
+            explicit_xdg("XDG_CONFIG_HOME")?,
+            explicit_xdg("XDG_CACHE_HOME")?,
+        )
     }
 
     pub fn blue_toml(&self) -> PathBuf {
@@ -75,6 +51,44 @@ impl ClientPaths {
     }
 }
 
+/// The per-platform layout, with the XDG overrides injected rather than read
+/// from the ambient environment — so tests can pin them.
+fn layout(
+    profile: PathBuf,
+    config_override: Option<PathBuf>,
+    cache_override: Option<PathBuf>,
+) -> Result<ClientPaths, GhError> {
+    #[cfg(windows)]
+    {
+        let roaming = match config_override {
+            Some(path) => path,
+            None => known_folder(KnownFolder::RoamingAppData)?,
+        };
+        let local = known_folder(KnownFolder::LocalAppData)?;
+        let cache_home = cache_override.unwrap_or_else(|| local.clone());
+        Ok(ClientPaths {
+            profile,
+            config: roaming.join("Blue"),
+            data: local.join("Blue").join("Data"),
+            cache: cache_home.join("Blue").join("Cache"),
+            shims: local.join("Blue").join("bin"),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let config_home = config_override.unwrap_or_else(|| profile.join(".config"));
+        let cache_home = cache_override.unwrap_or_else(|| profile.join(".cache"));
+        let config = config_home.join("blue");
+        Ok(ClientPaths {
+            profile: profile.clone(),
+            data: config.clone(),
+            config,
+            cache: cache_home.join("blue"),
+            shims: profile.join(".local").join("bin"),
+        })
+    }
+}
+
 fn explicit_xdg(name: &str) -> Result<Option<PathBuf>, GhError> {
     Ok(std::env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -85,7 +99,7 @@ fn explicit_xdg(name: &str) -> Result<Option<PathBuf>, GhError> {
 pub fn home_dir() -> Result<PathBuf, GhError> {
     #[cfg(windows)]
     {
-        return known_folder(KnownFolder::Profile);
+        known_folder(KnownFolder::Profile)
     }
     #[cfg(not(windows))]
     std::env::var_os("HOME")
@@ -195,33 +209,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blue_owned_paths_use_the_blue_xdg_namespaces() {
-        assert_eq!(
-            blue_config_dir().unwrap(),
-            config_home().unwrap().join("blue")
-        );
-        assert_eq!(
-            blue_toml_path().unwrap(),
-            config_home().unwrap().join("blue/blue.toml")
-        );
-        assert_eq!(
-            session_path().unwrap(),
-            config_home().unwrap().join("blue/session.json")
-        );
+    fn blue_owned_paths_are_namespaced_under_the_resolved_layout() {
+        let paths = ClientPaths::resolve().unwrap();
+        assert_eq!(blue_config_dir().unwrap(), paths.config);
+        assert_eq!(blue_toml_path().unwrap(), paths.config.join("blue.toml"));
+        assert_eq!(session_path().unwrap(), paths.config.join("session.json"));
         assert_eq!(
             governance_cache_path().unwrap(),
-            cache_home().unwrap().join("blue/governance-config.json")
+            paths.cache.join("governance-config.json")
         );
+
+        // The namespace itself is platform-specific: `<xdg>/blue` on Unix,
+        // `%APPDATA%\Blue` + `%LOCALAPPDATA%\Blue\Cache` on Windows.
+        #[cfg(windows)]
+        {
+            assert_eq!(paths.config.file_name().unwrap(), "Blue");
+            assert_eq!(paths.cache.file_name().unwrap(), "Cache");
+            assert_eq!(paths.cache.parent().unwrap().file_name().unwrap(), "Blue");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(paths.config, config_home().unwrap().join("blue"));
+            assert_eq!(paths.cache, cache_home().unwrap().join("blue"));
+        }
     }
 
     #[cfg(not(windows))]
     #[test]
     fn unix_layout_remains_compatible() {
         let profile = PathBuf::from("/tmp/blue profile");
-        let paths = ClientPaths::resolve_for_profile(profile.clone()).unwrap();
+        let paths = layout(profile.clone(), None, None).unwrap();
         assert_eq!(paths.config, profile.join(".config/blue"));
         assert_eq!(paths.data, paths.config);
         assert_eq!(paths.cache, profile.join(".cache/blue"));
         assert_eq!(paths.shims, profile.join(".local/bin"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_layout_honours_explicit_xdg_overrides() {
+        let profile = PathBuf::from("/tmp/blue profile");
+        let paths = layout(
+            profile.clone(),
+            Some(PathBuf::from("/xdg/config")),
+            Some(PathBuf::from("/xdg/cache")),
+        )
+        .unwrap();
+        assert_eq!(paths.config, Path::new("/xdg/config/blue"));
+        assert_eq!(paths.data, paths.config);
+        assert_eq!(paths.cache, Path::new("/xdg/cache/blue"));
+        assert_eq!(paths.shims, profile.join(".local/bin"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_layout_separates_roaming_config_from_local_state() {
+        let profile = PathBuf::from(r"C:\Users\blue");
+        let paths = layout(
+            profile.clone(),
+            Some(PathBuf::from(r"R:\Roaming")),
+            Some(PathBuf::from(r"C:\Cache")),
+        )
+        .unwrap();
+        assert_eq!(paths.profile, profile);
+        assert_eq!(paths.config, Path::new(r"R:\Roaming\Blue"));
+        assert_eq!(paths.cache, Path::new(r"C:\Cache\Blue\Cache"));
+        assert_ne!(paths.data, paths.config);
     }
 }
