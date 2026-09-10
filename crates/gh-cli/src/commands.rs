@@ -928,13 +928,14 @@ pub(crate) fn doctor_text() -> Result<String> {
     }
     let (cfg, client) = load_client()?;
     let client_paths = gh_common::paths::ClientPaths::resolve()?;
+    let shims = client_paths.shims()?;
     let mut lines = vec![
         "blue doctor".to_owned(),
         format!("  config source : {}", client.describe_source()),
-        format!("  shim directory: {}", client_paths.shims.display()),
+        format!("  shim directory: {}", shims.display()),
         format!(
             "  shim PATH     : {}",
-            path_entry_index(&client_paths.shims)
+            path_entry_index(&shims)
                 .map(|index| format!("entry {}", index + 1))
                 .unwrap_or_else(|| "MISSING".into())
         ),
@@ -1044,10 +1045,11 @@ fn legacy_windows_state_message() -> Result<Option<String>> {
     #[cfg(windows)]
     {
         let paths = gh_common::paths::ClientPaths::resolve()?;
-        if !paths.blue_toml().exists() && paths.legacy_windows_dir().exists() {
+        let legacy = paths.legacy_windows_dir()?;
+        if !paths.blue_toml().exists() && legacy.exists() {
             return Ok(Some(format!(
                 "legacy state exists at {}, but this version uses native Windows directories and will not read or migrate it; relocate files manually using /next/cli/windows-paths",
-                paths.legacy_windows_dir().display()
+                legacy.display()
             )));
         }
     }

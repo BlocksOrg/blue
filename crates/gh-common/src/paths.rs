@@ -1,31 +1,57 @@
 //! Native client path resolution. Unix keeps the original XDG layout, while
 //! Windows separates roaming configuration from machine-local state.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::error::GhError;
 
 /// Fully-resolved filesystem authority used by the Blue client.
+///
+/// `profile` and `shims` are optional because the profile directory is not
+/// always needed: with both XDG roots supplied explicitly there is nothing left
+/// for `$HOME` to answer, and a container that only ever logs in has no reason
+/// to set it. They are reported through [`ClientPaths::profile`] and
+/// [`ClientPaths::shims`], which re-raise the original resolution failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientPaths {
-    pub profile: PathBuf,
+    profile: Result<PathBuf, String>,
     pub config: PathBuf,
     pub data: PathBuf,
     pub cache: PathBuf,
-    pub shims: PathBuf,
+    shims: Option<PathBuf>,
 }
 
 impl ClientPaths {
     pub fn resolve() -> Result<Self, GhError> {
-        Self::resolve_for_profile(home_dir()?)
-    }
-
-    pub fn resolve_for_profile(profile: PathBuf) -> Result<Self, GhError> {
         layout(
-            profile,
+            home_dir,
             explicit_xdg("XDG_CONFIG_HOME")?,
             explicit_xdg("XDG_CACHE_HOME")?,
         )
+    }
+
+    /// The injectable seam: resolve against a caller-supplied profile instead
+    /// of the ambient one.
+    pub fn resolve_for_profile(profile: PathBuf) -> Result<Self, GhError> {
+        layout(
+            || Ok(profile.clone()),
+            explicit_xdg("XDG_CONFIG_HOME")?,
+            explicit_xdg("XDG_CACHE_HOME")?,
+        )
+    }
+
+    /// The user's profile directory, or the failure that kept it from being
+    /// resolved.
+    pub fn profile(&self) -> Result<PathBuf, GhError> {
+        self.profile.clone().map_err(GhError::Config)
+    }
+
+    /// The default directory for command shims.
+    pub fn shims(&self) -> Result<PathBuf, GhError> {
+        match &self.shims {
+            Some(shims) => Ok(shims.clone()),
+            None => Ok(self.profile()?.join(".local").join("bin")),
+        }
     }
 
     pub fn blue_toml(&self) -> PathBuf {
@@ -46,15 +72,19 @@ impl ClientPaths {
     pub fn runtime(&self) -> PathBuf {
         self.data.join("runtime")
     }
-    pub fn legacy_windows_dir(&self) -> PathBuf {
-        self.profile.join(".config").join("blue")
+    pub fn legacy_windows_dir(&self) -> Result<PathBuf, GhError> {
+        Ok(self.profile()?.join(".config").join("blue"))
     }
 }
 
 /// The per-platform layout, with the XDG overrides injected rather than read
 /// from the ambient environment — so tests can pin them.
+///
+/// `profile` is a resolver rather than a value: every root it can answer for
+/// may be overridden, so resolving it eagerly turns an unset `$HOME` into a
+/// hard failure even when nothing asks for it.
 fn layout(
-    profile: PathBuf,
+    profile: impl Fn() -> Result<PathBuf, GhError>,
     config_override: Option<PathBuf>,
     cache_override: Option<PathBuf>,
 ) -> Result<ClientPaths, GhError> {
@@ -67,25 +97,46 @@ fn layout(
         let local = known_folder(KnownFolder::LocalAppData)?;
         let cache_home = cache_override.unwrap_or_else(|| local.clone());
         Ok(ClientPaths {
-            profile,
+            // Only `legacy_windows_dir` reads the profile here; the Known
+            // Folders carry everything else.
+            profile: profile().map_err(unresolved_profile),
             config: roaming.join("Blue"),
             data: local.join("Blue").join("Data"),
             cache: cache_home.join("Blue").join("Cache"),
-            shims: local.join("Blue").join("bin"),
+            shims: Some(local.join("Blue").join("bin")),
         })
     }
     #[cfg(not(windows))]
     {
-        let config_home = config_override.unwrap_or_else(|| profile.join(".config"));
-        let cache_home = cache_override.unwrap_or_else(|| profile.join(".cache"));
+        let config_home = match config_override {
+            Some(path) => path,
+            None => profile()?.join(".config"),
+        };
+        let cache_home = match cache_override {
+            Some(path) => path,
+            None => profile()?.join(".cache"),
+        };
+        let profile = profile().map_err(unresolved_profile);
         let config = config_home.join("blue");
         Ok(ClientPaths {
-            profile: profile.clone(),
+            shims: profile
+                .as_ref()
+                .ok()
+                .map(|profile| profile.join(".local").join("bin")),
+            profile,
             data: config.clone(),
             config,
             cache: cache_home.join("blue"),
-            shims: profile.join(".local").join("bin"),
         })
+    }
+}
+
+/// Carry the reason the profile could not be resolved, so the paths that do
+/// need it fail with the original diagnosis rather than a generic one.
+fn unresolved_profile(error: GhError) -> String {
+    match error {
+        GhError::Config(message) => message,
+        other => other.to_string(),
     }
 }
 
@@ -108,18 +159,6 @@ pub fn home_dir() -> Result<PathBuf, GhError> {
         .ok_or_else(|| GhError::config("HOME is not set"))
 }
 
-/// The platform config home (the parent of Blue's config directory).
-pub fn config_home() -> Result<PathBuf, GhError> {
-    let paths = ClientPaths::resolve()?;
-    Ok(paths.config.parent().unwrap_or(Path::new("")).to_path_buf())
-}
-
-/// The platform cache home (the parent of Blue's cache directory).
-pub fn cache_home() -> Result<PathBuf, GhError> {
-    let paths = ClientPaths::resolve()?;
-    Ok(paths.cache.parent().unwrap_or(Path::new("")).to_path_buf())
-}
-
 /// `$XDG_CONFIG_HOME/blue` — where `blue.toml`, the session, and the
 /// shared `mcp.json` staging file live.
 pub fn blue_config_dir() -> Result<PathBuf, GhError> {
@@ -133,7 +172,7 @@ pub fn blue_data_dir() -> Result<PathBuf, GhError> {
 
 /// Default directory for command shims.
 pub fn shim_dir() -> Result<PathBuf, GhError> {
-    Ok(ClientPaths::resolve()?.shims)
+    ClientPaths::resolve()?.shims()
 }
 
 /// The client config file, `$XDG_CONFIG_HOME/blue/blue.toml`.
@@ -217,7 +256,7 @@ pub fn mcp_staging_path() -> Result<PathBuf, GhError> {
 /// through `GetFullPathNameW`, and returns an already-verbatim path untouched.
 /// Device paths (`\\.\`) are passed through — they are not ours to rewrite.
 #[cfg(windows)]
-pub(crate) fn wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
+pub(crate) fn wide_path(path: &std::path::Path) -> std::io::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Component, Prefix};
 
@@ -246,16 +285,19 @@ pub(crate) fn wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
+    /// Resolved against an injected profile rather than the ambient one: the
+    /// runner may have no `$HOME` at all.
     #[test]
     fn blue_owned_paths_are_namespaced_under_the_resolved_layout() {
-        let paths = ClientPaths::resolve().unwrap();
-        assert_eq!(blue_config_dir().unwrap(), paths.config);
-        assert_eq!(blue_toml_path().unwrap(), paths.config.join("blue.toml"));
-        assert_eq!(session_path().unwrap(), paths.config.join("session.json"));
+        let paths = ClientPaths::resolve_for_profile(PathBuf::from("/tmp/blue profile")).unwrap();
+        assert_eq!(paths.blue_toml(), paths.config.join("blue.toml"));
+        assert_eq!(paths.session(), paths.config.join("session.json"));
         assert_eq!(
-            governance_cache_path().unwrap(),
+            paths.governance_cache(),
             paths.cache.join("governance-config.json")
         );
 
@@ -269,28 +311,19 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            assert_eq!(paths.config, config_home().unwrap().join("blue"));
-            assert_eq!(paths.cache, cache_home().unwrap().join("blue"));
+            assert_eq!(paths.config.file_name().unwrap(), "blue");
+            assert_eq!(paths.cache.file_name().unwrap(), "blue");
         }
     }
 
+    /// `blue login` in a container that sets both XDG roots and no `$HOME`:
+    /// the profile answers for nothing the layout needs, so demanding it up
+    /// front only broke the roots that were fully specified.
     #[cfg(not(windows))]
     #[test]
-    fn unix_layout_remains_compatible() {
-        let profile = PathBuf::from("/tmp/blue profile");
-        let paths = layout(profile.clone(), None, None).unwrap();
-        assert_eq!(paths.config, profile.join(".config/blue"));
-        assert_eq!(paths.data, paths.config);
-        assert_eq!(paths.cache, profile.join(".cache/blue"));
-        assert_eq!(paths.shims, profile.join(".local/bin"));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn unix_layout_honours_explicit_xdg_overrides() {
-        let profile = PathBuf::from("/tmp/blue profile");
+    fn unix_layout_resolves_without_a_profile_when_both_roots_are_explicit() {
         let paths = layout(
-            profile.clone(),
+            || Err(GhError::config("HOME is not set")),
             Some(PathBuf::from("/xdg/config")),
             Some(PathBuf::from("/xdg/cache")),
         )
@@ -298,7 +331,94 @@ mod tests {
         assert_eq!(paths.config, Path::new("/xdg/config/blue"));
         assert_eq!(paths.data, paths.config);
         assert_eq!(paths.cache, Path::new("/xdg/cache/blue"));
-        assert_eq!(paths.shims, profile.join(".local/bin"));
+        // Only the paths that genuinely need a profile still fail.
+        assert!(paths.profile().is_err());
+        assert!(paths.shims().is_err());
+    }
+
+    /// End to end through the ambient environment: `blue login` and friends
+    /// resolve with no `$HOME` at all. Both roots have to be pinned for the
+    /// whole process, so the check runs in a child.
+    #[cfg(not(windows))]
+    #[test]
+    fn client_paths_resolve_in_a_homeless_container() {
+        let root = std::env::temp_dir().join(format!("blue-homeless-{}", std::process::id()));
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "paths::tests::homeless_xdg_child_helper"])
+            .env_remove("HOME")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("BLUE_HOMELESS_TEST_ROOT", &root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// Runs inside the child spawned by
+    /// `client_paths_resolve_in_a_homeless_container`.
+    #[cfg(not(windows))]
+    #[test]
+    fn homeless_xdg_child_helper() {
+        let Some(root) = std::env::var_os("BLUE_HOMELESS_TEST_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        assert!(home_dir().is_err(), "the child should have no profile");
+        assert_eq!(blue_config_dir().unwrap(), root.join("config/blue"));
+        assert_eq!(blue_data_dir().unwrap(), root.join("config/blue"));
+        assert_eq!(
+            blue_toml_path().unwrap(),
+            root.join("config/blue/blue.toml")
+        );
+        assert_eq!(
+            session_path().unwrap(),
+            root.join("config/blue/session.json")
+        );
+        assert_eq!(
+            governance_cache_path().unwrap(),
+            root.join("cache/blue/governance-config.json")
+        );
+        // Shims are the one root with no override, so they still need `$HOME`.
+        assert!(shim_dir().is_err());
+    }
+
+    /// The layout still fails when a root it cannot override is missing.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_layout_still_requires_a_profile_for_an_unset_root() {
+        assert!(layout(
+            || Err(GhError::config("HOME is not set")),
+            Some(PathBuf::from("/xdg/config")),
+            None,
+        )
+        .is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_layout_remains_compatible() {
+        let profile = PathBuf::from("/tmp/blue profile");
+        let paths = layout(|| Ok(profile.clone()), None, None).unwrap();
+        assert_eq!(paths.config, profile.join(".config/blue"));
+        assert_eq!(paths.data, paths.config);
+        assert_eq!(paths.cache, profile.join(".cache/blue"));
+        assert_eq!(paths.shims().unwrap(), profile.join(".local/bin"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_layout_honours_explicit_xdg_overrides() {
+        let profile = PathBuf::from("/tmp/blue profile");
+        let paths = layout(
+            || Ok(profile.clone()),
+            Some(PathBuf::from("/xdg/config")),
+            Some(PathBuf::from("/xdg/cache")),
+        )
+        .unwrap();
+        assert_eq!(paths.config, Path::new("/xdg/config/blue"));
+        assert_eq!(paths.data, paths.config);
+        assert_eq!(paths.cache, Path::new("/xdg/cache/blue"));
+        assert_eq!(paths.shims().unwrap(), profile.join(".local/bin"));
     }
 
     #[cfg(windows)]
@@ -306,12 +426,12 @@ mod tests {
     fn windows_layout_separates_roaming_config_from_local_state() {
         let profile = PathBuf::from(r"C:\Users\blue");
         let paths = layout(
-            profile.clone(),
+            || Ok(profile.clone()),
             Some(PathBuf::from(r"R:\Roaming")),
             Some(PathBuf::from(r"C:\Cache")),
         )
         .unwrap();
-        assert_eq!(paths.profile, profile);
+        assert_eq!(paths.profile().unwrap(), profile);
         assert_eq!(paths.config, Path::new(r"R:\Roaming\Blue"));
         assert_eq!(paths.cache, Path::new(r"C:\Cache\Blue\Cache"));
         assert_ne!(paths.data, paths.config);
