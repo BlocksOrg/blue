@@ -44,14 +44,18 @@ jobs:
         run: |
           $Log = Join-Path $env:RUNNER_TEMP "windows-client-tests.log"
           cargo test --locked -p gh-common -p gh-service -p gh-config -p gh-harness -p gh-gateway -p gh-agent -p gh-telemetry -p gh-proxy -p gh-cli 2>&1 | Tee-Object -FilePath $Log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $Profile = [regex]::Escape($env:USERPROFILE)
-          (Get-Content $Log -Raw) -replace $Profile, '<PROFILE>' -replace '(?i)(token|secret|password)=[^\s]+', '$1=<REDACTED>' | Set-Content $Log
+          $Tests = $LASTEXITCODE
+          # Redact before exiting: the artifact upload runs `if: always()`, so a
+          # failing run — the only one anyone downloads — must not carry the raw
+          # log. `$PROFILE` is a PowerShell automatic variable, hence the name.
+          $ProfilePattern = [regex]::Escape($env:USERPROFILE)
+          (Get-Content $Log -Raw) -replace $ProfilePattern, '<PROFILE>' -replace '(?i)(token|secret|password)=[^\s]+', '$1=<REDACTED>' | Set-Content $Log
           @{
             architecture = "${{ matrix.architecture }}"
             shell = $PSVersionTable.PSEdition
             powershell = $PSVersionTable.PSVersion.ToString()
           } | ConvertTo-Json | Set-Content (Join-Path $env:RUNNER_TEMP "windows-metadata.json")
+          if ($Tests -ne 0) { exit $Tests }
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
