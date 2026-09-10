@@ -90,15 +90,13 @@ impl Session {
         let refresh_token = self
             .refresh_token
             .as_deref()
-            .ok_or_else(|| GhError::other("login expired — run `blue login` again"))?;
-        let token_endpoint = self
-            .token_endpoint
-            .as_deref()
-            .ok_or_else(|| GhError::other("login cannot be refreshed — run `blue login` again"))?;
-        let client_id = self
-            .client_id
-            .as_deref()
-            .ok_or_else(|| GhError::other("login cannot be refreshed — run `blue login` again"))?;
+            .ok_or_else(|| GhError::unauthorized("login expired — run `blue login` again"))?;
+        let token_endpoint = self.token_endpoint.as_deref().ok_or_else(|| {
+            GhError::unauthorized("login cannot be refreshed — run `blue login` again")
+        })?;
+        let client_id = self.client_id.as_deref().ok_or_else(|| {
+            GhError::unauthorized("login cannot be refreshed — run `blue login` again")
+        })?;
         let response = reqwest::blocking::Client::new()
             .post(token_endpoint)
             .form(&[
@@ -109,7 +107,7 @@ impl Session {
             .send()
             .map_err(|error| GhError::service(format!("refresh request failed: {error}")))?;
         if !response.status().is_success() {
-            return Err(GhError::other(
+            return Err(GhError::unauthorized(
                 "login expired and refresh was rejected — run `blue login` again",
             ));
         }

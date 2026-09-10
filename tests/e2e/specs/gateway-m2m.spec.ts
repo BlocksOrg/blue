@@ -451,6 +451,8 @@ test.describe.serial("Gateway M2M auth", () => {
       const home = await prepareClient(`gateway-fail-closed-${Date.now()}`);
       const token = await mintInferenceToken(home, login.page);
       expect(await inferenceStatus(login.context.request, token)).toBe(200);
+      const preferred = await runCli(home, ["agent", "codex"]);
+      expect(preferred.code, preferred.stderr).toBe(0);
       const applied = await runCli(home, ["apply", "--yes"]);
       expect(applied.code, applied.stderr).toBe(0);
 

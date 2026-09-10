@@ -925,6 +925,13 @@ pub(crate) fn doctor_text() -> Result<String> {
         (Some(_), _, Ok(Err(gh_common::GhError::Unauthorized(_)))) => {
             lines.push("  session       : EXPIRED (run `blue login`)".into())
         }
+        (Some(_), _, Err(error))
+            if error
+                .downcast_ref::<gh_common::GhError>()
+                .is_some_and(|error| matches!(error, gh_common::GhError::Unauthorized(_))) =>
+        {
+            lines.push("  session       : EXPIRED (run `blue login`)".into())
+        }
         (Some(_), _, Ok(Err(gh_common::GhError::ActionRequired(message)))) => {
             lines.push("  session       : present".into());
             lines.push(format!("  gateway       : {message}"));
@@ -2484,6 +2491,7 @@ fn start_revision_watcher(
         loop {
             if let Err(error) = session.refresh_if_needed(now_unix()) {
                 tracing::debug!(%error, "revision watcher could not refresh login");
+                record_auth_notice(&error, &auth_for_thread);
                 std::thread::sleep(std::time::Duration::from_secs(60));
                 continue;
             }
@@ -2550,13 +2558,14 @@ fn poll_for_revisions(
     auth: &Arc<Mutex<Option<String>>>,
 ) {
     loop {
-        if session.refresh_if_needed(now_unix()).is_ok() {
-            match client.fetch(session, now_unix()) {
+        match session.refresh_if_needed(now_unix()) {
+            Ok(()) => match client.fetch(session, now_unix()) {
                 Ok(config) => {
                     handle_revision_notice(active_revision, harness, config.revision, seen, pending)
                 }
                 Err(error) => record_auth_notice(&error, auth),
-            }
+            },
+            Err(error) => record_auth_notice(&error, auth),
         }
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
