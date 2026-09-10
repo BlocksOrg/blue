@@ -128,15 +128,6 @@ test.describe.serial("Blue deployment journey", () => {
     const original = await originalResponse.json();
     const gatewayConfig = YAML.parse(original.managed_yaml);
     gatewayConfig.gateway = { type: "litellm" };
-    // The control API rejects gateway mode unless the document also advertises
-    // the capability (see validate_complete_governance). Same union the
-    // gateway-m2m and dashboard-filtering specs do before enabling gateway.
-    gatewayConfig.required_capabilities = Array.from(
-      new Set([
-        ...(gatewayConfig.required_capabilities ?? []),
-        "gateway_inference_jwt",
-      ]),
-    );
     const gatewayResponse = await page.request.put(`${control}/admin/governance-config`, {
       data: {
         base_revision: original.revision,
