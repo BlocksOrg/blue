@@ -82,17 +82,9 @@
     },
     {
       "scanner": "gitleaks",
-      "identifier": "3d99b9e2bb91bf50c5ad3c11dbc26cc45c7d1951:tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem:private-key:1",
+      "identifier": "a9378bdabe06b4eb81d73ccc065cfe2f431e15f1:tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem:private-key:1",
       "owner": "platform-security",
-      "rationale": "This is the first historical fingerprint of a deliberately public deterministic JWT signing key used only by the hermetic e2e-slim fixture.",
-      "compensating_control": "The key is confined to test fixtures, is not referenced by deployment manifests, and production startup requires externally supplied secrets.",
-      "expires": "2026-12-05"
-    },
-    {
-      "scanner": "gitleaks",
-      "identifier": "b30e2bb8801af65024733b25914ccba2b38549f5:tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem:private-key:1",
-      "owner": "platform-security",
-      "rationale": "This is the second historical fingerprint of the same deliberately public deterministic JWT signing key used only by the hermetic e2e-slim fixture.",
+      "rationale": "This is the fingerprint of a deliberately public deterministic JWT signing key used only by the hermetic e2e-slim fixture.",
       "compensating_control": "The key is confined to test fixtures, is not referenced by deployment manifests, and production startup requires externally supplied secrets.",
       "expires": "2026-12-05"
     }
