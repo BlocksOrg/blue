@@ -1,67 +1,67 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select gateway_email,source_key_hash,source_key_alias,proxy_key_alias,provisioner_config_hash,provisioner_metadata,credential_expires_at,last_reconciled_at,provisioning_error,pseudotoken_ciphertext,pseudotoken_nonce,pseudotoken_wrapped_key,credential_ciphertext,credential_nonce,credential_wrapped_key,encryption_key_id,credential_version,credential_state,invalidated_at,invalidation_reason,recovery_attempts,next_recovery_at,recovery_lease_until,last_validated_at from public.gateway_key_selections where user_id=$1",
+  "query": "select s.user_id,u.organization_id,least(ga.source_expires_at,ba.\"expiresAt\") as \"gateway_session_expires_at!\",s.gateway_email,s.source_key_hash,s.source_key_alias,s.proxy_key_alias,s.provisioner_config_hash,s.provisioner_metadata,s.credential_expires_at,s.last_reconciled_at,s.provisioning_error,s.credential_ciphertext,s.credential_nonce,s.credential_wrapped_key,s.encryption_key_id,s.credential_version,s.credential_state,s.invalidated_at,s.invalidation_reason,s.recovery_attempts,s.next_recovery_at,s.recovery_lease_until,s.last_validated_at from public.gateway_key_selections s join users u on u.id=s.user_id join public.gateway_auth_sessions ga on ga.user_id=s.user_id join auth.\"session\" ba on ba.id=ga.oauth_session_id and ba.\"userId\"=u.subject where s.user_id=$1 and ga.oauth_session_id=$2 and ga.revoked_at is null and ga.source_expires_at>now() and ba.\"expiresAt\">now() and u.active=true",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "gateway_session_expires_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
         "name": "gateway_email",
         "type_info": "Text"
       },
       {
-        "ordinal": 1,
+        "ordinal": 4,
         "name": "source_key_hash",
         "type_info": "Text"
       },
       {
-        "ordinal": 2,
+        "ordinal": 5,
         "name": "source_key_alias",
         "type_info": "Text"
       },
       {
-        "ordinal": 3,
+        "ordinal": 6,
         "name": "proxy_key_alias",
         "type_info": "Text"
       },
       {
-        "ordinal": 4,
+        "ordinal": 7,
         "name": "provisioner_config_hash",
         "type_info": "Text"
       },
       {
-        "ordinal": 5,
+        "ordinal": 8,
         "name": "provisioner_metadata",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 6,
+        "ordinal": 9,
         "name": "credential_expires_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 10,
         "name": "last_reconciled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 11,
         "name": "provisioning_error",
         "type_info": "Text"
-      },
-      {
-        "ordinal": 9,
-        "name": "pseudotoken_ciphertext",
-        "type_info": "Bytea"
-      },
-      {
-        "ordinal": 10,
-        "name": "pseudotoken_nonce",
-        "type_info": "Bytea"
-      },
-      {
-        "ordinal": 11,
-        "name": "pseudotoken_wrapped_key",
-        "type_info": "Bytea"
       },
       {
         "ordinal": 12,
@@ -126,19 +126,20 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
       false,
+      false,
+      null,
+      false,
       true,
       true,
       true,
       true,
       false,
-      true,
-      true,
-      true,
       true,
       true,
       true,
@@ -156,5 +157,5 @@
       true
     ]
   },
-  "hash": "74522b732aa19114f929117fbfebc22e72456a9e1cc3dd50fd6744e01cd9207c"
+  "hash": "82fe91eca6daff1b2370d7684a5ebe0af8dabd1d84c0d18a95a183baffa8b89f"
 }

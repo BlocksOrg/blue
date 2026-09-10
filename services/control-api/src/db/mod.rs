@@ -179,7 +179,10 @@ mod tests {
     use time::OffsetDateTime;
     use uuid::Uuid;
 
-    use crate::{managed_gateway_row, resolved_gateway_credential_row};
+    use crate::secrets::{Envelope, SecretProtector};
+    use crate::{
+        managed_gateway_row, migrate_legacy_gateway_credentials, resolved_gateway_credential_row,
+    };
 
     #[sqlx::test(migrations = false)]
     async fn serving_schema_verification_accepts_the_exact_embedded_set(pool: PgPool) {
@@ -323,6 +326,7 @@ mod tests {
         let user_id = Uuid::new_v4();
         let credential_version = Uuid::new_v4();
         let expires_at = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        let oauth_session_id = "gateway-oauth-session";
         sqlx::query!(
             "insert into organizations(id,slug,name) values($1,$2,$3)",
             org_id,
@@ -343,10 +347,28 @@ mod tests {
         .await
         .unwrap();
         sqlx::query!(
-            "insert into gateway_key_selections(user_id,gateway_email,pseudotoken_hash,credential_ciphertext,credential_nonce,credential_wrapped_key,encryption_key_id,credential_version,credential_expires_at,provisioner_metadata) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            "insert into auth.\"user\"(id,name,email,\"emailVerified\",\"updatedAt\") values($1,$2,$3,true,now())",
+            "gateway-subject",
+            "Gateway User",
+            "gateway@example.com"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into auth.\"session\"(id,\"expiresAt\",token,\"updatedAt\",\"userId\") values($1,$2,$3,now(),$4)",
+            oauth_session_id,
+            expires_at,
+            "gateway-session-token",
+            "gateway-subject"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into gateway_key_selections(user_id,gateway_email,credential_ciphertext,credential_nonce,credential_wrapped_key,encryption_key_id,credential_version,credential_expires_at,provisioner_metadata) values($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             user_id,
             "gateway@example.com",
-            "pseudotoken-digest",
             &[1_u8, 2, 3][..],
             &[4_u8, 5][..],
             &[6_u8, 7][..],
@@ -354,6 +376,15 @@ mod tests {
             credential_version,
             expires_at,
             serde_json::json!({"scope": "e2e"})
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into gateway_auth_sessions(oauth_session_id,user_id,source_expires_at) values($1,$2,$3)",
+            oauth_session_id,
+            user_id,
+            expires_at
         )
         .execute(&pool)
         .await
@@ -368,7 +399,7 @@ mod tests {
             Some(&[1, 2, 3][..])
         );
 
-        let resolved = resolved_gateway_credential_row(&pool, "pseudotoken-digest")
+        let resolved = resolved_gateway_credential_row(&pool, user_id, oauth_session_id)
             .await
             .unwrap()
             .unwrap();
@@ -379,6 +410,25 @@ mod tests {
         assert_eq!(credential.credential_version, credential_version);
         assert_eq!(credential.provisioner_metadata["scope"], "e2e");
 
+        sqlx::query!("delete from auth.\"session\" where id=$1", oauth_session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let revoked: bool = sqlx::query_scalar!(
+            "select revoked_at is not null as \"revoked!\" from gateway_auth_sessions where oauth_session_id=$1",
+            oauth_session_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(revoked);
+        assert!(
+            resolved_gateway_credential_row(&pool, user_id, oauth_session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
         sqlx::query!(
             "update users set active=false,status='suspended' where id=$1",
             user_id
@@ -386,9 +436,142 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert!(resolved_gateway_credential_row(&pool, "pseudotoken-digest")
+        assert!(
+            resolved_gateway_credential_row(&pool, user_id, oauth_session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn gateway_session_renewal_is_rolling_but_cannot_revive_revocation(pool: PgPool) {
+        super::migrate_pool(&pool).await.unwrap();
+        let org_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let subject = "rolling-gateway-subject";
+        let session_id = "rolling-gateway-session";
+        sqlx::query!(
+            "insert into organizations(id,slug,name) values($1,$2,$3)",
+            org_id,
+            "rolling-gateway",
+            "Rolling Gateway"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into users(id,organization_id,subject,email,role) values($1,$2,$3,$4,'member')",
+            user_id,
+            org_id,
+            subject,
+            "rolling@example.com"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into auth.\"user\"(id,name,email,\"emailVerified\",\"updatedAt\") values($1,$2,$3,true,now())",
+            subject,
+            "Rolling User",
+            "rolling@example.com"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into auth.\"session\"(id,\"expiresAt\",token,\"updatedAt\",\"userId\") values($1,now()+interval '5 minutes',$2,now(),$3)",
+            session_id,
+            "rolling-session-token",
+            subject
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let renewed =
+            crate::gateway_auth::renew_gateway_auth_session(&pool, session_id, subject, user_id)
+                .await
+                .unwrap()
+                .unwrap();
+        let remaining = renewed - OffsetDateTime::now_utc();
+        assert!(remaining > time::Duration::hours(11));
+        assert!(remaining <= time::Duration::hours(12));
+
+        sqlx::query!(
+            "update gateway_auth_sessions set revoked_at=now() where oauth_session_id=$1",
+            session_id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(crate::gateway_auth::renew_gateway_auth_session(
+            &pool, session_id, subject, user_id
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn legacy_plaintext_gateway_credential_is_encrypted_in_place(pool: PgPool) {
+        super::migrate_pool(&pool).await.unwrap();
+        let org_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        sqlx::query!(
+            "insert into organizations(id,slug,name) values($1,$2,$3)",
+            org_id,
+            "legacy-gateway",
+            "Legacy Gateway"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into users(id,organization_id,subject,email,role) values($1,$2,$3,$4,'member')",
+            user_id,
+            org_id,
+            "legacy-gateway-subject",
+            "legacy-gateway@example.com"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into gateway_key_selections(user_id,gateway_email,proxy_virtual_key,credential_state) values($1,$2,$3,'ready')",
+            user_id,
+            "legacy-gateway@example.com",
+            "legacy-upstream-secret"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let protector =
+            SecretProtector::environment("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                .await
+                .unwrap();
+
+        migrate_legacy_gateway_credentials(&pool, &protector)
             .await
-            .unwrap()
-            .is_none());
+            .unwrap();
+
+        let row = sqlx::query!(
+            "select proxy_virtual_key,credential_ciphertext,credential_nonce,credential_wrapped_key,encryption_key_id from gateway_key_selections where user_id=$1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(row.proxy_virtual_key.is_none());
+        let plaintext = protector
+            .decrypt(&Envelope {
+                ciphertext: row.credential_ciphertext.unwrap(),
+                nonce: row.credential_nonce.unwrap(),
+                wrapped_key: row.credential_wrapped_key.unwrap(),
+                key_id: row.encryption_key_id.unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(plaintext.as_slice(), b"legacy-upstream-secret");
     }
 }

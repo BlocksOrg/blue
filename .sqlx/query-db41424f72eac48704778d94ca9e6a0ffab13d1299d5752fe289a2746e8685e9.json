@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into auth.\"user\"(id,name,email,\"emailVerified\",\"updatedAt\") values($1,$2,$3,true,now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "db41424f72eac48704778d94ca9e6a0ffab13d1299d5752fe289a2746e8685e9"
+}

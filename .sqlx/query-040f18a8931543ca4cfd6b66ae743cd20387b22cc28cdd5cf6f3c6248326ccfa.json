@@ -1,156 +1,126 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select s.user_id,u.organization_id,s.gateway_email,s.source_key_hash,s.source_key_alias,s.proxy_key_alias,s.provisioner_config_hash,s.provisioner_metadata,s.credential_expires_at,s.last_reconciled_at,s.provisioning_error,s.pseudotoken_ciphertext,s.pseudotoken_nonce,s.pseudotoken_wrapped_key,s.credential_ciphertext,s.credential_nonce,s.credential_wrapped_key,s.encryption_key_id,s.credential_version,s.credential_state,s.invalidated_at,s.invalidation_reason,s.recovery_attempts,s.next_recovery_at,s.recovery_lease_until,s.last_validated_at from public.gateway_key_selections s join users u on u.id=s.user_id where s.pseudotoken_hash=$1 and u.active=true",
+  "query": "select gateway_email,source_key_hash,source_key_alias,proxy_key_alias,provisioner_config_hash,provisioner_metadata,credential_expires_at,last_reconciled_at,provisioning_error,credential_ciphertext,credential_nonce,credential_wrapped_key,encryption_key_id,credential_version,credential_state,invalidated_at,invalidation_reason,recovery_attempts,next_recovery_at,recovery_lease_until,last_validated_at from public.gateway_key_selections where user_id=$1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "user_id",
-        "type_info": "Uuid"
-      },
-      {
-        "ordinal": 1,
-        "name": "organization_id",
-        "type_info": "Uuid"
-      },
-      {
-        "ordinal": 2,
         "name": "gateway_email",
         "type_info": "Text"
       },
       {
-        "ordinal": 3,
+        "ordinal": 1,
         "name": "source_key_hash",
         "type_info": "Text"
       },
       {
-        "ordinal": 4,
+        "ordinal": 2,
         "name": "source_key_alias",
         "type_info": "Text"
       },
       {
-        "ordinal": 5,
+        "ordinal": 3,
         "name": "proxy_key_alias",
         "type_info": "Text"
       },
       {
-        "ordinal": 6,
+        "ordinal": 4,
         "name": "provisioner_config_hash",
         "type_info": "Text"
       },
       {
-        "ordinal": 7,
+        "ordinal": 5,
         "name": "provisioner_metadata",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 8,
+        "ordinal": 6,
         "name": "credential_expires_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 7,
         "name": "last_reconciled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 8,
         "name": "provisioning_error",
         "type_info": "Text"
       },
       {
-        "ordinal": 11,
-        "name": "pseudotoken_ciphertext",
-        "type_info": "Bytea"
-      },
-      {
-        "ordinal": 12,
-        "name": "pseudotoken_nonce",
-        "type_info": "Bytea"
-      },
-      {
-        "ordinal": 13,
-        "name": "pseudotoken_wrapped_key",
-        "type_info": "Bytea"
-      },
-      {
-        "ordinal": 14,
+        "ordinal": 9,
         "name": "credential_ciphertext",
         "type_info": "Bytea"
       },
       {
-        "ordinal": 15,
+        "ordinal": 10,
         "name": "credential_nonce",
         "type_info": "Bytea"
       },
       {
-        "ordinal": 16,
+        "ordinal": 11,
         "name": "credential_wrapped_key",
         "type_info": "Bytea"
       },
       {
-        "ordinal": 17,
+        "ordinal": 12,
         "name": "encryption_key_id",
         "type_info": "Text"
       },
       {
-        "ordinal": 18,
+        "ordinal": 13,
         "name": "credential_version",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 19,
+        "ordinal": 14,
         "name": "credential_state",
         "type_info": "Text"
       },
       {
-        "ordinal": 20,
+        "ordinal": 15,
         "name": "invalidated_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 21,
+        "ordinal": 16,
         "name": "invalidation_reason",
         "type_info": "Text"
       },
       {
-        "ordinal": 22,
+        "ordinal": 17,
         "name": "recovery_attempts",
         "type_info": "Int4"
       },
       {
-        "ordinal": 23,
+        "ordinal": 18,
         "name": "next_recovery_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 24,
+        "ordinal": 19,
         "name": "recovery_lease_until",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 25,
+        "ordinal": 20,
         "name": "last_validated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
       false,
-      false,
-      false,
       true,
       true,
       true,
       true,
       false,
-      true,
-      true,
-      true,
       true,
       true,
       true,
@@ -168,5 +138,5 @@
       true
     ]
   },
-  "hash": "03680c5f5519fdc4a3c9a77599464353daf398d2fa132825e90b95bf746aafe4"
+  "hash": "040f18a8931543ca4cfd6b66ae743cd20387b22cc28cdd5cf6f3c6248326ccfa"
 }

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into public.gateway_key_selections(user_id,gateway_user_id,gateway_email,source_key_hash,source_key_alias,source_models,proxy_key_alias,credential_ciphertext,credential_nonce,credential_wrapped_key,encryption_key_id,provisioner_config_hash,provisioner_metadata,credential_expires_at,last_reconciled_at,provisioning_error,credential_state) values($1,$2,$3,$4,$5,'[]'::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,now(),null,'ready') on conflict(user_id) do update set gateway_user_id=$2,gateway_email=$3,source_key_hash=$4,source_key_alias=$5,proxy_key_alias=$5,credential_ciphertext=$6,credential_nonce=$7,credential_wrapped_key=$8,encryption_key_id=$9,provisioner_config_hash=$10,provisioner_metadata=$11,credential_expires_at=$12,credential_version=gen_random_uuid(),last_reconciled_at=now(),last_validated_at=now(),provisioning_error=null,credential_state='ready',invalidated_at=null,invalidation_reason=null,recovery_attempts=0,next_recovery_at=null,recovery_lease_until=null,proxy_virtual_key=null,updated_at=now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Bytea",
+        "Bytea",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f8c8a7f8745f3fbe419312ee74370c9d089e3685bde61f4934e0cdc1f82a4a0"
+}

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into public.gateway_auth_sessions(oauth_session_id,user_id,source_expires_at) values($1,$2,$3) on conflict(oauth_session_id) do update set source_expires_at=excluded.source_expires_at,updated_at=now() where gateway_auth_sessions.user_id=excluded.user_id and gateway_auth_sessions.revoked_at is null returning source_expires_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a5d30f7928ea598036477ce3c57b952eec949b5a33062e233fe9fd93c78e9bd2"
+}

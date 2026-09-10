@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "delete from public.gateway_auth_sessions where source_expires_at < now() - interval '24 hours' or revoked_at < now() - interval '24 hours'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8f5b3b1a81cbffdbc319d237cc4e5ef22e3e042046097570f6b53d094ae4a97f"
+}
