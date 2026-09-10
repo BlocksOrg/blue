@@ -34,6 +34,14 @@ pub struct Session {
     pub token_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// The RFC 8707 resource indicator the grant was issued against, recorded
+    /// **verbatim** as it was sent. The authorization server matches the
+    /// identifier, not a normalized form of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// The scope the server actually *granted*, not the one we asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl Session {
@@ -48,6 +56,8 @@ impl Session {
             refresh_token: None,
             token_endpoint: None,
             client_id: None,
+            resource: None,
+            scope: None,
         }
     }
 
@@ -79,31 +89,60 @@ impl Session {
         }
     }
 
-    pub fn refresh_if_needed(&mut self, now: i64) -> Result<(), GhError> {
-        if self
-            .expires_at
-            .map(|expires| expires > now + 30)
-            .unwrap_or(true)
-        {
-            return Ok(());
-        }
+    /// The refresh-grant form body. Pure, so the one thing that is easy to get
+    /// wrong — which parameters actually go on the wire — is testable without
+    /// a socket or a session file.
+    fn refresh_form(&self) -> Result<Vec<(&str, &str)>, GhError> {
         let refresh_token = self
             .refresh_token
             .as_deref()
             .ok_or_else(|| GhError::unauthorized("login expired — run `blue login` again"))?;
-        let token_endpoint = self.token_endpoint.as_deref().ok_or_else(|| {
-            GhError::unauthorized("login cannot be refreshed — run `blue login` again")
-        })?;
         let client_id = self.client_id.as_deref().ok_or_else(|| {
             GhError::unauthorized("login cannot be refreshed — run `blue login` again")
         })?;
-        let response = reqwest::blocking::Client::new()
-            .post(token_endpoint)
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token),
-                ("client_id", client_id),
-            ])
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+        ];
+        // Without the resource indicator the server issues a token for its own
+        // default audience, and `enforcePerClientResources` then rejects it at
+        // the Control API. Every other grant in this repo sends it.
+        if let Some(resource) = non_empty(self.resource.as_deref()) {
+            form.push(("resource", resource));
+        }
+        // RFC 6749 §6: omitting `scope` means "as originally granted". Only a
+        // scope the server itself handed back is safe to replay — replaying a
+        // requested list the server narrowed yields `invalid_scope`.
+        if let Some(scope) = non_empty(self.scope.as_deref()) {
+            form.push(("scope", scope));
+        }
+        Ok(form)
+    }
+
+    /// Adopt the refreshed grant. Pure; the caller decides when to persist.
+    fn apply_token_response(&mut self, tokens: TokenResponse, now: i64) {
+        self.token = tokens.access_token;
+        self.expires_at = Some(now + tokens.expires_in.unwrap_or(900));
+        if tokens.refresh_token.is_some() {
+            self.refresh_token = tokens.refresh_token;
+        }
+        if let Some(scope) = tokens.scope.filter(|scope| !scope.trim().is_empty()) {
+            self.scope = Some(scope);
+        }
+    }
+
+    /// Exchange the refresh token unconditionally. Does not touch the disk.
+    pub(crate) fn refresh_now(&mut self, now: i64) -> Result<(), GhError> {
+        let token_endpoint = self.token_endpoint.clone().ok_or_else(|| {
+            GhError::unauthorized("login cannot be refreshed — run `blue login` again")
+        })?;
+        let form = self.refresh_form()?;
+        // Every `blue` invocation reaches this through `session_for`. Without a
+        // timeout a hung identity provider hangs the CLI forever.
+        let response = oauth_client()?
+            .post(&token_endpoint)
+            .form(&form)
             .send()
             .map_err(|error| GhError::service(format!("refresh request failed: {error}")))?;
         if !response.status().is_success() {
@@ -114,12 +153,45 @@ impl Session {
         let tokens: TokenResponse = response
             .json()
             .map_err(|error| GhError::service(format!("invalid refresh response: {error}")))?;
-        self.token = tokens.access_token;
-        self.expires_at = Some(now + tokens.expires_in.unwrap_or(900));
-        if tokens.refresh_token.is_some() {
-            self.refresh_token = tokens.refresh_token;
+        self.apply_token_response(tokens, now);
+        Ok(())
+    }
+
+    pub fn refresh_if_needed(&mut self, now: i64) -> Result<(), GhError> {
+        if self
+            .expires_at
+            .map(|expires| expires > now + 30)
+            .unwrap_or(true)
+        {
+            return Ok(());
         }
+        self.refresh_now(now)?;
         self.save()
+    }
+
+    /// Record the resource indicator and scope a pre-0.1 `session.json`
+    /// predates, so its next refresh carries them. Never overwrites what the
+    /// grant was actually issued against.
+    ///
+    /// The caller supplies them because only it knows the active deployment;
+    /// reading `blue.toml` in here would make refreshing depend on ambient
+    /// filesystem state and could send a resource this grant never named.
+    pub fn adopt_refresh_context(&mut self, resource: &str, scopes: &[String]) {
+        if self.resource.is_none() {
+            if let Some(resource) = non_empty(Some(resource)) {
+                self.resource = Some(resource.to_owned());
+            }
+        }
+        if self.scope.is_none() {
+            let scopes = if scopes.is_empty() {
+                default_cli_scopes()
+            } else {
+                scopes.to_vec()
+            };
+            if !scopes.is_empty() {
+                self.scope = Some(scopes.join(" "));
+            }
+        }
     }
 
     pub fn revoke(&self) -> Result<(), GhError> {
@@ -187,6 +259,41 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
+    /// What the server granted. Absent on servers that grant exactly what was
+    /// asked for.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+/// The scopes the reference deployment's CLI client needs. `discovery.rs`
+/// explicitly permits an empty `scopes` array, so the device flow and the
+/// legacy-session adopter have to agree on the same list.
+pub fn default_cli_scopes() -> Vec<String> {
+    [
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
+        "governance:read",
+        "session:write",
+        "client-status:write",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// The blocking HTTP client every OAuth exchange uses. The timeout is the
+/// point: an unbounded client here hangs `blue` itself.
+fn oauth_client() -> Result<reqwest::blocking::Client, GhError> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| GhError::service(format!("building OAuth client: {error}")))
 }
 
 #[derive(Deserialize)]
@@ -238,25 +345,11 @@ pub fn device_login(
         .join("oauth2/token")
         .map_err(|error| GhError::config(format!("invalid OAuth token endpoint: {error}")))?;
     let scopes = if configured_scopes.is_empty() {
-        vec![
-            "openid",
-            "profile",
-            "email",
-            "offline_access",
-            "governance:read",
-            "session:write",
-            "client-status:write",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>()
+        default_cli_scopes()
     } else {
         configured_scopes.to_vec()
     };
-    let http = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|error| GhError::service(format!("building OAuth client: {error}")))?;
+    let http = oauth_client()?;
     let response = http
         .post(device_endpoint)
         .form(&[
@@ -300,6 +393,14 @@ pub fn device_login(
             let tokens: TokenResponse = response
                 .json()
                 .map_err(|error| GhError::service(format!("invalid token response: {error}")))?;
+            // The granted scope, not the requested one, and the resource
+            // string exactly as it was sent — the server matches the
+            // identifier it was given, not a normalized form of it.
+            let granted_scope = tokens
+                .scope
+                .clone()
+                .filter(|scope| !scope.trim().is_empty())
+                .unwrap_or_else(|| scopes.join(" "));
             return Ok(Session {
                 token: tokens.access_token,
                 sub: None,
@@ -310,6 +411,8 @@ pub fn device_login(
                 refresh_token: tokens.refresh_token,
                 token_endpoint: Some(token_endpoint.to_string()),
                 client_id: Some(client_id.to_owned()),
+                resource: non_empty(Some(resource)).map(str::to_owned),
+                scope: Some(granted_scope),
             });
         }
         let status = response.status();
@@ -418,6 +521,228 @@ pub fn resolve_secret(reference: &str) -> Result<String, GhError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refreshable() -> Session {
+        Session {
+            token: "old-access".into(),
+            sub: None,
+            email: None,
+            org_id: None,
+            groups: Vec::new(),
+            expires_at: Some(0),
+            refresh_token: Some("refresh".into()),
+            token_endpoint: Some("http://127.0.0.1:1/oauth2/token".into()),
+            client_id: Some("blue-cli".into()),
+            resource: Some("https://control.example.com".into()),
+            scope: Some("openid governance:read".into()),
+        }
+    }
+
+    /// The single test that would have caught the omission: every other grant
+    /// in the repo sends `resource`, the refresh grant silently did not, and
+    /// no end-to-end test covered `refresh_if_needed` at all.
+    #[test]
+    fn refresh_form_carries_the_resource_indicator() {
+        let session = refreshable();
+        let form = session.refresh_form().unwrap();
+        assert!(
+            form.contains(&("resource", "https://control.example.com")),
+            "{form:?}"
+        );
+        assert!(
+            form.contains(&("scope", "openid governance:read")),
+            "{form:?}"
+        );
+        assert!(form.contains(&("grant_type", "refresh_token")), "{form:?}");
+    }
+
+    #[test]
+    fn refresh_form_omits_what_a_legacy_session_never_recorded() {
+        let mut session = refreshable();
+        session.resource = None;
+        session.scope = Some("   ".into());
+        let form = session.refresh_form().unwrap();
+        assert!(!form.iter().any(|(key, _)| *key == "resource"), "{form:?}");
+        // Sending `scope=` empty is not the same as omitting it.
+        assert!(!form.iter().any(|(key, _)| *key == "scope"), "{form:?}");
+    }
+
+    #[test]
+    fn adopt_refresh_context_never_overwrites_the_issued_grant() {
+        let mut session = refreshable();
+        session.adopt_refresh_context("https://other.example.com", &["openid".to_owned()]);
+        assert_eq!(
+            session.resource.as_deref(),
+            Some("https://control.example.com")
+        );
+        assert_eq!(session.scope.as_deref(), Some("openid governance:read"));
+    }
+
+    #[test]
+    fn adopt_refresh_context_backfills_a_pre_release_session() {
+        let mut session = refreshable();
+        session.resource = None;
+        session.scope = None;
+        session.adopt_refresh_context("https://control.example.com", &[]);
+        assert_eq!(
+            session.resource.as_deref(),
+            Some("https://control.example.com")
+        );
+        assert_eq!(
+            session.scope.as_deref(),
+            Some(default_cli_scopes().join(" ").as_str())
+        );
+
+        // A file-source deployment has no service URL to adopt.
+        let mut local = Session::bearer("t");
+        local.adopt_refresh_context("", &[]);
+        assert_eq!(local.resource, None);
+    }
+
+    #[test]
+    fn the_granted_scope_wins_over_the_requested_one() {
+        let mut session = refreshable();
+        session.apply_token_response(
+            TokenResponse {
+                access_token: "new-access".into(),
+                refresh_token: Some("rotated".into()),
+                expires_in: Some(900),
+                scope: Some("openid".into()),
+            },
+            1_000,
+        );
+        assert_eq!(session.token, "new-access");
+        assert_eq!(session.refresh_token.as_deref(), Some("rotated"));
+        assert_eq!(session.expires_at, Some(1_900));
+        assert_eq!(session.scope.as_deref(), Some("openid"));
+    }
+
+    #[test]
+    fn a_response_without_a_scope_keeps_the_one_already_granted() {
+        let mut session = refreshable();
+        session.apply_token_response(
+            TokenResponse {
+                access_token: "new-access".into(),
+                refresh_token: None,
+                expires_in: None,
+                scope: None,
+            },
+            1_000,
+        );
+        assert_eq!(session.scope.as_deref(), Some("openid governance:read"));
+        // A response that rotates nothing must not clear the refresh token.
+        assert_eq!(session.refresh_token.as_deref(), Some("refresh"));
+    }
+
+    /// Read a full HTTP request off `stream`: headers, then exactly
+    /// `Content-Length` more bytes. A single `read` returns only the headers
+    /// for a POST, which would deadlock a body assertion.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut raw = Vec::new();
+        let mut byte = [0u8; 1];
+        while !raw.ends_with(b"\r\n\r\n") {
+            if stream.read(&mut byte).unwrap() == 0 {
+                break;
+            }
+            raw.push(byte[0]);
+        }
+        let headers = String::from_utf8_lossy(&raw).into_owned();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+            })
+            .map(|value| value.trim().parse().unwrap())
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        stream.read_exact(&mut body).unwrap();
+        format!("{headers}{}", String::from_utf8_lossy(&body))
+    }
+
+    // `reqwest::blocking` panics inside a tokio runtime, so these are plain
+    // `#[test]`s against a hand-rolled listener — the pattern `discovery.rs`
+    // already uses, and the reason no http-mock dev-dependency exists.
+    #[test]
+    fn refresh_now_sends_the_resource_and_adopts_the_new_token() {
+        use std::io::Write;
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            // Some hermetic test runners prohibit even loopback sockets.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("binding mock token endpoint: {error}"),
+        };
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let body = r#"{"access_token":"new-access","expires_in":900,"scope":"openid"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            request
+        });
+
+        let mut session = refreshable();
+        session.resource = Some(format!("http://{address}"));
+        session.token_endpoint = Some(format!("http://{address}/oauth2/token"));
+        session.refresh_now(1_000).unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /oauth2/token "), "{request}");
+        assert!(
+            request.contains(&format!(
+                "resource={}",
+                urlencoding_of(&format!("http://{address}"))
+            )),
+            "{request}"
+        );
+        assert_eq!(session.token, "new-access");
+        assert_eq!(session.expires_at, Some(1_900));
+        assert_eq!(session.scope.as_deref(), Some("openid"));
+    }
+
+    #[test]
+    fn refresh_if_needed_makes_no_request_while_the_token_is_fresh() {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("binding mock token endpoint: {error}"),
+        };
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let mut session = refreshable();
+        session.token_endpoint = Some(format!("http://{address}/oauth2/token"));
+        session.expires_at = Some(10_000);
+        // No `save()` either — a fresh token short-circuits before any IO.
+        session.refresh_if_needed(1_000).unwrap();
+
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "a fresh token must not reach the token endpoint"
+        );
+    }
+
+    /// `application/x-www-form-urlencoded` escaping of the bytes reqwest emits
+    /// for a URL value, so the assertion above compares like with like.
+    fn urlencoding_of(value: &str) -> String {
+        value
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                    (byte as char).to_string()
+                }
+                b' ' => "+".to_string(),
+                _ => format!("%{byte:02X}"),
+            })
+            .collect()
+    }
 
     #[test]
     fn complete_verification_url_is_preferred() {

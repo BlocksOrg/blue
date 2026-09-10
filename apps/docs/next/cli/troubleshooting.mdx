@@ -59,10 +59,11 @@ Set `HARNESS_LOG=debug` for more client diagnostics.
 ## Reset authentication
 
 ```bash
-blue logout
-blue login
+blue login --force
 ```
 
-This removes stale local tokens and starts a new device authorization flow. It does not delete configuration overlays or captured sessions.
+This revokes the stored session and starts a new device authorization flow. It does not delete configuration overlays or captured sessions. `blue logout && blue login` does the same thing in two steps.
+
+`blue login` on its own already asks the service whether the stored session still works, so it re-authorizes without `--force` whenever the service rejects it. Use `--force` to switch accounts, or to replace a session that is still valid.
 
 To disconnect the deployment itself, use `blue reset`. Reset archives non-secret tenant state, removes active Blue-owned overlays, and prompts for a Control API URL the next time you run bare `blue` or an interactive `blue <agent>` command. See [Reset a deployment](/next/cli/commands#reset-a-deployment).

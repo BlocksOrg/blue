@@ -34,6 +34,7 @@ fn load_client() -> Result<(BlueToml, ServiceClient)> {
 /// local `file` config source (dev has no auth). HTTP sources require login.
 fn session_for(cfg: &BlueToml) -> Result<Session> {
     if let Some(mut s) = Session::load()? {
+        s.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
         match s.refresh_if_needed(now_unix()) {
             Ok(()) => return Ok(s),
             Err(error) if cfg.has_http_service() => return Err(error.into()),
@@ -44,6 +45,23 @@ fn session_for(cfg: &BlueToml) -> Result<Session> {
         bail!("not logged in — run `blue login` first");
     }
     Ok(Session::bearer(""))
+}
+
+/// The scopes `blue.toml` configures for the device flow. A `token`-mode
+/// deployment has none; `adopt_refresh_context` falls back to the defaults
+/// `device_login` would have requested.
+fn identity_scopes(cfg: &BlueToml) -> &[String] {
+    match &cfg.identity {
+        IdentityConfig::Oidc { scopes, .. } => scopes,
+        _ => &[],
+    }
+}
+
+/// Whether this deployment has a device flow at all. In `token` mode a
+/// "re-login" resolves the same static token and changes nothing, so offering
+/// one turns a dead session into a quieter dead session.
+fn is_oidc(cfg: &BlueToml) -> bool {
+    matches!(cfg.identity, IdentityConfig::Oidc { .. })
 }
 
 fn write_options(cfg: &BlueToml) -> WriteOptions {
@@ -296,7 +314,7 @@ pub fn setup() -> Result<()> {
         Session::remove()?;
     }
     let _cfg = discovered;
-    login()?;
+    login(false)?;
     cliclack::outro("Setup complete. Run `blue` anytime to start your agent.")?;
     Ok(())
 }
@@ -309,6 +327,7 @@ fn detach_tenant(cfg: &BlueToml) -> Result<()> {
     clear_active_tenant_state().context("clearing active tenant state")?;
     Session::remove()?;
     if let Some(session) = session.as_mut() {
+        session.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
         let _ = session.refresh_if_needed(now_unix());
         if let Err(error) = session.revoke_gateway_session(&cfg.service.url) {
             tracing::warn!(%error, "gateway session revocation failed during detach");
@@ -356,10 +375,7 @@ fn ensure_session_for_start(cfg: &BlueToml) -> Result<Session> {
             tracing::info!(%error, "login is missing or expired; starting device authorization");
             Session::remove()?;
             let session = gh_service::login(cfg).context("login")?;
-            match session.email.as_deref() {
-                Some(email) => println!("Logged in as {email}."),
-                None => println!("Logged in."),
-            }
+            println!("{}", describe_session(&session, "Logged in"));
             Ok(session)
         }
         Err(error) => Err(error),
@@ -401,19 +417,54 @@ struct PreparedLaunch {
     inventory: HarnessInventory,
 }
 
+/// Whether a session the *service* rejected can be repaired here and now.
+/// `ensure_session_for_start` only recovers from a failed local refresh; a
+/// rejection arrives with the refresh working perfectly.
+fn can_reauthenticate(cfg: &BlueToml) -> bool {
+    cfg.has_http_service() && is_oidc(cfg) && interactive_terminal()
+}
+
 fn prepare_launch(
     cfg: BlueToml,
     client: ServiceClient,
-    session: Session,
+    mut session: Session,
 ) -> Result<PreparedLaunch> {
     let applied = load_applied_state()?;
     // Gateway ensure can invalidate or replace the credential used while
     // personalizing governance config. Keep these operations ordered so the
     // config request never observes an intermediate lifecycle state.
     ensure_gateway_access(&cfg, &session)?;
-    let config = client
-        .fetch_or_cached(&session, now_unix())
-        .context("fetching governance config")?;
+    let config = match client.fetch_or_cached(&session, now_unix()) {
+        Ok(config) => config,
+        Err(error) => {
+            // The recovery `ensure_session_for_start` performs, moved to where
+            // the error actually surfaces. Without it bare `blue` loops: the
+            // OAuth refresh succeeds, so `session_for` returns `Ok` and the
+            // rejection lands here, past the recovery point.
+            //
+            // `fetch_or_cached` reports `Unauthorized` for two different
+            // things, though: a session the service rejected, and a cached
+            // gateway config that cannot carry an inference token. The second
+            // is an outage. Confirm against the live source — which answers
+            // `Service` when it is unreachable — before opening a browser.
+            let rejected = matches!(error, gh_common::GhError::Unauthorized(_))
+                && can_reauthenticate(&cfg)
+                && matches!(
+                    client.fetch(&session, now_unix()),
+                    Err(gh_common::GhError::Unauthorized(_))
+                );
+            if !rejected {
+                return Err(anyhow!(error).context("fetching governance config"));
+            }
+            println!("{error}");
+            session = gh_service::login(&cfg).context("login")?;
+            println!("{}", describe_session(&session, "Logged in"));
+            ensure_gateway_access(&cfg, &session)?;
+            client
+                .fetch_or_cached(&session, now_unix())
+                .context("fetching governance config")?
+        }
+    };
     let mut inventory = discover_inventory_cached(&config.allowed_harnesses, applied.as_ref());
     gh_agent::evaluate_inventory(&config, &mut inventory);
     Ok(PreparedLaunch {
@@ -564,26 +615,128 @@ pub fn start() -> Result<()> {
     run_prepared(&preferred, &[], prepared)
 }
 
-pub fn login() -> Result<()> {
+/// What to do with a stored session, given how the service answered a live
+/// probe made with it.
+///
+/// Kept separate from [`login`] and pure: the guarantee that an *offline* user
+/// is never dragged through a browser flow lives entirely in these arms, and
+/// it is only testable if the triage is a value rather than control flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginDecision {
+    /// The service accepted it.
+    Valid,
+    /// The session is fine; something else has to happen first.
+    ActionRequired,
+    /// Rejected, and this deployment has a device flow that can repair it.
+    Reauthenticate,
+    /// Rejected, but re-running the configured identity provider would resolve
+    /// the same credential and change nothing.
+    Rejected,
+    /// We could not reach the service, so we know nothing about the session.
+    Unverified,
+}
+
+fn login_decision(
+    is_oidc: bool,
+    probe: &std::result::Result<GovernanceConfig, gh_common::GhError>,
+) -> LoginDecision {
+    match probe {
+        Ok(_) => LoginDecision::Valid,
+        Err(gh_common::GhError::ActionRequired(_)) => LoginDecision::ActionRequired,
+        Err(gh_common::GhError::Unauthorized(_)) if is_oidc => LoginDecision::Reauthenticate,
+        Err(gh_common::GhError::Unauthorized(_)) => LoginDecision::Rejected,
+        // Transport, 5xx, decode. `identity.rs` and `source.rs` both keep
+        // `Service` distinct from `Unauthorized` precisely so this arm exists.
+        Err(_) => LoginDecision::Unverified,
+    }
+}
+
+fn describe_session(session: &Session, prefix: &str) -> String {
+    match (&session.email, &session.org_id) {
+        (Some(email), Some(org)) => format!("{prefix} as {email} (org {org})."),
+        (Some(email), None) => format!("{prefix} as {email}."),
+        _ => format!("{prefix}."),
+    }
+}
+
+pub fn login(force: bool) -> Result<()> {
     let cfg = BlueToml::load().context("loading blue.toml")?;
-    if let Some(mut session) = Session::load()? {
-        if session.refresh_if_needed(now_unix()).is_ok() {
-            match (&session.email, &session.org_id) {
-                (Some(email), Some(org)) => {
-                    println!("Already logged in as {email} (org {org}).")
-                }
-                (Some(email), None) => println!("Already logged in as {email}."),
-                _ => println!("Already logged in."),
+    // A truncated or hand-edited session.json used to make `blue login` itself
+    // fail, with no command left that could clear it.
+    let stored = Session::load().unwrap_or_else(|error| {
+        tracing::warn!(%error, "stored session could not be read; treating it as absent");
+        None
+    });
+
+    if force {
+        // Otherwise every forced re-login orphans a refresh token that stays
+        // live server-side for its full lifetime. Best-effort: a user forcing
+        // a re-login is already past caring whether the old grant answers.
+        if let Some(session) = stored.as_ref() {
+            if let Err(error) = session.revoke() {
+                tracing::debug!(%error, "revoking the previous refresh token failed");
             }
-            println!("Run `blue logout` before signing in with a different account.");
-            return Ok(());
+        }
+    } else if let Some(mut session) = stored {
+        session.adopt_refresh_context(&cfg.service.url, identity_scopes(&cfg));
+        if session.refresh_if_needed(now_unix()).is_ok() {
+            // A local clock check is exactly the check that lies here: the
+            // access token refreshes for 30 days, while the browser session
+            // that authorized the CLI lives 12 hours. Ask the service, live —
+            // never `fetch_or_cached`, whose whole job is to answer without
+            // asking, and never `/auth/me`, which never reaches the code that
+            // fails.
+            let probe = if cfg.has_http_service() {
+                let client = ServiceClient::from_config(&cfg).context("building service client")?;
+                Some(client.fetch(&session, now_unix()))
+            } else {
+                None
+            };
+            let decision = match &probe {
+                Some(probe) => login_decision(is_oidc(&cfg), probe),
+                // A `file` source has no session for a service to reject.
+                None => LoginDecision::Valid,
+            };
+            match decision {
+                LoginDecision::Valid => {
+                    println!("{}", describe_session(&session, "Already logged in"));
+                    println!("Run `blue logout` before signing in with a different account.");
+                    return Ok(());
+                }
+                LoginDecision::ActionRequired => {
+                    println!("{}", describe_session(&session, "Already logged in"));
+                    if let Some(Err(error)) = &probe {
+                        println!("{error}");
+                    }
+                    return Ok(());
+                }
+                LoginDecision::Unverified => {
+                    println!("{}", describe_session(&session, "Already logged in"));
+                    if let Some(Err(error)) = &probe {
+                        println!("Could not verify the session with the service: {error}");
+                    }
+                    println!("Run `blue login --force` to sign in again anyway.");
+                    return Ok(());
+                }
+                LoginDecision::Rejected => match &probe {
+                    Some(Err(error)) => bail!("{error}"),
+                    _ => unreachable!("Rejected is only produced from a rejection"),
+                },
+                // Fall through to the device flow.
+                LoginDecision::Reauthenticate => {
+                    if let Some(Err(error)) = &probe {
+                        println!("{error}");
+                    }
+                }
+            }
         }
     }
+
+    // Deliberately not `Session::remove()` first: a Ctrl-C during the browser
+    // step would then have destroyed a session that still worked.
+    // `gh_service::login` overwrites the file only once it has succeeded.
     let session = gh_service::login(&cfg).context("login")?;
-    match (&session.email, &session.org_id) {
-        (Some(email), Some(org)) => println!("Logged in as {email} (org {org})."),
-        _ => println!("Logged in. Session stored."),
-    }
+    println!("{}", describe_session(&session, "Logged in"));
     Ok(())
 }
 
@@ -591,6 +744,9 @@ pub fn logout() -> Result<()> {
     let cfg = BlueToml::load().ok();
     let mut session = Session::load()?;
     let gateway_revocation = session.as_mut().map(|session| {
+        if let Some(cfg) = cfg.as_ref() {
+            session.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
+        }
         let _ = session.refresh_if_needed(now_unix());
         cfg.as_ref()
             .map(|cfg| session.revoke_gateway_session(&cfg.service.url))
@@ -625,18 +781,32 @@ struct GatewayKeyResponse {
 #[derive(Debug)]
 struct GatewayHttpError {
     status: reqwest::StatusCode,
+    /// The server's `error` field when it sent JSON, else the raw body. Used
+    /// verbatim for the generic arms.
     message: String,
+    /// Only the structured `{"error": …}` string, bounded. `None` when an
+    /// intermediary answered with something that is not the Control API's
+    /// error shape — an HTML 401 page from a load balancer, say.
+    detail: Option<String>,
 }
 
 impl std::fmt::Display for GatewayHttpError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&gateway_api_error_message(self.status, &self.message))
+        formatter.write_str(&gateway_api_error_message(
+            self.status,
+            &self.message,
+            self.detail.as_deref(),
+        ))
     }
 }
 
 impl std::error::Error for GatewayHttpError {}
 
-fn gateway_api_error_message(status: reqwest::StatusCode, message: &str) -> String {
+fn gateway_api_error_message(
+    status: reqwest::StatusCode,
+    message: &str,
+    detail: Option<&str>,
+) -> String {
     if matches!(
         status,
         reqwest::StatusCode::BAD_GATEWAY | reqwest::StatusCode::SERVICE_UNAVAILABLE
@@ -645,12 +815,16 @@ fn gateway_api_error_message(status: reqwest::StatusCode, message: &str) -> Stri
     }
     // `blue run` reaches this hop before it ever fetches policy, so without
     // this arm an expired session surfaces as a bare "gateway access: ..." and
-    // the user is never told what to do about it.
+    // the user is never told what to do about it. Mirrors the governance-config
+    // path so the same rejection reads the same wherever it surfaces.
     if matches!(
         status,
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
     ) {
-        return "your session is no longer valid (run `blue login`)".to_owned();
+        return gh_service::session_rejected_message(
+            status == reqwest::StatusCode::FORBIDDEN,
+            detail,
+        );
     }
     format!("gateway access: {message}")
 }
@@ -695,16 +869,14 @@ fn gateway_api<T: serde::de::DeserializeOwned>(
     let status = response.status();
     let text = response.text().context("reading gateway access response")?;
     if !status.is_success() {
-        let message = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or(text);
-        return Err(GatewayHttpError { status, message }.into());
+        let detail = gh_service::server_error_detail(&text);
+        let message = detail.clone().unwrap_or(text);
+        return Err(GatewayHttpError {
+            status,
+            message,
+            detail,
+        }
+        .into());
     }
     serde_json::from_str(&text).context("decoding gateway access response")
 }
@@ -2484,6 +2656,10 @@ fn start_revision_watcher(
         "revision watcher active; updates will trigger a desktop notification"
     );
     let cfg = cfg.clone();
+    // The watcher thread refreshes on its own for hours and `poll_for_revisions`
+    // never sees a `BlueToml`, so the deployment context has to be attached
+    // here, before the session is moved in.
+    session.adopt_refresh_context(&cfg.service.url, identity_scopes(&cfg));
     let notices = WatcherNotices::default();
     let pending_for_thread = notices.revision.clone();
     let auth_for_thread = notices.auth.clone();
@@ -5080,11 +5256,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The offline guarantee, in the one form a test can hold: a user with no
+    /// network must never be pushed into a browser flow, and a `token`-mode
+    /// deployment must never be offered a device flow that resolves the same
+    /// static credential.
+    #[test]
+    fn the_login_triage_only_reauthorizes_on_an_actual_rejection() {
+        let config: GovernanceConfig =
+            serde_json::from_str(r#"{"revision":"r1","allowed_harnesses":["codex"]}"#).unwrap();
+
+        assert_eq!(login_decision(true, &Ok(config)), LoginDecision::Valid);
+        assert_eq!(
+            login_decision(true, &Err(gh_common::GhError::unauthorized("dead binding"))),
+            LoginDecision::Reauthenticate
+        );
+        assert_eq!(
+            login_decision(
+                false,
+                &Err(gh_common::GhError::unauthorized("dead binding"))
+            ),
+            LoginDecision::Rejected
+        );
+        assert_eq!(
+            login_decision(
+                true,
+                &Err(gh_common::GhError::action_required("run `blue gateway`"))
+            ),
+            LoginDecision::ActionRequired
+        );
+        // Transport failure, a 5xx, and an undecodable body all mean "we do
+        // not know", never "log in again".
+        for error in [
+            gh_common::GhError::service("connection refused"),
+            gh_common::GhError::service("service returned 503 for governance-config"),
+            gh_common::GhError::config("cached config is unsupported"),
+        ] {
+            assert_eq!(login_decision(true, &Err(error)), LoginDecision::Unverified);
+        }
+    }
+
     #[test]
     fn gateway_outage_message_is_plain_and_actionable() {
         let message = gateway_api_error_message(
             reqwest::StatusCode::BAD_GATEWAY,
             "gateway unavailable: error sending request for url (http://internal.example/user/list)",
+            None,
         );
 
         assert!(message.starts_with("Gateway setup is currently unavailable."));
@@ -5102,13 +5318,37 @@ mod tests {
             reqwest::StatusCode::UNAUTHORIZED,
             reqwest::StatusCode::FORBIDDEN,
         ] {
-            let message = gateway_api_error_message(status, "unauthorized");
+            let message = gateway_api_error_message(status, "unauthorized", None);
             assert!(message.contains("blue login"), "{message}");
         }
-        assert!(
-            gateway_api_error_message(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom")
-                .contains("boom")
+        assert!(gateway_api_error_message(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "boom",
+            None
+        )
+        .contains("boom"));
+    }
+
+    #[test]
+    fn a_rejected_session_relays_why_when_the_server_says_why() {
+        // The dead-binding 401 is the one the CLI could never explain before:
+        // the OAuth refresh still works, so "log in again" alone reads as a
+        // contradiction of what `blue login` just printed.
+        let message = gateway_api_error_message(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "your browser sign-in that authorized this CLI has expired; run `blue login` to re-authorize",
+            Some("your browser sign-in that authorized this CLI has expired; run `blue login` to re-authorize"),
         );
+        assert!(message.contains("browser sign-in"), "{message}");
+
+        // A 403 is a different problem; it must not claim the session expired.
+        let forbidden = gateway_api_error_message(
+            reqwest::StatusCode::FORBIDDEN,
+            "missing OAuth scope governance:read",
+            Some("missing OAuth scope governance:read"),
+        );
+        assert!(forbidden.contains("missing OAuth scope"), "{forbidden}");
+        assert!(!forbidden.contains("no longer valid"), "{forbidden}");
     }
 
     fn gateway_access(enabled: bool, status: &str) -> GatewayKeyResponse {
@@ -5147,10 +5387,12 @@ mod tests {
         let unavailable = anyhow::Error::new(GatewayHttpError {
             status: reqwest::StatusCode::BAD_GATEWAY,
             message: "temporary".into(),
+            detail: None,
         });
         let invalid_config = anyhow::Error::new(GatewayHttpError {
             status: reqwest::StatusCode::BAD_REQUEST,
             message: "invalid configuration".into(),
+            detail: None,
         });
 
         assert!(retryable_gateway_http_error(&unavailable));

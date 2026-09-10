@@ -78,38 +78,38 @@ test.describe.serial("Blue deployment journey", () => {
     );
     expect(accessClaims.sid).toEqual(expect.any(String));
     expect(accessClaims.sid).not.toBe("");
-    const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
-    const refreshed = await page.request.post(
-      `${dashboard}/api/auth/oauth2/token`,
-      {
-        headers: { origin: dashboard },
-        form: {
-          grant_type: "refresh_token",
-          refresh_token: persistedSession.refresh_token,
-          client_id: "blue-cli",
-          resource:
-            process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080",
-        },
-      },
-    );
-    expect(refreshed.status(), await refreshed.text()).toBe(200);
-    const refreshedGrant = await refreshed.json();
-    const refreshedToken = refreshedGrant.access_token;
-    const refreshedClaims = JSON.parse(
-      Buffer.from(refreshedToken.split(".")[1], "base64url").toString("utf8"),
-    );
-    expect(refreshedClaims.sid).toBe(accessClaims.sid);
-    persistedSession.token = refreshedToken;
-    persistedSession.expires_at =
-      Math.floor(Date.now() / 1000) + (refreshedGrant.expires_in ?? 900);
-    if (refreshedGrant.refresh_token) {
-      persistedSession.refresh_token = refreshedGrant.refresh_token;
-    }
+    // The resource indicator has to survive into session.json, or the CLI's own
+    // refresh asks for a token the Control API will not accept.
+    expect(persistedSession.resource).toBeTruthy();
+
+    // Age the access token and let the CLI refresh it. This used to be a
+    // hand-rolled POST to the token endpoint — a second implementation of the
+    // grant that happened to send `resource` when `refresh_if_needed` did not,
+    // which is exactly why no test caught the omission. Only `expires_at` is
+    // rewritten; every other field stays as the CLI wrote it.
+    persistedSession.expires_at = Math.floor(Date.now() / 1000) - 60;
     await writeFile(session, JSON.stringify(persistedSession), { mode: 0o600 });
+
     await expect(stat(path.join(home, ".codex", "blue.config.toml"))).rejects.toThrow();
     await expect(stat(path.join(home, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
+    // Any command that talks to the service drives the refresh.
     const preferred = await runCli(home, ["agent", "claude"]);
     expect(preferred.code, preferred.stderr).toBe(0);
+
+    const refreshedSession = JSON.parse(await readFile(session, "utf8"));
+    expect(refreshedSession.token).not.toBe(persistedSession.token);
+    expect(refreshedSession.expires_at).toBeGreaterThan(
+      Math.floor(Date.now() / 1000),
+    );
+    const refreshedClaims = JSON.parse(
+      Buffer.from(refreshedSession.token.split(".")[1], "base64url").toString(
+        "utf8",
+      ),
+    );
+    // Same browser session behind it, and an audience the Control API accepts —
+    // the two things a refresh without `resource` silently gets wrong.
+    expect(refreshedClaims.sid).toBe(accessClaims.sid);
+    expect(refreshedClaims.aud).toBeTruthy();
   });
 
   test("@smoke executable provisioner creates managed gateway access", async () => {

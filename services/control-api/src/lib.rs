@@ -2125,6 +2125,13 @@ impl ApiError {
     fn forbidden_message(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, message)
     }
+    /// A 401 whose cause the client cannot infer from the status alone. The
+    /// generic `unauthorized()` says "invalid or expired session", which is
+    /// true of a malformed token and of a dead browser binding alike — and
+    /// only one of those tells the user what to do.
+    fn unauthorized_message(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, message)
+    }
     fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, message)
     }

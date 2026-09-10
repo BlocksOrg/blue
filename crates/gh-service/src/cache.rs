@@ -63,44 +63,10 @@ pub fn load() -> Result<Option<CachedConfig>, GhError> {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    /// `XDG_CACHE_HOME` is process-global, so every test that touches the
-    /// on-disk cache has to take this lock and point it at its own directory.
-    pub(crate) struct CacheHomeGuard {
-        _lock: MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
-        dir: std::path::PathBuf,
-    }
-
-    pub(crate) fn with_cache_home(name: &str) -> CacheHomeGuard {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir =
-            std::env::temp_dir().join(format!("blue-cache-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let previous = std::env::var_os("XDG_CACHE_HOME");
-        std::env::set_var("XDG_CACHE_HOME", &dir);
-        CacheHomeGuard {
-            _lock: lock,
-            previous,
-            dir,
-        }
-    }
-
-    impl Drop for CacheHomeGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
-                None => std::env::remove_var("XDG_CACHE_HOME"),
-            }
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
+    /// Thin wrapper over the shared XDG seam. `XDG_CACHE_HOME` is only one of
+    /// the roots these paths resolve through, and redirecting it alone leaves
+    /// `session.json` pointing at the developer's real home directory.
+    pub(crate) use gh_common::paths::test_support::with_xdg_home as with_cache_home;
 }
 
 #[cfg(test)]

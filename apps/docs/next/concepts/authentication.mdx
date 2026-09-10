@@ -30,7 +30,15 @@ sequenceDiagram
 
 The browser URL contains an opaque, short-lived token rather than the user code. The page displays the code read-only for comparison with the terminal and offers explicit authorize and deny actions. If the default browser cannot be launched, the CLI prints the link and continues polling.
 
-Access tokens expire after 15 minutes. Refresh tokens rotate and are stored with the session in `~/.config/blue/session.json` using owner-only permissions. `blue logout` attempts remote revocation and always removes the local token file.
+Access tokens expire after 15 minutes. Refresh tokens rotate and are stored with the session in `~/.config/blue/session.json` using owner-only permissions. Each refresh replays the resource indicator the grant was issued against, so the renewed token keeps the same Control API audience. `blue logout` attempts remote revocation and always removes the local token file.
+
+### Session binding and re-authorization
+
+The device grant is bound to the browser session that approved it, and gateway mode reads that binding every time it mints an inference token. The two lifetimes differ: the browser session lasts 12 hours, the refresh token 30 days. A CLI session can therefore keep refreshing its access token long after the sign-in behind it has expired, and the Control API answers `401` with the reason.
+
+`blue login` verifies with the service rather than trusting the local expiry, so it reports a rejected session instead of "Already logged in". When the deployment uses device authorization, it starts a new one; `blue` does the same at launch. An unreachable service is reported as unverified and never triggers a browser flow.
+
+Use `blue login --force` to re-authorize while a session is still valid — switching accounts, or replacing a session you no longer trust. It revokes the stored refresh token before starting the new flow, so no grant is left live server-side.
 
 ## Scopes
 

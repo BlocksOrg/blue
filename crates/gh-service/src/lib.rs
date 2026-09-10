@@ -13,14 +13,17 @@ pub mod source;
 pub use cache::CachedConfig;
 pub use client::{login, require_session, RevisionStreamEnd, ServiceClient};
 pub use discovery::{discover, validate_deployment_url, DiscoveryDocument, DiscoveryOAuth};
-pub use identity::{IdentityProvider, Session};
+pub use identity::{default_cli_scopes, IdentityProvider, Session};
 pub use schema::{
     legacy_requirement_interval, GatewayConfig, GovernanceConfig, HarnessPolicy, ManagedConfig,
     ManagedPackage, McpServer, PackageAdapter, PackageAdapterInterval, PackageAdapterVariant,
     PackageOverride, PackageSource, PlatformAsset, PresignedUpload, SessionUploadConfig,
     TelemetryConfig,
 };
-pub use source::{ConfigSource, FileConfigSource, HttpConfigSource};
+pub use source::{
+    bounded_detail, server_error_detail, session_rejected_message, ConfigSource, FileConfigSource,
+    HttpConfigSource,
+};
 
 /// Current unix time in seconds. Kept in one place so callers don't scatter
 /// clock reads (and tests can inject their own `now`).

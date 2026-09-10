@@ -3,6 +3,13 @@
 //! Proves the whole self-served auth path works end-to-end: a JWT we mint with
 //! the committed test key is accepted by control-api after it fetches the JWK
 //! from the sidecar and validates the signature, issuer, audience and expiry.
+//!
+//! `blue login` reaching "Already logged in" is a **live** result, not a local
+//! one: it asks the service before it says so. It passes here because
+//! `Stack::bootstrap_home` seeds the backing `auth."session"` row the token's
+//! `sid` points at. Drop that seeding and this test fails for a reason nothing
+//! in this file mentions. The rejection side is covered by
+//! `session_recovery.rs`.
 
 use predicates::str::contains;
 

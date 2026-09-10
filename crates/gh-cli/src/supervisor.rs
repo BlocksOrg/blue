@@ -2750,7 +2750,7 @@ pub fn supervise(
                             close_control_surface(&mut control_terminal, &mut stdout)?;
                             input_reader.stop();
                             raw.take();
-                            commands::login()?;
+                            commands::login(false)?;
                             return Ok(SupervisorExit::Restart);
                         }
                     }
@@ -2886,7 +2886,7 @@ pub fn supervise(
                                 close_control_surface(&mut control_terminal, &mut stdout)?;
                                 input_reader.stop();
                                 raw.take();
-                                commands::login()?;
+                                commands::login(false)?;
                                 return Ok(SupervisorExit::Restart);
                             }
                             None => {

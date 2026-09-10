@@ -17,6 +17,41 @@ pub trait ConfigSource: Send + Sync {
     fn describe(&self) -> String;
 }
 
+/// Longest server-supplied detail worth relaying. A load balancer in front of
+/// the Control API can answer a 401 with a full HTML error page.
+const MAX_DETAIL_CHARS: usize = 200;
+
+/// Trim, reject blank, and cap a server-supplied string before it reaches the
+/// user's terminal.
+pub fn bounded_detail(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(MAX_DETAIL_CHARS).collect())
+}
+
+/// Pull the `error` string out of the Control API's `{"error": …}` body.
+/// `None` for anything else, including the HTML an intermediary might return.
+pub fn server_error_detail(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    bounded_detail(value.get("error")?.as_str()?)
+}
+
+/// The message shown when the control service rejects the current session.
+/// `detail`, when the server sent one, is the only part that says *why*.
+pub fn session_rejected_message(forbidden: bool, detail: Option<&str>) -> String {
+    let headline = if forbidden {
+        "the control service refused this session"
+    } else {
+        "your session is no longer valid"
+    };
+    match detail {
+        Some(detail) => format!("{headline}: {detail} (run `blue login`)"),
+        None => format!("{headline} (run `blue login`)"),
+    }
+}
+
 /// Fetches from `GET {base_url}/governance-config` with a bearer token.
 pub struct HttpConfigSource {
     base_url: String,
@@ -60,9 +95,16 @@ impl ConfigSource for HttpConfigSource {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(GhError::unauthorized(
-                "your session is no longer valid (run `blue login`)",
-            ));
+            // 401 and 403 are not the same problem and neither is always
+            // "log in again": a dead browser binding, a revoked token, a
+            // suspended user and a missing OAuth scope all land here, and the
+            // server already writes a specific message for each. Collapsing
+            // them into one fixed string threw all of it away.
+            let detail = server_error_detail(&resp.text().unwrap_or_default());
+            return Err(GhError::unauthorized(session_rejected_message(
+                status == reqwest::StatusCode::FORBIDDEN,
+                detail.as_deref(),
+            )));
         }
         if status == reqwest::StatusCode::UPGRADE_REQUIRED {
             let body = resp.text().unwrap_or_default();
@@ -145,6 +187,46 @@ pub fn parse_config(path: &std::path::Path, text: &str) -> Result<GovernanceConf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_session_relays_the_reason_the_server_gave() {
+        assert_eq!(
+            session_rejected_message(false, Some("your browser sign-in has expired")),
+            "your session is no longer valid: your browser sign-in has expired (run `blue login`)"
+        );
+        assert_eq!(
+            session_rejected_message(false, None),
+            "your session is no longer valid (run `blue login`)"
+        );
+        // A 403 is a different problem and must not claim the session expired.
+        assert_eq!(
+            session_rejected_message(true, Some("missing OAuth scope governance:read")),
+            "the control service refused this session: missing OAuth scope governance:read (run `blue login`)"
+        );
+    }
+
+    #[test]
+    fn only_a_well_formed_error_body_is_relayed() {
+        assert_eq!(
+            server_error_detail(r#"{"error":"invalid or expired session"}"#).as_deref(),
+            Some("invalid or expired session")
+        );
+        assert_eq!(server_error_detail(""), None);
+        assert_eq!(server_error_detail(r#"{"error":"   "}"#), None);
+        assert_eq!(server_error_detail(r#"{"detail":"nope"}"#), None);
+        // An ALB in front of control-api answers with HTML, not JSON.
+        assert_eq!(
+            server_error_detail("<html><head><title>401 Unauthorized</title></head></html>"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_oversized_detail_is_capped() {
+        let body = serde_json::json!({ "error": "x".repeat(5_000) }).to_string();
+        let detail = server_error_detail(&body).unwrap();
+        assert_eq!(detail.chars().count(), MAX_DETAIL_CHARS);
+    }
 
     #[test]
     fn parses_yaml_config() {
