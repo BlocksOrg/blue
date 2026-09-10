@@ -2071,7 +2071,7 @@ dependencies = [
  "axum",
  "futures-util",
  "gh-gateway",
- "hex",
+ "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
