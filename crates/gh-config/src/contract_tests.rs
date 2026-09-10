@@ -27,21 +27,147 @@ fn snapshot(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+/// A path spelled with `/`, whatever this platform's separator is. Unix paths
+/// come back unchanged; `C:\Users\blue` comes back as `C:/Users/blue`.
+fn render_path(path: &Path) -> String {
+    let mut rendered = String::new();
+    for component in path.components() {
+        if matches!(component, std::path::Component::RootDir) {
+            if !rendered.ends_with('/') {
+                rendered.push('/');
+            }
+            continue;
+        }
+        if !rendered.is_empty() && !rendered.ends_with('/') {
+            rendered.push('/');
+        }
+        rendered.push_str(&component.as_os_str().to_string_lossy());
+    }
+    rendered
+}
+
+/// Re-join a `PATH`-shaped value with `:` and `/`, so neither separator is the
+/// platform's.
+fn render_path_list(value: &str) -> String {
+    std::env::split_paths(value)
+        .map(|entry| render_path(&entry))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Where a path token ends in the documents a plan carries: TOML, JSON and
+/// JavaScript all quote them, and `PATH` separates them.
+const PATH_TERMINATORS: &[char] = &[
+    '"', '\'', ',', ']', '}', ')', ':', ';', '=', ' ', '\t', '\r', '\n',
+];
+
+/// Replace every spelling of `root` in `value` with `marker`, normalising the
+/// separators of the path that follows it.
+///
+/// The same root reaches us three ways: as this platform writes it, as a nested
+/// JSON or JavaScript document escaped it (every `\` doubled), and already
+/// rendered with `/`. On Unix all three coincide and this is a plain substring
+/// replacement.
+fn substitute(value: &str, root: &Path, marker: &str) -> String {
+    let raw = root.to_string_lossy().into_owned();
+    if raw.is_empty() {
+        return value.to_owned();
+    }
+    // Longest first: the escaped spelling is a prefix-length superset of the raw
+    // one, so matching the raw one first would leave a stray separator behind.
+    let mut spellings = vec![raw.replace('\\', "\\\\"), raw, render_path(root)];
+    spellings.dedup();
+    let mut rendered = String::with_capacity(value.len());
+    let mut rest = value;
+    while !rest.is_empty() {
+        let matched = spellings
+            .iter()
+            .find_map(|spelling| rest.strip_prefix(spelling.as_str()));
+        let Some(tail) = matched else {
+            let mut characters = rest.chars();
+            rendered.push(characters.next().expect("rest is not empty"));
+            rest = characters.as_str();
+            continue;
+        };
+        rendered.push_str(marker);
+        let end = tail.find(PATH_TERMINATORS).unwrap_or(tail.len());
+        rendered.push_str(&tail[..end].replace("\\\\", "/").replace('\\', "/"));
+        rest = &tail[end..];
+    }
+    rendered
+}
+
 /// Render a plan for comparison against its golden fixture.
 ///
-/// Only reachable from the `#[cfg(unix)]` comparison in
-/// `every_production_interval_has_a_pure_golden_plan`; the fixtures record Unix
-/// rendering and are compared on Unix alone.
-#[cfg(unix)]
-fn render_plan(value: &serde_json::Value, home: &Path) -> String {
-    let mut rendered = serde_json::to_string_pretty(value)
-        .unwrap()
-        .replace(home.to_str().unwrap(), "$HOME");
-    // An empty pattern would splice `$PATH` between every character.
-    if let Some(path) = std::env::var("PATH").ok().filter(|path| !path.is_empty()) {
-        rendered = rendered.replace(&path, "$PATH");
-    }
-    rendered.replace(std::env::current_exe().unwrap().to_str().unwrap(), "$BLUE")
+/// One fixture serves every platform: paths are rendered with `/`, the roots
+/// that vary per run collapse to `$HOME`, `$BLUE` and `$PATH`, and `PATH` is
+/// rejoined with `:`. All of it happens *before* serialization — normalising
+/// the serialized string instead means guessing how many levels of escaping
+/// each nested document added, which is exactly what the fixtures got wrong
+/// before.
+fn render_plan(plan: &ReconcilePlan, home: &Path) -> String {
+    let exe = std::env::current_exe().unwrap();
+    let ambient_path = std::env::var("PATH")
+        .ok()
+        // An empty pattern would splice `$PATH` between every character.
+        .filter(|path| !path.is_empty())
+        .map(|path| render_path_list(&path));
+    let text = |value: &str| {
+        let mut rendered = substitute(value, home, "$HOME");
+        if let Some(ambient) = ambient_path.as_deref() {
+            rendered = rendered.replace(ambient, "$PATH");
+        }
+        substitute(&rendered, &exe, "$BLUE")
+    };
+    let path = |path: &PathBuf| text(&render_path(path));
+    let value = serde_json::json!({
+        "writes": plan.writes.iter().map(|write| serde_json::json!({
+            "path": path(&write.path),
+            "body": text(&String::from_utf8(write.body.clone()).unwrap()),
+            "mode": write.mode,
+        })).collect::<Vec<_>>(),
+        "removals": plan.remove_paths.iter().map(path).collect::<Vec<_>>(),
+        "ownership": plan.owned_paths.iter().map(path).collect::<Vec<_>>(),
+        "files": plan.files.iter().map(path).collect::<Vec<_>>(),
+        "env": plan.env.iter().map(|(key, value)| (
+            key.clone(),
+            text(&if key == "PATH" { render_path_list(value) } else { value.clone() }),
+        )).collect::<BTreeMap<_, _>>(),
+        "args": plan.launch_args.iter().map(|arg| text(arg)).collect::<Vec<_>>(),
+        "warnings": plan.warnings.iter().map(|warning| text(warning)).collect::<Vec<_>>(),
+    });
+    serde_json::to_string_pretty(&value).unwrap()
+}
+
+/// Compare a rendered plan against its fixture, treating TOML bodies as data.
+///
+/// `toml_write` refuses a basic string as soon as a value contains a backslash
+/// and falls back to a literal one, so a Windows path makes it emit
+/// `source = '...'` where Unix emits `source = "..."`. That is a quoting
+/// difference, not a content one, and no amount of separator normalisation
+/// undoes it — so parse both sides and let the quote style disappear.
+fn assert_plan_matches(actual: &str, expected: &str, fixture: &Path) {
+    let canonical = |rendered: &str| {
+        let mut document = serde_json::from_str::<serde_json::Value>(rendered)
+            .unwrap_or_else(|error| panic!("{}: {error}", fixture.display()));
+        for write in document["writes"].as_array_mut().unwrap() {
+            if !write["path"].as_str().unwrap().ends_with(".toml") {
+                continue;
+            }
+            let body = write["body"].as_str().unwrap();
+            let parsed = body
+                .parse::<toml::Value>()
+                .unwrap_or_else(|error| panic!("{}: {error}", fixture.display()));
+            write["body"] = toml::to_string(&parsed).unwrap().into();
+        }
+        serde_json::to_string_pretty(&document).unwrap()
+    };
+    assert_eq!(
+        canonical(actual),
+        canonical(expected),
+        "{}",
+        fixture.display()
+    );
 }
 
 fn context(harness: Harness, version: &str) -> HarnessContext {
@@ -84,6 +210,56 @@ fn assert_wrapped_update_controls(
             assert_eq!(config["autoupdate"], false);
         }
     }
+}
+
+/// The fixtures are compared on Windows too, where a path reaches the renderer
+/// both as the platform writes it and as the nested document escaped it.
+#[test]
+fn plan_rendering_collapses_every_spelling_of_a_root() {
+    let home = home("render");
+    let raw = home
+        .join(".config/blue/runtime/kimi")
+        .to_string_lossy()
+        .into_owned();
+    let escaped = raw.replace('\\', "\\\\");
+    let body = format!("{{\"escaped\": \"{escaped}\", \"raw\": \"{raw}\"}}");
+    assert_eq!(
+        substitute(&body, &home, "$HOME"),
+        "{\"escaped\": \"$HOME/.config/blue/runtime/kimi\", \"raw\": \"$HOME/.config/blue/runtime/kimi\"}"
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// `PATH` carries both separators that vary: `;` between entries on Windows and
+/// `\` inside them.
+#[test]
+fn path_lists_are_rejoined_platform_neutrally() {
+    let home = home("path-list");
+    let entries = [home.join("package/bin"), home.join(".local/bin")];
+    let joined = std::env::join_paths(&entries).unwrap();
+    assert_eq!(
+        substitute(&render_path_list(joined.to_str().unwrap()), &home, "$HOME"),
+        "$HOME/package/bin:$HOME/.local/bin"
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The one platform difference the fixtures cannot absorb: `toml_write` picks a
+/// literal string over a basic one as soon as a value contains a backslash, so
+/// Windows emits `source = '...'` where Unix emits `source = "..."`.
+#[test]
+fn toml_quote_style_is_not_a_content_difference() {
+    let plan = |quote: char| {
+        serde_json::json!({
+            "writes": [{
+                "path": "$HOME/.codex/config.toml",
+                "body": format!("source = {quote}$HOME/x{quote}\n"),
+                "mode": 384,
+            }],
+        })
+        .to_string()
+    };
+    assert_plan_matches(&plan('"'), &plan('\''), Path::new("synthetic"));
 }
 
 #[test]
@@ -218,47 +394,31 @@ fn every_production_interval_has_a_pure_golden_plan() {
                     &plan.env,
                     &plan.launch_args,
                 );
-                // A golden plan is a rendering snapshot, and the rendering is
-                // genuinely platform-specific: Windows names paths with `\`,
-                // joins PATH with `;`, and — because a basic TOML string would
-                // read the `\U` in `C:\Users\...` as a unicode escape — emits
-                // `source = '...'` where Unix emits `source = "..."`. That last
-                // one is a content difference no separator normalisation can
-                // undo, so compare the snapshot on Unix rather than fork every
-                // fixture per platform. The behavioural assertions around this
-                // block — plan purity, `validate_plan`, the wrapped update
-                // controls, the transaction and `launch()` — all still run on
-                // Windows.
-                #[cfg(unix)]
-                {
-                    let value = serde_json::json!({
-                        "writes":plan.writes.iter().map(|write| serde_json::json!({"path":write.path,"body":String::from_utf8(write.body.clone()).unwrap(),"mode":write.mode})).collect::<Vec<_>>(),
-                        "removals":plan.remove_paths, "ownership":plan.owned_paths,
-                        "files":plan.files,"env":plan.env,"args":plan.launch_args,"warnings":plan.warnings
-                    });
-                    let actual = render_plan(&value, &home);
-                    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("tests/golden")
-                        .join(format!(
-                            "{}-{}.json",
-                            registration.interval.profile,
-                            if gateway_enabled {
-                                "gateway"
-                            } else {
-                                "governance"
-                            }
-                        ));
-                    if std::env::var_os("BLUE_UPDATE_GOLDENS").is_some() {
-                        std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
-                        std::fs::write(&fixture, format!("{actual}\n")).unwrap();
-                    }
-                    assert_eq!(
-                        actual.trim(),
-                        std::fs::read_to_string(&fixture).unwrap().trim(),
-                        "{}",
-                        fixture.display()
-                    );
+                // One fixture per interval, compared on every platform: the
+                // rendering is normalised before it is serialized, so the only
+                // platform difference left is TOML quote style, which
+                // `assert_plan_matches` compares as data.
+                let actual = render_plan(&plan, &home);
+                let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/golden")
+                    .join(format!(
+                        "{}-{}.json",
+                        registration.interval.profile,
+                        if gateway_enabled {
+                            "gateway"
+                        } else {
+                            "governance"
+                        }
+                    ));
+                if std::env::var_os("BLUE_UPDATE_GOLDENS").is_some() {
+                    std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+                    std::fs::write(&fixture, format!("{actual}\n")).unwrap();
                 }
+                assert_plan_matches(
+                    &actual,
+                    &std::fs::read_to_string(&fixture).unwrap(),
+                    &fixture,
+                );
                 let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
                 transaction.apply(&plan).unwrap();
                 transaction.commit().unwrap();

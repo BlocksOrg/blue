@@ -1,0 +1,3 @@
+# Golden plans are byte-compared on every platform, including a Windows
+# checkout with core.autocrlf=true. Keep them exactly as committed.
+crates/gh-config/tests/golden/** -text
