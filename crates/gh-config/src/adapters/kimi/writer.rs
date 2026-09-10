@@ -390,7 +390,7 @@ mod tests {
         .unwrap();
         let wiring = GatewayWiring {
             base_url: "https://inference.example".into(),
-            token: "psk_test".into(),
+            token: "test-inference-jwt".into(),
             wire_api: None,
             auth: AuthPlacement::InFile,
         };

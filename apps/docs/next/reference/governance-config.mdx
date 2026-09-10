@@ -8,8 +8,8 @@ This is the complete policy delivered to clients. The mounted deployment YAML su
 
 ```yaml
 revision: "organization-managed"
-contract_version: 2
-required_capabilities: [adapter_intervals, compiled_harness_registry, transactional_reconcile, versioned_state]
+contract_version: 3
+required_capabilities: [adapter_intervals, compiled_harness_registry, transactional_reconcile, versioned_state, gateway_inference_jwt]
 ttl_seconds: 300
 required: true
 allowed_harnesses: [codex, claude, kimi, opencode]
@@ -98,7 +98,7 @@ baselines set `required: true`; use an explicit `required: false` only when
 launching from stale cached governance during a control-plane outage is an
 accepted risk.
 
-The presence of top-level `gateway` enables gateway mode for every allowed coding agent and connects Blue to an upstream gateway operated by your organization. Blue does not bundle that gateway. `litellm` is the first and currently only supported type. The Control API injects `proxy_url` and the authenticated user's `pseudotoken`; each agent inherits its model from its own `managed_config`, or leaves model selection to the agent when none is managed. `auth_style` remains on the wire for compatibility, but `bearer` is the only supported client-to-proxy value.
+The presence of top-level `gateway` enables gateway mode for every allowed coding agent and connects Blue to an upstream gateway operated by your organization. Blue does not bundle that gateway. `litellm` is the first and currently only supported type. The Control API injects `proxy_url` and the authenticated user's session-bound inference `token`; each agent inherits its model from its own `managed_config`, or leaves model selection to the agent when none is managed. `auth_style` remains on the wire, but `bearer` is the only supported client-to-proxy value.
 
 ## Managed packages
 

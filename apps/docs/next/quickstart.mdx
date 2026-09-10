@@ -141,7 +141,7 @@ Every deployment needs:
 
 ## Optional: enable gateway mode
 
-Gateway mode adds the inference proxy, an organization-operated LiteLLM gateway, credential provisioning and encryption, private resolver traffic, and per-user pseudotokens. It does not change the core dashboard, Control API, worker, PostgreSQL, or object-storage contract.
+Gateway mode adds the inference proxy, an organization-operated LiteLLM gateway, credential provisioning and encryption, private resolver traffic, and session-bound inference JWTs. It does not change the core dashboard, Control API, worker, PostgreSQL, or object-storage contract.
 
 Follow [Bring your own gateway](/next/concepts/gateway-mode) for the routing model, [Gateway access](/next/admin/gateway-access) for operator configuration, and the [Deployment contract](/next/deployment/runtime-contract#optional-inference-proxy) for the additional workload requirements.
 

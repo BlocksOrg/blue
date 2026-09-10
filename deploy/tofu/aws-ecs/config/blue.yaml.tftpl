@@ -53,6 +53,10 @@ gateway:
   inference_proxy_url: os.environ/HARNESS_INFERENCE_PROXY_URL
   inference_proxy_health_url: os.environ/HARNESS_INFERENCE_PROXY_HEALTH_URL
   internal_allowed_client_id: ${inference_proxy_client_id}
+  inference_jwt:
+    issuer: os.environ/HARNESS_GATEWAY_JWT_ISSUER
+    audience: os.environ/HARNESS_GATEWAY_JWT_AUDIENCE
+    active_kid: os.environ/HARNESS_GATEWAY_JWT_ACTIVE_KID
   secret_encryption:
     provider: environment
     key: os.environ/HARNESS_GATEWAY_ENCRYPTION_KEY
@@ -62,12 +66,15 @@ gateway:
 # this policy; runtime settings and secrets never leave the server.
 governance:
   revision: "2026-08-28.1"
-  contract_version: 2
+  contract_version: 3
   required_capabilities:
     - adapter_intervals
     - compiled_harness_registry
     - transactional_reconcile
     - versioned_state
+%{ if enable_gateway ~}
+    - gateway_inference_jwt
+%{ endif ~}
   minimum_client_version: "0.1.0"
   ttl_seconds: 300
   allowed_harnesses: [codex, claude, kimi, opencode]

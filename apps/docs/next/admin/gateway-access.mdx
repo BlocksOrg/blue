@@ -21,17 +21,18 @@ sequenceDiagram
   participant Gateway as LiteLLM gateway
   User->>API: Sign in and ensure gateway access
   API->>Gateway: Create or reconcile managed credential
-  API-->>User: Opaque pseudotoken
-  Agent->>Proxy: Inference request + pseudotoken
-  Proxy->>API: Resolve pseudotoken
+  API-->>User: Session-bound inference JWT
+  Agent->>Proxy: Inference request + JWT
+  Proxy->>Proxy: Validate JWT
+  Proxy->>API: Resolve OAuth session + Blue user
   API-->>Proxy: Server-side gateway credential
   Proxy->>Gateway: Forward inference request
   Proxy--)API: Send request metadata asynchronously
 ```
 
-Blue stores the gateway credential envelope-encrypted and gives the client an
-opaque pseudotoken. Provider credentials, LiteLLM administrator credentials,
-and the managed gateway key remain server-side.
+Blue stores the gateway credential envelope-encrypted and gives the client a
+session-bound, inference-only JWT. Provider credentials, LiteLLM administrator
+credentials, the signing key, and the managed gateway key remain server-side.
 
 ## Prerequisites
 
@@ -134,8 +135,8 @@ governed inference begins.
 
 An executable can return `credential: null` only when retaining the previous
 encrypted credential. A rotated credential causes Blue to replace the stored
-encrypted value, invalidate the old pseudotoken mapping, and issue a new opaque
-pseudotoken. If ensure fails, Blue records the public error, stores no partial
+encrypted value and invalidate cached credential mappings. If ensure fails,
+Blue records the public error, stores no partial
 result, and retries on the next governed launch or configuration fetch.
 
 <Note>
@@ -162,7 +163,7 @@ model, harness, result, and date. Records can include allowlisted repository,
 branch, commit, dirty-state, and run attribution.
 
 Blue does not store prompts, request or response bodies, credentials, query
-strings, pseudotokens, virtual keys, or arbitrary headers in request history.
+strings, inference JWTs, virtual keys, or arbitrary headers in request history.
 Delivery is asynchronous and best effort so a Control API logging failure does
 not delay inference traffic. Expired database rows are removed automatically
 after `control_api.gateway_request_logs.retention_days`.
@@ -196,6 +197,6 @@ Launch through `blue`, for example `blue codex`.
 
 <Warning>
   Never deliver a provider key, LiteLLM administrator key, or server-side
-  virtual key to a developer machine. Only the pseudotoken and client-reachable
-  proxy URL belong in personalized harness configuration.
+  virtual key or signing key to a developer machine. Only the session-bound
+  inference JWT and client-reachable proxy URL belong in personalized harness configuration.
 </Warning>

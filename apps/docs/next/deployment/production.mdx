@@ -137,7 +137,7 @@ Ingress or load balancer.
 - Use least-privilege database roles and object-storage permissions.
 - Encrypt database backups and session objects.
 - Publish collection and retention policy before enabling session upload.
-- Monitor failed authentication, failed pseudotoken resolution, upload completion failures, and stale client revisions.
+- Monitor failed JWT authentication, failed session-bound credential resolution, upload completion failures, and stale client revisions.
 - Keep provider and LiteLLM keys server-side.
 - Restrict request logs to metadata, set a retention period, and monitor failed best-effort egress.
 - Keep repository credentials in deployment secret storage, grant read-only repository access, enforce organization namespace allowlists, and review executable hooks/plugins/helpers before publication.

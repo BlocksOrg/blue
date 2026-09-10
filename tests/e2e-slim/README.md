@@ -24,7 +24,7 @@ binary, real database, real object storage).
 | `all_agents_config` | The **same** model + MCP + skill assertions for `codex` / `kimi` / `opencode`, so all four agents are covered identically. | yes (per agent) | no |
 | `session_upload` | `blue session-upload` per harness → detached worker presigns → PUTs to MinIO → completes; the list shows all 4, and one artifact is downloaded and byte-compared to the upload. | no | no |
 | `agent_matrix_config` | **Tier A (version matrix).** The same model + MCP + skill assertions as `all_agents_config`, but per `(agent, version)` cell across multiple CLI versions (not just the pin). No inference. Self-skips unless the matrix is enabled. | yes (per cell) | no |
-| `agent_certification` | **Tier B (version matrix).** Per `(agent, version)` cell, one uniform body: `blue run <agent>` launches the real agent through the real gateway, forces the managed `blue_certify` MCP tool (asserts `mcp-started` + `mcp-called` markers and `BLUE_MCP_OK`), and asserts a LiteLLM spend log recorded the governed model alias with a swapped virtual key (not the `psk_` pseudotoken). With the matrix off it certifies just the pin per agent (today's coverage). | yes (per cell) | **yes** (opt-in) |
+| `agent_certification` | **Tier B (version matrix).** Per `(agent, version)` cell, one uniform body: `blue run <agent>` launches the real agent through the real gateway, forces the managed `blue_certify` MCP tool (asserts `mcp-started` + `mcp-called` markers and `BLUE_MCP_OK`), and asserts a LiteLLM spend log recorded the governed model alias with a swapped virtual key rather than the client inference JWT. With the matrix off it certifies just the pin per agent (today's coverage). | yes (per cell) | **yes** (opt-in) |
 
 **Real vs. faked.** Real: control-api, Postgres, MinIO (real presigned PUT/GET),
 the `blue` CLI, the agent CLIs (really installed, version-probed for eligibility),
@@ -34,6 +34,11 @@ only the token **issuer** — a sidecar mints RS256 JWTs (user tokens and the
 inference-proxy's M2M service token) with a committed **test-only** key, though
 control-api's *verification* of them is the real production path — and the JWKS
 endpoint that serves that public test key. There is no dashboard.
+
+On the gateway path, the user JWT carries a `sid` and the harness creates the
+matching Better Auth user/session rows. The control API uses the same test-only
+RSA fixture as its dedicated gateway signing ring, publishes `/gateway/jwks`,
+and mints the session-bound inference JWT consumed by the proxy.
 
 ## Two paths
 

@@ -1,6 +1,11 @@
 blue:
   production: false
   existingSecret: blue-evaluation-runtime
+  # Required whenever this file is rendered with blue.enableInferenceProxy=true.
+  # audience already defaults in values.yaml.
+  inferenceJwt:
+    secret: blue-evaluation-gateway-jwt
+    activeKid: evaluation
 
 image:
   tag: latest

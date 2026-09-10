@@ -77,7 +77,7 @@ Deletion removes the Better Auth account, password, memberships, sessions, OAuth
 - client status and captured-session metadata;
 - captured-session artifacts and their existing retention deadlines.
 
-Remote gateway-key cleanup is best effort. Local pseudotoken resolution is removed transactionally, so governed clients lose gateway access even if the upstream gateway is unavailable.
+Remote gateway-key cleanup is best effort. Gateway auth sessions are revoked transactionally, so governed clients lose gateway access even if the upstream gateway is unavailable.
 
 <Warning>
   `DELETE /admin/users/{id}` is access removal, not a privacy-erasure API. Organizations that require anonymization or historical-data deletion need a separate retention workflow.

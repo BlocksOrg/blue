@@ -149,8 +149,8 @@ Blue has two service-declared operating modes:
 - **Governance-only (default):** manage agent configuration while inference
   continues directly through each agent's existing provider credentials.
 - **Gateway mode (opt-in):** route inference through the organization's proxy
-  using an opaque per-user pseudotoken. Provider and gateway credentials remain
-  on the server.
+  using a session-bound, inference-only JWT. Provider and gateway credentials
+  remain on the server.
 
 Learn more in the documentation for
 [architecture](https://docs.bluee.sh/next/concepts/architecture),

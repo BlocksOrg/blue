@@ -17,7 +17,7 @@
 //!   3. LiteLLM spend logs — asserts this test's user (every test runs as its
 //!      own unique user) produced an inference that resolved to the governed
 //!      upstream model, and that the recorded credential is a hashed virtual
-//!      key, not the `psk_` pseudotoken the agent sent (proof the proxy
+//!      key, not the inference JWT the agent sent (proof the proxy
 //!      performed the swap).
 //!
 //! Self-skips without the gateway env (so the secret-free slim run is untouched),
@@ -223,7 +223,7 @@ fn certify_cell(agent: &str, version: &str) {
 
     // (4) Real inference from THIS test's unique user hit the gateway and
     //     resolved to the governed upstream model, and the proxy swapped the
-    //     pseudotoken for a hashed virtual key. LiteLLM's spend log records the
+    //     inference JWT for a hashed virtual key. LiteLLM's spend log records the
     //     resolved upstream model (e.g. `openrouter/openai/gpt-5.6-terra`), not
     //     the name the agent requested, so match on a substring.
     let entry = gateway.spend_log_for_user(home.email());
@@ -240,9 +240,10 @@ fn certify_cell(agent: &str, version: &str) {
         .get("api_key")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    assert!(
-        !api_key.starts_with("psk_"),
-        "{agent}: spend log recorded a pseudotoken, not a swapped virtual key: {entry}"
+    assert_ne!(
+        api_key.split('.').count(),
+        3,
+        "{agent}: spend log recorded the inference JWT, not a swapped virtual key: {entry}"
     );
 }
 

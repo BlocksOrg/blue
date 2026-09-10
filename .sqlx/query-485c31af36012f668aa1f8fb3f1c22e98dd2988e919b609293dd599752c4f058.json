@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select id,user_id,pseudotoken_hash,credential_version,reason from public.gateway_cache_events where id>$1 order by id limit 1",
+  "query": "select id,user_id,oauth_session_id,credential_version,reason from public.gateway_cache_events where id>$1 order by id limit 1",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "pseudotoken_hash",
+        "name": "oauth_session_id",
         "type_info": "Text"
       },
       {
@@ -42,5 +42,5 @@
       false
     ]
   },
-  "hash": "25d3f76c07437f2388d2dc336c216043cd3116f849a78c7368a7126a6c4d71b1"
+  "hash": "485c31af36012f668aa1f8fb3f1c22e98dd2988e919b609293dd599752c4f058"
 }

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update gateway_auth_sessions set revoked_at=now() where oauth_session_id=$1 returning revoked_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4006776ff79a1aa1a0718743d85329f07f614875fad58b458fef3a0478afa1c3"
+}

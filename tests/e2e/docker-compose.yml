@@ -148,6 +148,12 @@ services:
       E2E_PLUGIN_KEY: sk-e2e-wasm-plugin
       HARNESS_PROVISIONER_EXECUTABLE_SHA256: ${HARNESS_PROVISIONER_EXECUTABLE_SHA256:?build and hash the E2E provisioner executable}
       HARNESS_GATEWAY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      HARNESS_GATEWAY_JWT_ISSUER: http://127.0.0.1:8080
+      HARNESS_GATEWAY_JWT_AUDIENCE: blue-inference-proxy
+      HARNESS_GATEWAY_JWT_ACTIVE_KID: e2e-slim-rsa-1
+      HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /gateway-jwt/jwt-signing-key.pem
+      HARNESS_GATEWAY_JWT_JWKS_FILE: /gateway-jwt/jwks.json
+      HARNESS_GATEWAY_JWKS_URL: https://127.0.0.1:8082/internal/gateway/jwks
       HARNESS_INFERENCE_PROXY_URL: http://blue:8081
       HARNESS_INFERENCE_PROXY_HEALTH_URL: http://127.0.0.1:8081
       HARNESS_INTERNAL_ALLOWED_CLIENT_ID: blue-inference-proxy
@@ -179,6 +185,7 @@ services:
       - ./fixtures/blue.yaml:/etc/blue/blue.yaml:ro
       - package-fixture:/fixtures:ro
       - mtls-certs:/certs:ro
+      - ../e2e-slim/fixtures/jwks:/gateway-jwt:ro
     depends_on:
       mtls-certs: { condition: service_completed_successfully }
       migrate: { condition: service_completed_successfully }

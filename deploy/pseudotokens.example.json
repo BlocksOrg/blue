@@ -1,6 +1,0 @@
-{
-  "psk_REPLACED_PER_USER": {
-    "virtual_key": "sk-litellm-virtual-key-for-this-user",
-    "user": "dev@acme.com"
-  }
-}

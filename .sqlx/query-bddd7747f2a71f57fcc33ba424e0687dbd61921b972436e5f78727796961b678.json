@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select revoked_at is not null as \"revoked!\" from gateway_auth_sessions where oauth_session_id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "revoked!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "bddd7747f2a71f57fcc33ba424e0687dbd61921b972436e5f78727796961b678"
+}

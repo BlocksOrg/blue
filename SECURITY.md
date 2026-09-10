@@ -9,11 +9,11 @@ it centralizes *which* agent may run and *how* it is configured.
 - A short-lived, audience-bound **OAuth access token** and rotating refresh
   token (`~/.config/blue/session.json`, 0600). `blue logout` revokes the
   refresh family when reachable and always deletes the local token file.
-- In gateway mode, a **pseudotoken** written into agent config/env. The
-  pseudotoken is an opaque, per-user, durable-but-revocable stand-in. It is only
-  meaningful to the inference proxy, which maps it to a LiteLLM virtual key. The
-  real provider key and the virtual key both stay server-side. Treat the
-  pseudotoken as a secret: short-ish TTL, rotation, 0600 on disk.
+- In gateway mode, a **session-bound inference JWT** written into agent
+  config/env. It is narrowly scoped to `gateway:infer`, expires within 12 hours
+  and never after its backing OAuth session, and is meaningful only to the
+  inference proxy. Provider and gateway credentials remain encrypted and
+  server-side. Treat the JWT as a secret and keep managed files owner-only.
 
 All managed files are written atomically and, when they may carry secrets,
 restricted to owner-only permissions.
@@ -53,10 +53,9 @@ narrowly, encrypt storage, and treat uploaded sessions as sensitive source data.
   un-overridable with an OS-level managed/MDM profile. Without one it is
   best-effort (a determined local user can edit it). Document your enforced-vs-
   best-effort posture.
-- **Attribution proxy (fast-follow).** The `X-Harness-*` headers must be injected
-  **only when forwarding to a trusted upstream** (your org gateway/collector),
-  never when an agent is pointed directly at a raw provider — the headers carry
-  local paths / repo identity. The loopback hop must correctly re-originate TLS.
+- **Attribution (planned).** The central inference proxy will remove
+  caller-supplied attribution headers and inject server-owned coding-session
+  metadata only after launch-scoped attribution is implemented.
 
 ## Reporting a vulnerability
 

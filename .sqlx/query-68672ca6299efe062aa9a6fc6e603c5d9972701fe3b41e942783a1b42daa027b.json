@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into auth.\"session\"(id,\"expiresAt\",token,\"updatedAt\",\"userId\") values($1,$2,$3,now(),$4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "68672ca6299efe062aa9a6fc6e603c5d9972701fe3b41e942783a1b42daa027b"
+}

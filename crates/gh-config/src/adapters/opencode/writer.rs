@@ -382,7 +382,7 @@ mod tests {
         .unwrap();
         let wiring = gh_gateway::GatewayWiring {
             base_url: "https://gateway.example/v1".into(),
-            token: "psk_test".into(),
+            token: "test-inference-jwt".into(),
             wire_api: None,
             auth: gh_gateway::AuthPlacement::InFile,
         };
@@ -408,7 +408,7 @@ mod tests {
             managed["provider"]["governed"]["options"]["apiKey"],
             "{env:BLUE_OPENCODE_GATEWAY_TOKEN}"
         );
-        assert_eq!(report.env[GATEWAY_TOKEN_ENV], "psk_test");
+        assert_eq!(report.env[GATEWAY_TOKEN_ENV], "test-inference-jwt");
         let launch_config =
             disable_autoupdate(&report.env["OPENCODE_CONFIG_CONTENT"]).unwrap();
         let launch_config = serde_json::from_str::<Value>(&launch_config).unwrap();

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update public.gateway_key_selections set credential_ciphertext=$1,credential_nonce=$2,credential_wrapped_key=$3,encryption_key_id=$4,credential_version=gen_random_uuid(),proxy_virtual_key=null,last_reconciled_at=coalesce(last_reconciled_at,updated_at),updated_at=now() where user_id=$5 and proxy_virtual_key is not null and credential_ciphertext is null",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Bytea",
+        "Bytea",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "20224a0f66625578bbcd5fa4f9734fb60b470ea3b91b7e13e2b5df80e743d035"
+}

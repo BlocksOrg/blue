@@ -302,13 +302,17 @@ pub fn setup() -> Result<()> {
 }
 
 fn detach_tenant(cfg: &BlueToml) -> Result<()> {
-    let session = Session::load()?;
+    let mut session = Session::load()?;
     archive_active_tenant(cfg).context("archiving tenant state")?;
     gh_config::remove_all_managed_configuration()
         .context("removing Blue-managed agent configuration")?;
     clear_active_tenant_state().context("clearing active tenant state")?;
     Session::remove()?;
-    if let Some(session) = session {
+    if let Some(session) = session.as_mut() {
+        let _ = session.refresh_if_needed(now_unix());
+        if let Err(error) = session.revoke_gateway_session(&cfg.service.url) {
+            tracing::warn!(%error, "gateway session revocation failed during detach");
+        }
         if let Err(error) = session.revoke() {
             tracing::warn!(%error, "remote token revocation failed; local tokens were removed");
         }
@@ -584,8 +588,19 @@ pub fn login() -> Result<()> {
 }
 
 pub fn logout() -> Result<()> {
-    let revocation = Session::load()?.map(|session| session.revoke()).transpose();
+    let cfg = BlueToml::load().ok();
+    let mut session = Session::load()?;
+    let gateway_revocation = session.as_mut().map(|session| {
+        let _ = session.refresh_if_needed(now_unix());
+        cfg.as_ref()
+            .map(|cfg| session.revoke_gateway_session(&cfg.service.url))
+            .unwrap_or(Ok(()))
+    });
+    let revocation = session.as_ref().map(|session| session.revoke()).transpose();
     Session::remove()?;
+    if let Some(Err(error)) = gateway_revocation {
+        tracing::warn!(%error, "remote gateway session revocation failed; local tokens were removed");
+    }
     if let Err(error) = revocation {
         tracing::warn!(%error, "remote token revocation failed; local tokens were removed");
     }
@@ -627,6 +642,15 @@ fn gateway_api_error_message(status: reqwest::StatusCode, message: &str) -> Stri
         reqwest::StatusCode::BAD_GATEWAY | reqwest::StatusCode::SERVICE_UNAVAILABLE
     ) {
         return gateway_unavailable_message();
+    }
+    // `blue run` reaches this hop before it ever fetches policy, so without
+    // this arm an expired session surfaces as a bare "gateway access: ..." and
+    // the user is never told what to do about it.
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return "your session is no longer valid (run `blue login`)".to_owned();
     }
     format!("gateway access: {message}")
 }
@@ -890,24 +914,62 @@ pub(crate) fn doctor_text() -> Result<String> {
         "blue doctor".to_owned(),
         format!("  config source : {}", client.describe_source()),
     ];
-    match Session::load()? {
-        Some(_) => lines.push("  session       : present".into()),
-        None if cfg.has_http_service() => {
-            lines.push("  session       : MISSING (run `blue login`)".into())
+    // A file-existence check is exactly the check that lies here: the session
+    // file is still present and its access token still refreshes long after
+    // the backing browser session is gone. Ask the service instead, live —
+    // never through the cache, which cannot tell us anything about auth.
+    let live = session_for(&cfg).map(|session| client.fetch(&session, now_unix()));
+    match (Session::load()?, cfg.has_http_service(), &live) {
+        (None, true, _) => lines.push("  session       : MISSING (run `blue login`)".into()),
+        (None, false, _) => lines.push("  session       : n/a (local file source)".into()),
+        (Some(_), _, Ok(Err(gh_common::GhError::Unauthorized(_)))) => {
+            lines.push("  session       : EXPIRED (run `blue login`)".into())
         }
-        None => lines.push("  session       : n/a (local file source)".into()),
+        (Some(_), _, Err(error))
+            if error
+                .downcast_ref::<gh_common::GhError>()
+                .is_some_and(|error| matches!(error, gh_common::GhError::Unauthorized(_))) =>
+        {
+            lines.push("  session       : EXPIRED (run `blue login`)".into())
+        }
+        (Some(_), _, Ok(Err(gh_common::GhError::ActionRequired(message)))) => {
+            lines.push("  session       : present".into());
+            lines.push(format!("  gateway       : {message}"));
+        }
+        (Some(_), _, Ok(Err(_)) | Err(_)) => {
+            lines.push("  session       : present".into());
+            lines.push("  service       : unreachable".into());
+        }
+        (Some(_), _, Ok(Ok(_))) => lines.push("  session       : present".into()),
     }
 
-    // Best-effort: fetch config so we can annotate allowed/denied.
-    let allowed: Option<GovernanceConfig> = session_for(&cfg)
-        .ok()
-        .and_then(|s| client.fetch_or_cached(&s, now_unix()).ok());
+    let allowed: Option<GovernanceConfig> = match live {
+        Ok(Ok(config)) => Some(config),
+        // Only fall back to cache for a genuine outage; an auth failure must
+        // not be papered over with stale policy.
+        Ok(Err(gh_common::GhError::Unauthorized(_) | gh_common::GhError::ActionRequired(_))) => {
+            None
+        }
+        _ => gh_service::cache::load()
+            .ok()
+            .flatten()
+            .map(|cached| cached.config),
+    };
     if let Some(c) = &allowed {
         lines.push(format!("  revision      : {}", c.revision));
         lines.push(format!(
             "  allowed       : {}",
             c.allowed_harnesses.join(", ")
         ));
+        if let Some(expires_at) = c
+            .gateway
+            .as_ref()
+            .and_then(|gateway| gateway.token.as_deref())
+            .and_then(jwt_expires_at)
+        {
+            let remaining = (expires_at - now_unix()).max(0) / 60;
+            lines.push(format!("  gateway token : expires in {remaining}m"));
+        }
     } else {
         lines.push("  revision      : (config unavailable)".into());
     }
@@ -2285,8 +2347,14 @@ fn run_prepared(name: &str, args: &[String], prepared: PreparedLaunch) -> Result
     let session_upload_enabled = config.session_upload.is_some();
     let mut launch_env = write.env.clone();
     launch_env.insert("BLUE_SESSION_ID".into(), blue_session_id.clone());
-    let pending_notice =
-        start_revision_watcher(&cfg, session.clone(), config.revision.clone(), harness);
+    let notices = start_revision_watcher(&cfg, session.clone(), config.revision.clone(), harness);
+    let pending_notice = notices.as_ref().map(|notices| notices.revision.clone());
+    // Read the deadline off the token the child is actually being handed.
+    let gateway_token_expires_at = config
+        .gateway
+        .as_ref()
+        .and_then(|gateway| gateway.token.as_deref())
+        .and_then(jwt_expires_at);
     let code = if interactive {
         if let Some(startup) = startup.as_mut() {
             startup.ready()?;
@@ -2308,6 +2376,8 @@ fn run_prepared(name: &str, args: &[String], prepared: PreparedLaunch) -> Result
                     .has_http_service()
                     .then(|| format!("{}/health", cfg.service.url.trim_end_matches('/'))),
                 revision_notice: pending_notice.clone(),
+                auth_notice: notices.as_ref().map(|notices| notices.auth.clone()),
+                gateway_token_expires_at,
                 gateway_available: config.gateway.is_some(),
                 direct_mode: cfg.mode.force_governance_only,
             },
@@ -2351,12 +2421,51 @@ fn run_prepared(name: &str, args: &[String], prepared: PreparedLaunch) -> Result
     std::process::exit(code);
 }
 
+/// Reads `exp` out of a JWT without verifying it. The CLI is not the audience
+/// and holds no verification key — it only needs to know when the token it was
+/// handed stops working, and a wrong answer costs a spurious warning, not
+/// access. Deliberately avoids pulling `jsonwebtoken` into the client.
+fn jwt_expires_at(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?;
+    let mut decoded = String::new();
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    let mut bytes = Vec::new();
+    for byte in payload.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let value = alphabet.iter().position(|candidate| *candidate == byte)? as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buffer >> bits) as u8);
+        }
+    }
+    decoded.push_str(std::str::from_utf8(&bytes).ok()?);
+    #[derive(serde::Deserialize)]
+    struct Claims {
+        exp: Option<i64>,
+    }
+    serde_json::from_str::<Claims>(&decoded).ok()?.exp
+}
+
+/// Notices the background watcher can raise for the supervisor: a new policy
+/// revision, and a session the control service has stopped accepting.
+#[derive(Clone, Default)]
+pub(crate) struct WatcherNotices {
+    pub(crate) revision: Arc<Mutex<Option<String>>>,
+    pub(crate) auth: Arc<Mutex<Option<String>>>,
+}
+
 fn start_revision_watcher(
     cfg: &BlueToml,
     mut session: Session,
     active_revision: String,
     harness: Harness,
-) -> Option<Arc<Mutex<Option<String>>>> {
+) -> Option<WatcherNotices> {
     if !cfg.has_http_service() {
         return None;
     }
@@ -2366,8 +2475,9 @@ fn start_revision_watcher(
         "revision watcher active; updates will trigger a desktop notification"
     );
     let cfg = cfg.clone();
-    let pending = Arc::new(Mutex::new(None));
-    let pending_for_thread = pending.clone();
+    let notices = WatcherNotices::default();
+    let pending_for_thread = notices.revision.clone();
+    let auth_for_thread = notices.auth.clone();
     std::thread::spawn(move || {
         let client = match ServiceClient::from_config(&cfg) {
             Ok(client) => client,
@@ -2381,6 +2491,7 @@ fn start_revision_watcher(
         loop {
             if let Err(error) = session.refresh_if_needed(now_unix()) {
                 tracing::debug!(%error, "revision watcher could not refresh login");
+                record_auth_notice(&error, &auth_for_thread);
                 std::thread::sleep(std::time::Duration::from_secs(60));
                 continue;
             }
@@ -2402,6 +2513,7 @@ fn start_revision_watcher(
                     harness,
                     &mut seen,
                     &pending_for_thread,
+                    &auth_for_thread,
                 );
                 return;
             }
@@ -2415,22 +2527,27 @@ fn start_revision_watcher(
             // decision. Background invalidation checks must be live-only so a
             // transient outage does not repeatedly emit cache-fallback WARNs
             // or treat cached data as a newly observed server revision.
-            if let Ok(config) = client.fetch(&session, now_unix()) {
-                handle_revision_notice(
+            // This fetch is already live-only (no cache fallback), which makes
+            // it the one place a dead session reliably surfaces: the OAuth
+            // refresh above still succeeds after the browser session is gone.
+            match client.fetch(&session, now_unix()) {
+                Ok(config) => handle_revision_notice(
                     &active_revision,
                     harness,
                     config.revision,
                     &mut seen,
                     &pending_for_thread,
-                );
+                ),
+                Err(error) => record_auth_notice(&error, &auth_for_thread),
             }
             std::thread::sleep(std::time::Duration::from_secs(reconnect_seconds));
             reconnect_seconds = (reconnect_seconds * 2).min(60);
         }
     });
-    Some(pending)
+    Some(notices)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_for_revisions(
     client: &ServiceClient,
     session: &mut Session,
@@ -2438,14 +2555,36 @@ fn poll_for_revisions(
     harness: Harness,
     seen: &mut BTreeSet<String>,
     pending: &Arc<Mutex<Option<String>>>,
+    auth: &Arc<Mutex<Option<String>>>,
 ) {
     loop {
-        if session.refresh_if_needed(now_unix()).is_ok() {
-            if let Ok(config) = client.fetch(session, now_unix()) {
-                handle_revision_notice(active_revision, harness, config.revision, seen, pending);
-            }
+        match session.refresh_if_needed(now_unix()) {
+            Ok(()) => match client.fetch(session, now_unix()) {
+                Ok(config) => {
+                    handle_revision_notice(active_revision, harness, config.revision, seen, pending)
+                }
+                Err(error) => record_auth_notice(&error, auth),
+            },
+            Err(error) => record_auth_notice(&error, auth),
         }
         std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+/// Records a notice for errors only the user can clear, and clears it when the
+/// service starts answering again.
+fn record_auth_notice(error: &gh_common::GhError, auth: &Arc<Mutex<Option<String>>>) {
+    let message = match error {
+        gh_common::GhError::Unauthorized(message) | gh_common::GhError::ActionRequired(message) => {
+            message.clone()
+        }
+        _ => return,
+    };
+    if let Ok(mut auth) = auth.lock() {
+        if auth.as_deref() != Some(message.as_str()) {
+            tracing::info!(%message, "control service needs the user to act");
+            *auth = Some(message);
+        }
     }
 }
 
@@ -3022,6 +3161,18 @@ pub fn daemon(interval: Option<u64>) -> Result<()> {
             );
         }
     };
+    let on_unauthorized = |message: &str| {
+        eprintln!("blue: {message}");
+        report_status_with_attempt(
+            &cfg,
+            &session,
+            None,
+            &initial_inventory.entries,
+            false,
+            Some(message),
+            None,
+        );
+    };
     gh_agent::reconcile_loop(
         &client,
         &session,
@@ -3030,6 +3181,7 @@ pub fn daemon(interval: Option<u64>) -> Result<()> {
         now_unix,
         sleep,
         on_reconciled,
+        on_unauthorized,
     );
     Ok(())
 }
@@ -4908,6 +5060,23 @@ mod tests {
         assert!(!message.contains("error sending request"));
     }
 
+    #[test]
+    fn a_rejected_session_names_the_command_that_fixes_it() {
+        // `blue run` hits /gateway/key/ensure before it fetches policy, so this
+        // is the first place an expired session becomes visible.
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            let message = gateway_api_error_message(status, "unauthorized");
+            assert!(message.contains("blue login"), "{message}");
+        }
+        assert!(
+            gateway_api_error_message(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom")
+                .contains("boom")
+        );
+    }
+
     fn gateway_access(enabled: bool, status: &str) -> GatewayKeyResponse {
         serde_json::from_value(serde_json::json!({
             "enabled": enabled,
@@ -5190,7 +5359,7 @@ mod tests {
         let gateway: gh_service::GatewayConfig = serde_json::from_value(serde_json::json!({
             "type": "litellm",
             "proxy_url": "https://inference.example",
-            "pseudotoken": "token"
+            "token": "token"
         }))
         .unwrap();
 
@@ -5212,6 +5381,40 @@ mod tests {
         let plain = console::strip_ansi_codes(&rendered);
         assert!(plain.contains("- model = personal"));
         assert!(plain.contains("+ model = governed"));
+    }
+
+    #[test]
+    fn jwt_expiry_is_read_without_verifying_the_signature() {
+        // {"exp":2000000000,"scope":"gateway:infer"}, base64url, no padding.
+        let payload = "eyJleHAiOjIwMDAwMDAwMDAsInNjb3BlIjoiZ2F0ZXdheTppbmZlciJ9";
+        assert_eq!(
+            jwt_expires_at(&format!("header.{payload}.signature")),
+            Some(2_000_000_000)
+        );
+        assert_eq!(jwt_expires_at("not-a-jwt"), None);
+        assert_eq!(jwt_expires_at("header.!!!not-base64!!!.sig"), None);
+        // A token with no exp claim is not an error, just unknown.
+        assert_eq!(jwt_expires_at("header.eyJhIjoxfQ.sig"), None);
+    }
+
+    #[test]
+    fn only_actionable_errors_raise_an_auth_notice() {
+        let notice = Arc::new(Mutex::new(None));
+
+        record_auth_notice(&gh_common::GhError::service("connection refused"), &notice);
+        assert_eq!(*notice.lock().unwrap(), None);
+
+        record_auth_notice(&gh_common::GhError::unauthorized("expired"), &notice);
+        assert_eq!(notice.lock().unwrap().as_deref(), Some("expired"));
+
+        record_auth_notice(
+            &gh_common::GhError::action_required("run `blue gateway`"),
+            &notice,
+        );
+        assert_eq!(
+            notice.lock().unwrap().as_deref(),
+            Some("run `blue gateway`")
+        );
     }
 
     #[test]

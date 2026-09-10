@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select revoked_at, reactivated_at from gateway_auth_sessions where oauth_session_id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 1,
+        "name": "reactivated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "c768b2339590c3b28698b6ec934c851c0aba10a2760d2f047207b6afc9d67441"
+}

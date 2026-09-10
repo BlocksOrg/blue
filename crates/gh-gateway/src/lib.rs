@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 mod litellm;
 
-/// Where the pseudotoken must be placed for a given harness. Codex references
+/// Where the inference JWT must be placed for a given harness. Codex references
 /// an env var by name; Claude carries an in-file `ANTHROPIC_AUTH_TOKEN`;
 /// Kimi/OpenCode bake it into their config/auth files. `gh-config` uses this to
 /// route the token correctly.
@@ -33,7 +33,7 @@ pub enum AuthPlacement {
 pub struct GatewayRoute {
     /// The Blue inference proxy URL presented to the agent.
     pub base_url: String,
-    /// The user's per-deployment pseudotoken.
+    /// The user's session-bound inference JWT.
     pub token: String,
 }
 
@@ -53,7 +53,7 @@ pub struct GatewayWiring {
     /// The base URL the agent points at — the upstream inference proxy (or, once
     /// the attribution proxy exists, the local loopback that forwards to it).
     pub base_url: String,
-    /// The per-user pseudotoken. Never a real provider key.
+    /// The session-bound inference JWT. Never a real provider key.
     pub token: String,
     /// Codex-style wire protocol hint (`"responses"`); `None` for others.
     pub wire_api: Option<String>,
@@ -242,7 +242,7 @@ mod tests {
         GatewayConfig {
             kind: "litellm".into(),
             proxy_url: Some("https://svc/inference/".into()),
-            pseudotoken: Some("psk_abc".into()),
+            token: Some("jwt.abc.signature".into()),
             auth_style: "bearer".into(),
         }
     }
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(w.base_url, "https://svc/inference"); // trailing slash trimmed
         assert_eq!(w.wire_api.as_deref(), Some("responses"));
         assert_eq!(w.auth, AuthPlacement::EnvVar(CODEX_ENV_KEY.into()));
-        assert_eq!(w.token, "psk_abc");
+        assert_eq!(w.token, "jwt.abc.signature");
     }
 
     #[test]
@@ -305,21 +305,21 @@ mod tests {
     fn policy_template_without_runtime_values_cannot_be_wired() {
         let mut g = gw();
         g.proxy_url = None;
-        g.pseudotoken = None;
+        g.token = None;
         assert!(wire_with(&g, AuthPlacement::InFile, None).is_err());
     }
 
     #[test]
-    fn debug_output_redacts_pseudotokens() {
+    fn debug_output_redacts_inference_tokens() {
         let wiring = wire_with(&gw(), AuthPlacement::InFile, None).unwrap();
         let debug = format!("{wiring:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("psk_abc"));
+        assert!(!debug.contains("jwt.abc.signature"));
         let route = gateway_adapter("litellm")
             .unwrap()
             .client_route(&gw())
             .unwrap();
-        assert!(!format!("{route:?}").contains("psk_abc"));
+        assert!(!format!("{route:?}").contains("jwt.abc.signature"));
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
         fn client_route(&self, gateway: &GatewayConfig) -> Result<GatewayRoute, GhError> {
             Ok(GatewayRoute {
                 base_url: "https://synthetic.test".into(),
-                token: gateway.pseudotoken.clone().unwrap_or_default(),
+                token: gateway.token.clone().unwrap_or_default(),
             })
         }
         fn upstream_path(&self, path_and_query: &str) -> Result<String, GhError> {
