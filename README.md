@@ -23,6 +23,18 @@ place to govern coding-agent configuration without changing how developers use
 their native CLIs. It supports **Codex**, **Claude**, **Kimi**, and
 **OpenCode**.
 
+## Why a metaharness?
+
+A single provider can manage identity, policy, credentials, and client settings
+in one place. Those controls split apart when an organization adopts multiple
+agents, model providers, open-weight models, or self-hosted inference. Blue puts
+one governance layer around those choices while preserving each agent's native
+interface.
+
+Read the [Blue manifesto](https://bluee.sh/manifesto) for the complete argument:
+shared policy, identity-based access, server-held gateway credentials, useful
+activity records, and support for multiple native agents.
+
 > [!IMPORTANT]
 > Blue governs agents through configuration; it is not a sandbox and does not
 > contain what an agent can do on a developer's machine. See the

@@ -26,6 +26,10 @@
         "href": "https://github.com/BlocksOrg/blue"
       },
       {
+        "label": "Why Blue",
+        "href": "https://bluee.sh/manifesto"
+      },
+      {
         "label": "MIT License",
         "href": "https://github.com/BlocksOrg/blue/blob/main/LICENSE"
       }
