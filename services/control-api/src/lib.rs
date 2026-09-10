@@ -7393,6 +7393,8 @@ async fn inspect_package_source(
         let requested_ref = input
             .requested_ref
             .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| ApiError::bad_request("ref is required"))?;
         let (namespace, _) = safe_repository(repository)?;
         let org_slug = organization_slug(&state.pool, who.organization_id).await?;
