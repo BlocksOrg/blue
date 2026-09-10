@@ -442,7 +442,7 @@ fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     false
@@ -782,6 +782,22 @@ const fn compatibility_state_schema_version() -> u32 {
 #[cfg(test)]
 fn compatibility_state_path(home: &std::path::Path, harness: Harness) -> PathBuf {
     definition_state_path(home, adapters::definition(harness))
+}
+
+/// Assert that a rendered path — an env-var value, say — names `expected`.
+///
+/// Production builds these by joining components, so on Windows they render
+/// with `\` while a test literal like `".config/blue/runtime/kimi"` keeps `/`.
+/// The two name the same file; only the strings differ. Comparing as `Path`
+/// compares components and so is separator-agnostic.
+#[cfg(test)]
+fn assert_same_path(actual: Option<&str>, expected: &std::path::Path) {
+    assert_eq!(
+        actual.map(std::path::Path::new),
+        Some(expected),
+        "expected a path naming {}",
+        expected.display()
+    );
 }
 fn definition_state_path(
     home: &std::path::Path,
@@ -1540,10 +1556,7 @@ mod transaction_tests {
             resolve_launch_spec_at(&home, &context, &policy, &[], None, WriteOptions::default())
                 .unwrap();
 
-        assert_eq!(
-            spec.env.get("KIMI_CODE_HOME"),
-            Some(&runtime.display().to_string())
-        );
+        assert_same_path(spec.env.get("KIMI_CODE_HOME").map(String::as_str), &runtime);
         let _ = std::fs::remove_dir_all(home);
     }
 

@@ -27,6 +27,34 @@ fn snapshot(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
+/// Render a plan for comparison against its golden fixture.
+///
+/// Fixtures are authored once, with Unix rendering: `/` between path
+/// components and `:` between PATH entries. Windows names the same paths with
+/// `\` (which JSON escapes to `\\`) and joins PATH with `;`, so normalise both
+/// rather than forking every fixture per platform.
+fn render_plan(value: &serde_json::Value, home: &Path) -> String {
+    let unescaped = |text: &str| text.replace('\\', "/");
+    let mut rendered = serde_json::to_string_pretty(value).unwrap();
+    if cfg!(windows) {
+        rendered = rendered.replace("\\\\", "/");
+    }
+    rendered = rendered
+        .replace(&unescaped(home.to_str().unwrap()), "$HOME")
+        .replace(
+            &unescaped(std::env::current_exe().unwrap().to_str().unwrap()),
+            "$BLUE",
+        );
+    // An empty pattern would splice `$PATH` between every character.
+    if let Some(path) = std::env::var("PATH").ok().filter(|path| !path.is_empty()) {
+        rendered = rendered.replace(&unescaped(&path), "$PATH");
+    }
+    if cfg!(windows) {
+        rendered = rendered.replace(";$PATH", ":$PATH");
+    }
+    rendered
+}
+
 fn context(harness: Harness, version: &str) -> HarnessContext {
     resolve_compatibility(
         harness,
@@ -52,9 +80,9 @@ fn assert_wrapped_update_controls(
             Some("1")
         ),
         Harness::Kimi => {
-            assert_eq!(
+            assert_same_path(
                 env.get("KIMI_CODE_HOME").map(String::as_str),
-                Some(home.join(".config/blue/runtime/kimi").to_str().unwrap())
+                &home.join(".config/blue/runtime/kimi"),
             );
             assert_eq!(
                 env.get("KIMI_CODE_NO_AUTO_UPDATE").map(String::as_str),
@@ -206,11 +234,7 @@ fn every_production_interval_has_a_pure_golden_plan() {
                     "removals":plan.remove_paths, "ownership":plan.owned_paths,
                     "files":plan.files,"env":plan.env,"args":plan.launch_args,"warnings":plan.warnings
                 });
-                let actual = serde_json::to_string_pretty(&value)
-                    .unwrap()
-                    .replace(home.to_str().unwrap(), "$HOME")
-                    .replace(&std::env::var("PATH").unwrap_or_default(), "$PATH")
-                    .replace(std::env::current_exe().unwrap().to_str().unwrap(), "$BLUE");
+                let actual = render_plan(&value, &home);
                 let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/golden")
                     .join(format!(
@@ -393,19 +417,24 @@ fn symlink_escape_is_rejected_and_exact_symlink_removal_rolls_back() {
     std::fs::remove_dir_all(outside).unwrap();
 }
 
+// Exercised only by the `#[cfg(unix)]` synthetic-definition test below.
+#[cfg(unix)]
 #[derive(Debug)]
 struct SyntheticImplementation {
     directory: &'static str,
     schema: u32,
 }
+#[cfg(unix)]
 static SYNTHETIC_OLD: SyntheticImplementation = SyntheticImplementation {
     directory: ".synthetic-one",
     schema: 1,
 };
+#[cfg(unix)]
 static SYNTHETIC_NEW: SyntheticImplementation = SyntheticImplementation {
     directory: ".synthetic-two",
     schema: 2,
 };
+#[cfg(unix)]
 static SYNTHETIC_METADATA: gh_common::HarnessMetadata = gh_common::HarnessMetadata {
     harness: Harness::Codex,
     key: "synthetic",
@@ -417,6 +446,7 @@ static SYNTHETIC_METADATA: gh_common::HarnessMetadata = gh_common::HarnessMetada
     install_program: "synthetic-install",
     install_args: &["{version}"],
 };
+#[cfg(unix)]
 static SYNTHETIC: adapters::HarnessDefinition = adapters::HarnessDefinition {
     harness: Harness::Codex,
     metadata: &SYNTHETIC_METADATA,
@@ -449,6 +479,7 @@ static SYNTHETIC: adapters::HarnessDefinition = adapters::HarnessDefinition {
         },
     ],
 };
+#[cfg(unix)]
 impl adapters::HarnessImplementation for SyntheticImplementation {
     fn support(&self) -> &'static adapters::GenerationSupport {
         static SUPPORT: adapters::GenerationSupport = adapters::GenerationSupport {
