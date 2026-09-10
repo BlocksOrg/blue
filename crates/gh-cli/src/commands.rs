@@ -4697,88 +4697,12 @@ fn native_session_display(
     Ok((title.as_deref().and_then(preview_title), summary))
 }
 
-const SHIM_MARKER: &str = "Blue command shim v1";
+use gh_common::shim::{managed_shim, render_shim, shim_path};
 
 fn shim_dir(dir: Option<&str>) -> Result<std::path::PathBuf> {
     match dir {
         Some(d) => Ok(std::path::PathBuf::from(d)),
         None => Ok(gh_common::paths::shim_dir()?),
-    }
-}
-
-fn shim_path(dir: &Path, harness: Harness) -> PathBuf {
-    #[cfg(windows)]
-    {
-        dir.join(format!("{}.cmd", harness.key()))
-    }
-    #[cfg(not(windows))]
-    {
-        dir.join(harness.key())
-    }
-}
-
-fn render_shim(exe: &Path, harness: Harness) -> Result<String> {
-    let executable = exe.to_str().ok_or_else(|| {
-        anyhow!(
-            "Blue executable path is not valid Unicode: {}",
-            exe.display()
-        )
-    })?;
-    #[cfg(windows)]
-    {
-        if executable.contains('%') || executable.contains('"') {
-            bail!("Blue executable path cannot be represented safely in a cmd shim");
-        }
-        Ok(format!(
-            "@rem {SHIM_MARKER}\r\n@\"{executable}\" run {} -- %*\r\n",
-            harness.key()
-        ))
-    }
-    #[cfg(not(windows))]
-    {
-        if executable.contains('\n')
-            || executable.contains('"')
-            || executable.contains('`')
-            || executable.contains('$')
-            || executable.contains('\\')
-        {
-            bail!("Blue executable path cannot be represented safely in a shell shim");
-        }
-        Ok(format!(
-            "#!/usr/bin/env bash\n# {SHIM_MARKER}\nexec \"{executable}\" run {} -- \"$@\"\n",
-            harness.key()
-        ))
-    }
-}
-
-fn valid_managed_shim(contents: &str, harness: Harness) -> bool {
-    #[cfg(windows)]
-    {
-        let Some(command) = contents.strip_prefix(&format!("@rem {SHIM_MARKER}\r\n@\"")) else {
-            return false;
-        };
-        let Some(executable) = command.strip_suffix(&format!("\" run {} -- %*\r\n", harness.key()))
-        else {
-            return false;
-        };
-        !executable.is_empty()
-            && Path::new(executable).is_absolute()
-            && !executable.contains('"')
-            && !executable.contains('%')
-    }
-    #[cfg(not(windows))]
-    {
-        let Some(command) =
-            contents.strip_prefix(&format!("#!/usr/bin/env bash\n# {SHIM_MARKER}\nexec \""))
-        else {
-            return false;
-        };
-        let Some(executable) =
-            command.strip_suffix(&format!("\" run {} -- \"$@\"\n", harness.key()))
-        else {
-            return false;
-        };
-        !executable.is_empty() && Path::new(executable).is_absolute()
     }
 }
 
@@ -4800,7 +4724,9 @@ pub fn shim_install(dir: Option<&str>) -> Result<()> {
     // destination must not leave the first three shims installed.
     for (harness, path, _) in &proposed {
         match std::fs::read_to_string(path) {
-            Ok(contents) if valid_managed_shim(&contents, *harness) => {}
+            // Shims written before the format was versioned are still ours, and
+            // get overwritten in place with the current form.
+            Ok(contents) if managed_shim(&contents, *harness) => {}
             Ok(_) => bail!(
                 "refusing to replace unrelated or malformed shim {}",
                 path.display()
@@ -4827,7 +4753,7 @@ pub fn shim_uninstall(dir: Option<&str>) -> Result<()> {
     for harness in Harness::ALL {
         let path = shim_path(&dir, harness);
         if let Ok(contents) = std::fs::read_to_string(&path) {
-            if valid_managed_shim(&contents, harness) {
+            if managed_shim(&contents, harness) {
                 std::fs::remove_file(&path)?;
                 println!("  removed shim: {}", path.display());
             } else {
@@ -4851,16 +4777,55 @@ fn set_executable(_path: &std::path::Path) {}
 mod tests {
     use super::*;
 
+    /// Every install before the shim format was versioned wrote the legacy
+    /// form; refusing to touch it would strand those users on both `install`
+    /// and `uninstall`.
     #[test]
-    fn shim_validation_requires_the_complete_versioned_command() {
-        #[cfg(windows)]
-        let executable = Path::new(r"C:\Program Files\Blue\blue.exe");
-        #[cfg(not(windows))]
-        let executable = Path::new("/opt/Blue Tools/blue");
-        let rendered = render_shim(executable, Harness::Codex).unwrap();
-        assert!(valid_managed_shim(&rendered, Harness::Codex));
-        assert!(!valid_managed_shim(&rendered, Harness::Claude));
-        assert!(!valid_managed_shim(SHIM_MARKER, Harness::Codex));
+    #[cfg(unix)]
+    fn shim_install_replaces_a_legacy_shim_in_place() {
+        let root = std::env::temp_dir().join(format!("blue-shim-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = shim_path(&root, Harness::Codex);
+        std::fs::write(
+            &path,
+            "#!/usr/bin/env bash\n# blue shim\nexec \"/usr/local/bin/blue\" run codex -- \"$@\"\n",
+        )
+        .unwrap();
+
+        shim_install(root.to_str()).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            gh_common::shim::valid_managed_shim(&contents, Harness::Codex),
+            "{contents}"
+        );
+        assert!(!gh_common::shim::legacy_managed_shim(
+            &contents,
+            Harness::Codex
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shim_uninstall_removes_a_legacy_shim_but_not_a_stranger() {
+        let root =
+            std::env::temp_dir().join(format!("blue-shim-legacy-rm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = shim_path(&root, Harness::Codex);
+        std::fs::write(
+            &legacy,
+            "#!/usr/bin/env bash\n# blue shim\nexec \"/usr/local/bin/blue\" run codex -- \"$@\"\n",
+        )
+        .unwrap();
+        let stranger = shim_path(&root, Harness::Claude);
+        std::fs::write(&stranger, "#!/bin/sh\nexec /usr/bin/claude \"$@\"\n").unwrap();
+
+        shim_uninstall(root.to_str()).unwrap();
+
+        assert!(!legacy.exists());
+        assert!(stranger.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

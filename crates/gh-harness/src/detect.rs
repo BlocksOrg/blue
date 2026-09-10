@@ -120,36 +120,7 @@ fn is_blue_or_shim(path: &std::path::Path) -> bool {
     Harness::ALL
         .iter()
         .copied()
-        .any(|harness| valid_blue_shim(&contents, harness))
-}
-
-#[cfg(windows)]
-fn valid_blue_shim(contents: &str, harness: Harness) -> bool {
-    let Some(command) = contents.strip_prefix("@rem Blue command shim v1\r\n@\"") else {
-        return false;
-    };
-    let Some(executable) = command.strip_suffix(&format!("\" run {} -- %*\r\n", harness.key()))
-    else {
-        return false;
-    };
-    !executable.is_empty()
-        && std::path::Path::new(executable).is_absolute()
-        && !executable.contains('"')
-        && !executable.contains('%')
-}
-
-#[cfg(not(windows))]
-fn valid_blue_shim(contents: &str, harness: Harness) -> bool {
-    let Some(command) =
-        contents.strip_prefix("#!/usr/bin/env bash\n# Blue command shim v1\nexec \"")
-    else {
-        return false;
-    };
-    let Some(executable) = command.strip_suffix(&format!("\" run {} -- \"$@\"\n", harness.key()))
-    else {
-        return false;
-    };
-    !executable.is_empty() && std::path::Path::new(executable).is_absolute()
+        .any(|harness| gh_common::shim::managed_shim(&contents, harness))
 }
 
 #[cfg(windows)]
@@ -192,5 +163,39 @@ mod tests {
             Some(Version::parse("2.1.0-beta.2").unwrap())
         );
         assert!(parse_version(Harness::Kimi, "unknown").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shim_shadowing_skips_both_shim_formats_without_reading_binaries() {
+        let dir = std::env::temp_dir().join(format!("blue-detect-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let current = dir.join("codex-current");
+        std::fs::write(
+            &current,
+            gh_common::shim::render_shim(
+                std::path::Path::new("/usr/local/bin/blue"),
+                Harness::Codex,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(is_blue_or_shim(&current));
+
+        let legacy = dir.join("codex-legacy");
+        std::fs::write(
+            &legacy,
+            "#!/usr/bin/env bash\n# blue shim\nexec \"/usr/local/bin/blue\" run codex -- \"$@\"\n",
+        )
+        .unwrap();
+        assert!(is_blue_or_shim(&legacy));
+
+        let unrelated = dir.join("codex-unrelated");
+        std::fs::write(&unrelated, "#!/bin/sh\nexec /usr/bin/codex \"$@\"\n").unwrap();
+        assert!(!is_blue_or_shim(&unrelated));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

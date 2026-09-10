@@ -14,6 +14,7 @@ pub mod fs_identity;
 pub mod harness;
 pub mod network;
 pub mod paths;
+pub mod shim;
 
 pub use atomic::{
     create_owner_only_dir, create_owner_only_dir_all, prepare_atomic, prepare_atomic_in,
@@ -22,3 +23,6 @@ pub use atomic::{
 pub use client_config::{BlueToml, IdentityConfig, ModeConfig, ServiceConfig};
 pub use error::{GhError, Result};
 pub use harness::{harness_registry, ComponentRules, Harness, HarnessMetadata, InstallInvocation};
+pub use shim::{
+    legacy_managed_shim, managed_shim, render_shim, shim_path, valid_managed_shim, SHIM_MARKER,
+};
