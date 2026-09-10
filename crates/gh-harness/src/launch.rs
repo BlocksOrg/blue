@@ -54,8 +54,10 @@ impl Drop for PtySession {
             }
         }
         #[cfg(windows)]
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.job as _);
+        if self.job != 0 {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.job as _);
+            }
         }
     }
 }
@@ -92,8 +94,20 @@ impl PtySession {
             .slave
             .spawn_command(cmd)
             .map_err(|e| GhError::other(format!("spawning {}: {e}", bin.display())))?;
+        // Losing tree-kill is worth a warning, not a dead CLI: without the job
+        // object a descendant of the harness can outlive it, but the harness
+        // itself is still supervised and still killable.
         #[cfg(windows)]
-        let job = create_kill_on_close_job(child.process_id())?;
+        let job = match create_kill_on_close_job(child.process_id()) {
+            Ok(job) => job,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "continuing without a Windows Job Object; processes the harness spawns will not be terminated as a group"
+                );
+                0
+            }
+        };
         drop(pair.slave);
         #[cfg(unix)]
         let process_group = pair.master.process_group_leader();
@@ -207,8 +221,10 @@ impl PtySession {
 
     pub fn force_kill(&self) -> Result<(), GhError> {
         #[cfg(windows)]
-        if unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job as _, 1) }
-            != 0
+        if self.job != 0
+            && unsafe {
+                windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job as _, 1)
+            } != 0
         {
             return Ok(());
         }
@@ -220,6 +236,13 @@ impl PtySession {
     }
 }
 
+/// Attach the ConPTY child to a kill-on-close job object, so everything it
+/// spawns dies with it.
+///
+/// The job is necessarily created after `spawn_command`, because that is when
+/// the process id first exists: a descendant spawned inside that window escapes
+/// it. Closing the gap needs `PROC_THREAD_ATTRIBUTE_JOB_LIST` on the child's
+/// startup attributes, which `portable-pty` does not expose.
 #[cfg(windows)]
 fn create_kill_on_close_job(process_id: Option<u32>) -> Result<usize, GhError> {
     use windows_sys::Win32::Foundation::CloseHandle;

@@ -16,6 +16,7 @@ pub const SHIM_MARKER: &str = "Blue command shim v1";
 
 /// The marker written before the format was versioned. Unix-only — Windows
 /// shims did not exist before the current format.
+#[cfg(not(windows))]
 const LEGACY_SHIM_MARKER: &str = "# blue shim";
 
 /// Where the shim for `harness` lives inside `dir`.
