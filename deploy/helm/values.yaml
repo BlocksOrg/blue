@@ -21,6 +21,12 @@ blue:
   # supplied as HARNESS_PROXY_OAUTH_CLIENT_SECRET via `existingSecret` (shared by
   # the dashboard and inference-proxy pods).
   inferenceProxyClientId: blue-inference-proxy
+  inferenceJwt:
+    # Secret containing signing-key.pem (active private key) and jwks.json
+    # (the active public key plus retained rotation keys).
+    secret: ""
+    activeKid: ""
+    audience: blue-inference-proxy
   internalTransport:
     # mtls (recommended/default) or insecure-http (trusted private networks only).
     mode: mtls

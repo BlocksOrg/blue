@@ -55,7 +55,7 @@ control_api:
 # is projected into this policy; runtime settings and secrets never leave the server.
 governance:
   revision: "2026-09-06.1"
-  contract_version: 2
+  contract_version: 3
   required_capabilities:
     - adapter_intervals
     - compiled_harness_registry
@@ -63,6 +63,8 @@ governance:
     # Required when any harness enables allow_unverified_versions.
     # - unverified_harness_versions
     - versioned_state
+    # Required when the gateway overlay is active.
+    - gateway_inference_jwt
   # Required when harness version ranges or versioned package adapters are used.
   minimum_client_version: "0.1.0"
   ttl_seconds: 300

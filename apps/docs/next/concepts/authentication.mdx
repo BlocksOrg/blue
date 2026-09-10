@@ -39,7 +39,7 @@ Access tokens expire after 15 minutes. Refresh tokens rotate and are stored with
 | `governance:read` | Read personalized governance policy and gateway key metadata |
 | `session:write` | Presign and complete raw-session uploads |
 | `client-status:write` | Report installed harnesses and reconciliation health |
-| `gateway:resolve` | Resolve pseudotokens for the inference proxy's internal gateway requests |
+| `gateway:resolve` | Resolve validated user/session pairs for the inference proxy's internal gateway requests |
 
 Administrative endpoints additionally require an administrator role in the same organization. Session visibility is organization-scoped; non-admin users see only their own captured sessions.
 

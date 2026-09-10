@@ -9,6 +9,10 @@ production_network=(
   --set 'networkPolicy.databaseCidrs[0]=10.0.0.0/24'
   --set 'networkPolicy.externalHttpsCidrs[0]=10.0.1.0/24'
 )
+gateway_jwt=(
+  --set blue.inferenceJwt.secret=blue-gateway-jwt
+  --set blue.inferenceJwt.activeKid=gateway-2025-01
+)
 
 if helm template blue-prerequisites "$prerequisites_chart" >/dev/null 2>&1; then
   echo "prerequisite render without a database CIDR unexpectedly succeeded" >&2
@@ -87,8 +91,22 @@ if helm template blue "$chart" \
   echo "gateway render without gateway settings unexpectedly succeeded" >&2
   exit 1
 fi
+# The check above omits every gateway value, so it would still pass if the
+# inferenceJwt guard were deleted. Pin that guard on its own.
+if helm template blue "$chart" \
+  "${production_network[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.serverSecret=blue-internal-server \
+  --set blue.internalTransport.clientSecret=blue-internal-client >/dev/null 2>&1; then
+  echo "gateway render without blue.inferenceJwt unexpectedly succeeded" >&2
+  exit 1
+fi
 helm template blue "$chart" \
   "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
   --set blue.existingSecret=blue-runtime \
   --set image.digest="$digest" \
   --set blue.enableInferenceProxy=true \
@@ -100,11 +118,15 @@ grep -q 'app.kubernetes.io/component: inference-proxy' /tmp/blue-gateway-product
 for key in HARNESS_GATEWAY_ENCRYPTION_KEY HARNESS_PROXY_OAUTH_CLIENT_SECRET; do
   grep -q "key: $key" /tmp/blue-gateway-production.yaml
 done
+grep -q 'name: HARNESS_GATEWAY_JWT_ACTIVE_KID' /tmp/blue-gateway-production.yaml
+grep -q 'secretName: "blue-gateway-jwt"' /tmp/blue-gateway-production.yaml
+grep -q 'name: gateway-jwt' /tmp/blue-gateway-production.yaml
 grep -q 'name: BLUE_GATEWAY_ENABLED' /tmp/blue-gateway-production.yaml
 grep -q 'value: "true"' /tmp/blue-gateway-production.yaml
 
 helm template blue "$chart" \
   "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
   --set blue.existingSecret=blue-runtime \
   --set image.digest="$digest" \
   --set blue.enableInferenceProxy=true \

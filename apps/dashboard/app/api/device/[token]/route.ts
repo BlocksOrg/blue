@@ -1,4 +1,9 @@
-import { auth, authPool, invalidateDeviceBrowserLink } from "../../../../lib/auth";
+import {
+  auth,
+  authPool,
+  bindDeviceAuthorizationSession,
+  invalidateDeviceBrowserLink,
+} from "../../../../lib/auth";
 
 async function pendingUserCode(token: string): Promise<string | undefined> {
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
@@ -57,6 +62,11 @@ export async function POST(
       query: { user_code: userCode },
       headers: request.headers,
     });
+    if (
+      action === "approve" &&
+      !(await bindDeviceAuthorizationSession(userCode, request.headers))
+    )
+      throw new Error("device authorization session binding failed");
     const result =
       action === "approve"
         ? await auth.api.deviceApprove({

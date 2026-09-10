@@ -98,6 +98,11 @@ spec:
               value: http://{{ include "blue.fullname" . }}-inference-proxy:{{ .Values.service.ports.inferenceProxy }}
             - name: HARNESS_INTERNAL_ALLOWED_CLIENT_ID
               value: {{ .Values.blue.inferenceProxyClientId | quote }}
+            - { name: HARNESS_GATEWAY_JWT_ISSUER, value: {{ .Values.blue.publicUrls.controlApi | quote }} }
+            - { name: HARNESS_GATEWAY_JWT_AUDIENCE, value: {{ .Values.blue.inferenceJwt.audience | quote }} }
+            - { name: HARNESS_GATEWAY_JWT_ACTIVE_KID, value: {{ required "blue.inferenceJwt.activeKid is required when blue.enableInferenceProxy=true" .Values.blue.inferenceJwt.activeKid | quote }} }
+            - { name: HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE, value: /var/run/blue/gateway-jwt/signing-key.pem }
+            - { name: HARNESS_GATEWAY_JWT_JWKS_FILE, value: /var/run/blue/gateway-jwt/jwks.json }
             {{- end }}
             - name: CONTROL_API_URL
               value: http://{{ include "blue.fullname" . }}-control-api:{{ .Values.service.ports.controlApi }}
@@ -130,8 +135,11 @@ spec:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources.controlApi | nindent 12 }}
-          {{- if or .Values.blue.config.existingConfigMap .Values.blue.provisionerExecutable.enabled (and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls")) }}
+          {{- if or .Values.blue.config.existingConfigMap .Values.blue.provisionerExecutable.enabled .Values.blue.enableInferenceProxy }}
           volumeMounts:
+            {{- if .Values.blue.enableInferenceProxy }}
+            - { name: gateway-jwt, mountPath: /var/run/blue/gateway-jwt, readOnly: true }
+            {{- end }}
             {{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") }}
             - { name: internal-tls, mountPath: /var/run/blue/internal-tls, readOnly: true }
             {{- end }}
@@ -147,8 +155,12 @@ spec:
               readOnly: true
             {{- end }}
           {{- end }}
-      {{- if or .Values.blue.config.existingConfigMap .Values.blue.provisionerExecutable.enabled (and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls")) }}
+      {{- if or .Values.blue.config.existingConfigMap .Values.blue.provisionerExecutable.enabled .Values.blue.enableInferenceProxy }}
       volumes:
+        {{- if .Values.blue.enableInferenceProxy }}
+        - name: gateway-jwt
+          secret: { secretName: {{ required "blue.inferenceJwt.secret is required when blue.enableInferenceProxy=true" .Values.blue.inferenceJwt.secret | quote }} }
+        {{- end }}
         {{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") }}
         - name: internal-tls
           secret: { secretName: {{ .Values.blue.internalTransport.serverSecret | quote }} }

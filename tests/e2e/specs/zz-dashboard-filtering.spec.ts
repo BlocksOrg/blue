@@ -1,4 +1,5 @@
 import { expect, request as playwrightRequest, test, type APIRequestContext, type BrowserContext, type Page } from "@playwright/test";
+import YAML from "yaml";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import https from "node:https";
@@ -276,11 +277,15 @@ test.describe.serial("dashboard table filtering", () => {
     expect(configResponse.status(), await configResponse.text()).toBe(200);
     const config = await configResponse.json() as { revision: string; managed_yaml: string };
     if (!/^gateway:\s*$/m.test(config.managed_yaml)) {
-      const managedYaml = config.managed_yaml.replace(
-        /^harnesses:\s*$/m,
-        "gateway:\n  type: litellm\nharnesses:",
+      const managedConfig = YAML.parse(config.managed_yaml);
+      managedConfig.gateway = { type: "litellm" };
+      managedConfig.required_capabilities = Array.from(
+        new Set([
+          ...(managedConfig.required_capabilities ?? []),
+          "gateway_inference_jwt",
+        ]),
       );
-      expect(managedYaml).not.toBe(config.managed_yaml);
+      const managedYaml = YAML.stringify(managedConfig);
       const updateResponse = await adminPage.request.put(`${control}/admin/governance-config`, {
         data: { base_revision: config.revision, managed_yaml: managedYaml },
       });
@@ -542,10 +547,10 @@ test.describe.serial("dashboard table filtering", () => {
     }
 
     await submitSearch(page, "Search sessions", fixtures.sessionIds.adminCodex.toUpperCase());
-    await expect(rowWith(page, fixtures.sessionIds.adminCodex)).toBeVisible();
-    await expect(rowWith(page, fixtures.sessionIds.adminClaude)).toHaveCount(0);
+    await expect(rowWith(page, "Codex session")).toBeVisible();
+    await expect(rowWith(page, "Claude session")).toHaveCount(0);
     await submitSearch(page, "Search sessions", `/WORKSPACE/${fixtures.marker}/BETA`);
-    await expect(rowWith(page, fixtures.sessionIds.adminClaude)).toBeVisible();
+    await expect(rowWith(page, "Claude session")).toBeVisible();
 
     await page.getByRole("button", { name: /^Filters/ }).click();
     await chooseAsyncUser(page, "User", fixtures.admin.email);
@@ -556,8 +561,8 @@ test.describe.serial("dashboard table filtering", () => {
     await dialog.getByLabel("Updated to").fill(today);
     await chooseSelect(page, "Order", "Oldest updated");
     await dialog.getByRole("button", { name: "Apply filters" }).click({ noWaitAfter: true });
-    await expect(rowWith(page, fixtures.sessionIds.adminClaude)).toBeVisible();
-    await expect(rowWith(page, fixtures.sessionIds.memberKimi)).toHaveCount(0);
+    await expect(rowWith(page, "Claude session")).toBeVisible();
+    await expect(rowWith(page, "Kimi session")).toHaveCount(0);
     await expect(page.getByLabel("Applied filters").getByRole("link")).toHaveCount(5);
 
     await page.getByRole("link", { name: new RegExp(`Remove User: ${fixtures.admin.email}`, "i") }).click({ noWaitAfter: true });
@@ -698,7 +703,7 @@ test.describe.serial("dashboard table filtering", () => {
     await expect(page.getByLabel("Search proxy requests", { exact: true })).toHaveValue(searchTerms[0].toUpperCase());
     await expect(rowWith(page, fixtures.gatewayPaths.success)).toBeVisible();
     await submitSearch(page, "Search proxy requests", "");
-    await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBe("");
+    await expect.poll(() => new URL(page.url()).searchParams.get("q")).toBeNull();
     await page.getByRole("button", { name: /^Filters/ }).click();
     await chooseAsyncUser(page, "User", fixtures.member.email);
     await chooseSelect(page, "Gateway key", `${fixtures.marker} Member Key`);

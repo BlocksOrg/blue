@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "select user_id,pseudotoken,proxy_virtual_key from public.gateway_key_selections where pseudotoken is not null and proxy_virtual_key is not null",
+  "query": "select user_id,proxy_virtual_key from public.gateway_key_selections where proxy_virtual_key is not null and credential_ciphertext is null for update skip locked limit 1",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,6 @@
       },
       {
         "ordinal": 1,
-        "name": "pseudotoken",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 2,
         "name": "proxy_virtual_key",
         "type_info": "Text"
       }
@@ -24,9 +19,8 @@
     },
     "nullable": [
       false,
-      true,
       true
     ]
   },
-  "hash": "f2c088158b362010b6baad4b4b91396465532f00c30d0513b4c7c849d5b602d5"
+  "hash": "19a42c3e457a2c5c7115c44d0f5c42c4e1b825acd084b25b5d4092704168616a"
 }

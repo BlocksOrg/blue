@@ -32,6 +32,19 @@ pub enum GhError {
     #[error("service error: {0}")]
     Service(String),
 
+    /// The control service rejected the session (401/403). Distinct from
+    /// `Service` because a rejected session must never fail-soft to cache:
+    /// a stale cache cannot re-authenticate the user, and serving it hides
+    /// the one thing they need to be told.
+    #[error("{0}")]
+    Unauthorized(String),
+
+    /// The control service answered, understood the request, and needs the
+    /// user to run a command before it can be served (409). Also never
+    /// fail-soft: the cache cannot satisfy the prerequisite either.
+    #[error("{0}")]
+    ActionRequired(String),
+
     #[error("serialization error: {0}")]
     Serde(String),
 
@@ -48,6 +61,12 @@ impl GhError {
     }
     pub fn service(msg: impl Into<String>) -> Self {
         GhError::Service(msg.into())
+    }
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        GhError::Unauthorized(msg.into())
+    }
+    pub fn action_required(msg: impl Into<String>) -> Self {
+        GhError::ActionRequired(msg.into())
     }
 }
 

@@ -15,7 +15,7 @@ a hostile local administrator.
 
 | Plan | Priority | Status | Depends on |
 | --- | --- | --- | --- |
-| [Gateway coding-session attribution](gateway-coding-session-attribution.md) | Pilot blocker | Planned | — |
+| [Gateway coding-session attribution](gateway-coding-session-attribution.md) | Pilot blocker | Planned | Implemented gateway inference authentication |
 | [Windows platform parity](windows-platform-parity.md) | Pilot blocker | Planned | — |
 | [Dashboard contract and build hardening](dashboard-contract-and-build-hardening.md) | Pilot blocker | Planned | — |
 | [Control-plane telemetry](control-plane-telemetry.md) | Post-baseline | Planned | Gateway attribution; dashboard contracts |
@@ -28,10 +28,12 @@ this table; do not use a plan document in place of the issue required by
 
 ## Delivery waves
 
-1. **Trusted gateway:** authenticated coding-session attribution.
+1. **Trusted attribution:** coding-session attribution on top of the implemented
+   session-bound gateway authentication.
 2. **Client and operator parity, in parallel:** Windows support and dashboard
    hardening.
-3. **Post-baseline capability:** authenticated control-plane telemetry.
+3. **Post-baseline capability:** authenticated control-plane telemetry after
+   coding-session attribution.
 4. **Structural work throughout:** extract a domain when it is already being
    changed, then complete the remaining modularization after pilot blockers.
 

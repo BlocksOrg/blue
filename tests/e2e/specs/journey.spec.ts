@@ -69,7 +69,43 @@ test.describe.serial("Blue deployment journey", () => {
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
     const session = path.join(home, ".config", "blue", "session.json");
     expect((await stat(session)).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(await readFile(session, "utf8")).refresh_token).toBeTruthy();
+    const persistedSession = JSON.parse(await readFile(session, "utf8"));
+    expect(persistedSession.refresh_token).toBeTruthy();
+    const accessClaims = JSON.parse(
+      Buffer.from(persistedSession.token.split(".")[1], "base64url").toString(
+        "utf8",
+      ),
+    );
+    expect(accessClaims.sid).toEqual(expect.any(String));
+    expect(accessClaims.sid).not.toBe("");
+    const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
+    const refreshed = await page.request.post(
+      `${dashboard}/api/auth/oauth2/token`,
+      {
+        headers: { origin: dashboard },
+        form: {
+          grant_type: "refresh_token",
+          refresh_token: persistedSession.refresh_token,
+          client_id: "blue-cli",
+          resource:
+            process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080",
+        },
+      },
+    );
+    expect(refreshed.status(), await refreshed.text()).toBe(200);
+    const refreshedGrant = await refreshed.json();
+    const refreshedToken = refreshedGrant.access_token;
+    const refreshedClaims = JSON.parse(
+      Buffer.from(refreshedToken.split(".")[1], "base64url").toString("utf8"),
+    );
+    expect(refreshedClaims.sid).toBe(accessClaims.sid);
+    persistedSession.token = refreshedToken;
+    persistedSession.expires_at =
+      Math.floor(Date.now() / 1000) + (refreshedGrant.expires_in ?? 900);
+    if (refreshedGrant.refresh_token) {
+      persistedSession.refresh_token = refreshedGrant.refresh_token;
+    }
+    await writeFile(session, JSON.stringify(persistedSession), { mode: 0o600 });
     await expect(stat(path.join(home, ".codex", "blue.config.toml"))).rejects.toThrow();
     await expect(stat(path.join(home, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
     const preferred = await runCli(home, ["agent", "claude"]);
@@ -115,7 +151,7 @@ test.describe.serial("Blue deployment journey", () => {
         .poll(async () =>
           readClientFile(directHome, "agent-log/codex.env").catch(() => ""),
         )
-        .toMatch(/^env_HARNESS_CODEX_KEY=psk_/m);
+        .toMatch(/^env_HARNESS_CODEX_KEY=eyJ/m);
       expect(await readClientFile(directHome, ".codex/blue.config.toml")).toContain(
         'model_provider = "governed"',
       );
@@ -144,7 +180,7 @@ test.describe.serial("Blue deployment journey", () => {
     expect(directProfile).not.toContain('model_provider = "governed"');
     expect(directProfile).toContain('model = "gpt-e2e"');
     expect(await readClientFile(directHome, "agent-log/codex.env")).toContain(
-      "env_HARNESS_CODEX_KEY=psk_",
+      "env_HARNESS_CODEX_KEY=eyJ",
     );
 
     const directRestart = await runCli(directHome, ["run", "codex", "--", "verify-direct"]);
@@ -183,7 +219,7 @@ test.describe.serial("Blue deployment journey", () => {
     const gatewayRestart = await runCli(directHome, ["run", "codex", "--", "verify-gateway"]);
     expect(gatewayRestart.code, gatewayRestart.stderr).toBe(0);
     expect(await readClientFile(directHome, "agent-log/codex.env")).toMatch(
-      /^env_HARNESS_CODEX_KEY=psk_/m,
+      /^env_HARNESS_CODEX_KEY=eyJ/m,
     );
 
     const currentResponse = await page.request.get(`${control}/admin/governance-config`);
@@ -447,7 +483,7 @@ test.describe.serial("Blue deployment journey", () => {
     const legacyState = JSON.parse(await readClientFile(boundaryHome, statePath));
     expect(legacyState).toMatchObject({
       schema_version: 4,
-      profile_id: "codex-v0_0_0",
+      profile_id: "codex-v0_114_0",
     });
     expect(await readClientFile(boundaryHome, ".codex/blue.config.toml")).not.toContain(
       "session-upload",
@@ -631,14 +667,14 @@ test.describe.serial("Blue deployment journey", () => {
     await expect(page.getByRole("heading", { name: "e2e-codex" })).toBeVisible();
   });
 
-  test("gateway swaps the pseudotoken and records request metadata", async ({ page }) => {
+  test("gateway swaps the inference JWT and records request metadata", async ({ page }) => {
     await loginAsAdmin(page);
     const log = await readClientFile(home, "agent-log/codex.env");
     const token = log.match(/^env_HARNESS_CODEX_KEY=(.+)$/m)?.[1];
     expect(token).toBeTruthy();
     expect((await page.request.post("http://blue:8081/v1/chat/completions", { data: {} })).status()).toBe(401);
     expect((await page.request.post("http://blue:8081/v1/chat/completions", {
-      headers: { authorization: "Bearer invalid-pseudotoken" },
+      headers: { authorization: "Bearer invalid-inference-jwt" },
       data: {},
     })).status()).toBe(401);
     const response = await page.request.post("http://blue:8081/v1/chat/completions?api-version=e2e", {
@@ -978,10 +1014,29 @@ test.describe.serial("Blue deployment journey", () => {
       const gatewayStatus = await memberContext.request.get(`${control}/gateway/status`);
       expect(gatewayStatus.status(), await gatewayStatus.text()).toBe(200);
       expect(await gatewayStatus.json()).toEqual({ enabled: true, runtime_configured: true });
+
+      // Gateway personalization deliberately rejects browser-cookie sessions:
+      // inference JWTs must be bound to an OAuth access token carrying `sid`.
+      const memberHome = await prepareClient(`member-policy-${Date.now()}`);
+      const memberLogin = spawnCli(memberHome, ["login"]);
+      const memberDeviceUrl = await waitForOutput(
+        memberLogin,
+        /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/,
+      );
+      await memberPage.goto(memberDeviceUrl);
+      await memberPage.getByRole("button", { name: "Authorize" }).click();
+      await expect(memberPage.getByText("CLI authorized")).toBeVisible();
+      expect((await collect(memberLogin)).code).toBe(0);
+      const memberGateway = await runCli(memberHome, ["gateway"]);
+      expect(memberGateway.code, memberGateway.stderr).toBe(0);
+      const memberOauth = JSON.parse(
+        await readClientFile(memberHome, ".config/blue/session.json"),
+      );
       const memberConfig = await memberContext.request.get(`${control}/governance-config`, {
         headers: {
-          "x-blue-contract-version": "2",
-          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state",
+          authorization: `Bearer ${memberOauth.token}`,
+          "x-blue-contract-version": "3",
+          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt",
         },
       });
       expect(memberConfig.status(), await memberConfig.text()).toBe(200);

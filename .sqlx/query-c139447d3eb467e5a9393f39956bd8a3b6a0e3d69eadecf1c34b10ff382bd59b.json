@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into gateway_auth_sessions(oauth_session_id,user_id,source_expires_at) values($1,$2,$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c139447d3eb467e5a9393f39956bd8a3b6a0e3d69eadecf1c34b10ff382bd59b"
+}

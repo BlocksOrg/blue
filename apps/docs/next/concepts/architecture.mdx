@@ -35,12 +35,12 @@ sequenceDiagram
   Dashboard->>API: PUT /admin/harnesses/{harness}/managed-config or PUT /admin/governance-extensions
   API->>API: Validate and create revision
   CLI->>API: GET /governance-config
-  API->>API: Inject proxy URL and user pseudotoken
+  API->>API: Verify OAuth sid and mint inference JWT
   API-->>CLI: Personalized configuration
   CLI->>CLI: Verify packages and merge launch-scoped overlays
 ```
 
-The database revision is the source of truth for organization policy. Gateway `proxy_url` and `pseudotoken` are not stored in that YAML: the Control API injects them into an authenticated user's response at delivery time.
+The database revision is the source of truth for organization policy. Gateway `proxy_url` and `token` are not stored in that YAML: the Control API injects them into an authenticated user's response at delivery time, and does not persist the inference JWT.
 
 ## Package ownership
 
@@ -59,8 +59,9 @@ sequenceDiagram
   participant API as Control API
   participant LiteLLM as Your LiteLLM gateway
   participant Provider
-  Agent->>Proxy: Request with pseudotoken
-  Proxy->>API: Resolve pseudotoken
+  Agent->>Proxy: Request with inference JWT
+  Proxy->>Proxy: Validate JWT
+  Proxy->>API: Resolve OAuth session + user
   API-->>Proxy: Server-side virtual key
   Proxy->>LiteLLM: Request with virtual key
   LiteLLM->>Provider: Request with provider credential

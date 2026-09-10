@@ -204,7 +204,7 @@ impl PtySession {
     }
 }
 
-/// Launch `bin` with `args`, injecting `extra_env` (e.g. the Codex pseudotoken).
+/// Launch `bin` with `args`, injecting `extra_env` (e.g. the Codex inference JWT).
 /// Blocks until the child exits and returns its exit code.
 pub fn launch(
     bin: &Path,

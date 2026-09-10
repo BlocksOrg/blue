@@ -5,6 +5,21 @@
       "version": 31,
       "classification": "expand",
       "raises_compatibility_floor": false
+    },
+    {
+      "version": 32,
+      "classification": "contract",
+      "raises_compatibility_floor": true
+    },
+    {
+      "version": 33,
+      "classification": "expand",
+      "raises_compatibility_floor": false
+    },
+    {
+      "version": 34,
+      "classification": "expand",
+      "raises_compatibility_floor": false
     }
   ]
 }

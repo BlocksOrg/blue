@@ -25,6 +25,8 @@ tags                  = { Environment = "production", Application = "blue" }
 # enable_website         = true
 # enable_redis           = true
 # enable_inference_proxy = false   # gateway mode; requires enable_redis = true
+# gateway_jwt_private_key_pem = "..." # sensitive; required in gateway mode
+# gateway_jwt_jwks_json       = "..." # include active + retained public keys
 
 # --- Private image (Secrets Manager registry credentials) ---------------------
 # image_pull_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:ghcr-xxxx"

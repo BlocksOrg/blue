@@ -51,6 +51,10 @@ spec:
               value: {{ ternary "https" "http" (eq .Values.blue.internalTransport.mode "mtls") }}://{{ include "blue.fullname" . }}-control-api-internal:8082/internal/gateway/credential-invalid
             - name: HARNESS_GATEWAY_LOG_URL
               value: {{ ternary "https" "http" (eq .Values.blue.internalTransport.mode "mtls") }}://{{ include "blue.fullname" . }}-control-api-internal:8082/internal/gateway/request-logs
+            - name: HARNESS_GATEWAY_JWKS_URL
+              value: {{ ternary "https" "http" (eq .Values.blue.internalTransport.mode "mtls") }}://{{ include "blue.fullname" . }}-control-api-internal:8082/internal/gateway/jwks
+            - { name: HARNESS_GATEWAY_JWT_ISSUER, value: {{ .Values.blue.publicUrls.controlApi | quote }} }
+            - { name: HARNESS_GATEWAY_JWT_AUDIENCE, value: {{ .Values.blue.inferenceJwt.audience | quote }} }
             # OAuth2 client-credentials (M2M) auth to the Control API. The
             # token endpoint is better-auth on the dashboard; the resource is the
             # Control API audience. HARNESS_PROXY_OAUTH_CLIENT_SECRET must be

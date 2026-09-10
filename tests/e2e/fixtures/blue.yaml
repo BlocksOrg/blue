@@ -37,6 +37,12 @@ gateway:
   url: http://fake-upstream:4010
   inference_proxy_url: http://blue:8081
   inference_proxy_health_url: http://127.0.0.1:8081
+  inference_jwt:
+    issuer: os.environ/HARNESS_GATEWAY_JWT_ISSUER
+    audience: os.environ/HARNESS_GATEWAY_JWT_AUDIENCE
+    active_kid: os.environ/HARNESS_GATEWAY_JWT_ACTIVE_KID
+    private_key_file: os.environ/HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE
+    jwks_file: os.environ/HARNESS_GATEWAY_JWT_JWKS_FILE
   internal_allowed_client_id: blue-inference-proxy
   secret_encryption:
     provider: environment
@@ -50,8 +56,9 @@ gateway:
     policy_revision: e2e-executable-v1
 governance:
   revision: "e2e-1"
-  contract_version: 2
+  contract_version: 3
   required_capabilities:
+    - gateway_inference_jwt
     - adapter_intervals
     - compiled_harness_registry
     - transactional_reconcile
