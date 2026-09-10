@@ -349,12 +349,26 @@ fn remove_all_managed_configuration_at(home: &std::path::Path) -> Result<(), GhE
     Ok(())
 }
 
+/// A managed path that passed validation, resolved against the client root that
+/// actually authorised it.
+///
+/// `home` is only one of the roots a managed path may legitimately live under:
+/// with `XDG_CONFIG_HOME` pointed outside `$HOME`, or with redirected Windows
+/// Known Folders, the config and data roots are elsewhere entirely. Callers that
+/// need to walk the path component by component must walk from `authority`,
+/// never from `home` — and must use `relative` rather than `strip_prefix`, since
+/// the Windows prefix match is case-insensitive.
+pub(crate) struct ValidatedManagedPath {
+    pub(crate) authority: PathBuf,
+    pub(crate) relative: PathBuf,
+}
+
 /// Validate each component without following links beneath the canonical home.
 pub(crate) fn validate_home_path(
     home: &std::path::Path,
     path: &std::path::Path,
     allow_final_symlink: bool,
-) -> Result<(), GhError> {
+) -> Result<ValidatedManagedPath, GhError> {
     use std::path::Component;
     let mut authorities = vec![home.to_path_buf()];
     if paths::home_dir().is_ok_and(|current| current == home) {
@@ -405,7 +419,10 @@ pub(crate) fn validate_home_path(
             }
         }
     }
-    Ok(())
+    Ok(ValidatedManagedPath {
+        authority: authority.clone(),
+        relative,
+    })
 }
 
 #[cfg(windows)]
@@ -1699,6 +1716,85 @@ mod transaction_tests {
         assert!(!overlay.exists());
         assert!(!runtime.exists());
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Runs inside the child spawned by
+    /// `transaction_applies_to_a_data_root_outside_home`, which pins `HOME` and
+    /// `XDG_CONFIG_HOME` for the whole process.
+    #[test]
+    #[cfg(unix)]
+    fn data_root_outside_home_child_helper() {
+        let Some(root) = std::env::var_os("BLUE_DATA_ROOT_TEST_ROOT") else {
+            return;
+        };
+        let home = std::path::PathBuf::from(root).join("home");
+        let data = gh_common::paths::ClientPaths::resolve().unwrap().data;
+        assert!(
+            !data.starts_with(&home),
+            "data root {} should sit outside {}",
+            data.display(),
+            home.display()
+        );
+        let target = data.join("runtime/overlay/config.json");
+        let plan = adapters::ReconcilePlan {
+            writes: vec![adapters::PlannedFile {
+                path: target.clone(),
+                body: b"{}".to_vec(),
+                mode: Some(0o600),
+            }],
+            ..Default::default()
+        };
+        let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+        transaction.apply(&plan).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+    }
+
+    /// `XDG_CONFIG_HOME` outside `$HOME` puts the managed data root outside the
+    /// home directory, which used to abort the ancestor walk.
+    #[test]
+    #[cfg(unix)]
+    fn transaction_applies_to_a_data_root_outside_home() {
+        let root = test_directory("blue-xdg-data-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transaction_tests::data_root_outside_home_child_helper",
+            ])
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("xdg"))
+            .env("BLUE_DATA_ROOT_TEST_ROOT", &root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(root.join("xdg/blue/runtime/overlay/config.json")).unwrap(),
+            "{}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows path comparison is case-insensitive, so a managed path spelled
+    /// differently to its authority is the same location — but `strip_prefix`
+    /// does not know that, which is why validation reports the relative path.
+    #[test]
+    #[cfg(windows)]
+    fn validate_home_path_reports_a_case_insensitive_relative_path() {
+        let home = test_directory("blue-case-home");
+        let recased = std::path::PathBuf::from(home.to_string_lossy().to_uppercase());
+        let path = recased.join("managed").join("config.json");
+        assert!(
+            path.strip_prefix(&home).is_err(),
+            "the recased path should not be a literal prefix match"
+        );
+        let validated = validate_home_path(&home, &path, false).unwrap();
+        assert_eq!(validated.authority, home);
+        assert_eq!(
+            validated.relative,
+            std::path::Path::new("managed").join("config.json")
+        );
     }
 }
 

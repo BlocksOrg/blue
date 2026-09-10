@@ -123,8 +123,21 @@ impl FileTransaction {
             // transaction backs anything up.
             recover_incomplete_transactions(home)?;
         }
+        let mut authorities = Vec::<PathBuf>::new();
         for path in &paths {
-            validate_home_path(home, path, true)?;
+            let validated = validate_home_path(home, path, true)?;
+            if !authorities.contains(&validated.authority) {
+                authorities.push(validated.authority);
+            }
+        }
+        // A managed path can be authorised by a client root that does not exist
+        // yet — `%LOCALAPPDATA%\Blue\Data` on a first Windows run, or an
+        // `XDG_CONFIG_HOME` pointed outside `$HOME`. Every ancestor walk below
+        // starts at that root, so it has to exist before anything under it is
+        // created. It is infrastructure rather than managed content, so it is
+        // deliberately not journalled as a created directory.
+        for authority in &authorities {
+            gh_common::create_owner_only_dir_all(authority)?;
         }
         paths.sort();
         paths.dedup();
@@ -444,13 +457,9 @@ fn collect_missing_ancestors(
     path: &Path,
     output: &mut BTreeSet<PathBuf>,
 ) -> Result<(), GhError> {
-    validate_home_path(home, path, false)?;
-    let mut current = home.to_path_buf();
-    for component in path
-        .strip_prefix(home)
-        .expect("validated home path")
-        .components()
-    {
+    let validated = validate_home_path(home, path, false)?;
+    let mut current = validated.authority;
+    for component in validated.relative.components() {
         current.push(component.as_os_str());
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -507,15 +516,13 @@ fn create_transaction_root(parent: &Path) -> Result<(String, PathBuf), GhError> 
 }
 
 fn create_owner_only_ancestors(home: &Path, path: &Path) -> Result<(), GhError> {
-    if !home.exists() {
-        gh_common::create_owner_only_dir(home)?;
-    }
-    let mut current = home.to_path_buf();
-    for component in path
-        .strip_prefix(home)
-        .map_err(|_| GhError::config("directory escaped user home"))?
-        .components()
-    {
+    let validated = validate_home_path(home, path, false)?;
+    // The authority is not always an existing directory: on Windows the data
+    // root (`%LOCALAPPDATA%\Blue\Data`) is several levels deep and absent on a
+    // first run, so a single-level `mkdir` would fail.
+    gh_common::create_owner_only_dir_all(&validated.authority)?;
+    let mut current = validated.authority;
+    for component in validated.relative.components() {
         current.push(component.as_os_str());
         create_owner_only_directory(&current)?;
     }
