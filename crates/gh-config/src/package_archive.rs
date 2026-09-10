@@ -337,6 +337,9 @@ fn create_package_file(path: &Path) -> Result<File, GhError> {
 }
 
 #[cfg(unix)]
+// `fsblkcnt_t` is 32-bit on macOS and on 32-bit targets, so widening
+// `f_bavail` is only a no-op on the platforms Clippy happens to run on.
+#[allow(clippy::useless_conversion)]
 fn available_space(path: &Path) -> Result<Option<u64>, GhError> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
