@@ -113,6 +113,39 @@ fn starts_with_any(path: &Path, roots: &[&str]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
 
+/// The portable, home-relative root every managed-runtime artifact is recorded
+/// under, whatever the local platform actually puts it. Bundles travel between
+/// machines, so the wire value must not depend on where this host happens to
+/// keep Blue's runtime (`%LOCALAPPDATA%\Blue\Data\runtime` on Windows, an
+/// `XDG_CONFIG_HOME` outside `$HOME` on Unix).
+pub const MANAGED_RUNTIME_ROOT: &str = ".config/blue/runtime";
+
+/// Home-relative wire path for a local artifact. Managed-runtime artifacts are
+/// recorded under [`MANAGED_RUNTIME_ROOT`] wherever the runtime physically
+/// lives; harness-native artifacts stay relative to `home`.
+pub fn portable_native_path(home: &Path, source: &Path) -> Option<PathBuf> {
+    if let Some(relative) = crate::relative_under(source, &crate::managed_runtime_dir(home)) {
+        return Some(Path::new(MANAGED_RUNTIME_ROOT).join(relative));
+    }
+    crate::relative_under(source, home)
+}
+
+/// Inverse of [`portable_native_path`]: the local destination a wire path
+/// restores to.
+pub fn native_destination(home: &Path, relative: &Path) -> PathBuf {
+    let (root, relative) = destination_root(home, relative);
+    root.join(relative)
+}
+
+/// Split a wire path into the local root that authorises it and the remainder
+/// to walk from that root.
+fn destination_root<'a>(home: &Path, relative: &'a Path) -> (PathBuf, &'a Path) {
+    match relative.strip_prefix(MANAGED_RUNTIME_ROOT) {
+        Ok(rest) => (crate::managed_runtime_dir(home), rest),
+        Err(_) => (home.to_path_buf(), relative),
+    }
+}
+
 fn portable_relative(path: &Path) -> Result<String, GhError> {
     if !safe_relative(path) {
         return Err(invalid("native path is not a safe home-relative path"));
@@ -333,8 +366,8 @@ where
     let home = gh_common::paths::home_dir().ok();
     for (index, source) in sources.into_iter().enumerate() {
         if let Some(home) = home.as_deref() {
-            if let Ok(relative) = source.source.strip_prefix(home) {
-                reject_symlinked_destination(home, relative)?;
+            if let Some(relative) = portable_native_path(home, &source.source) {
+                reject_symlinked_destination(home, &relative)?;
             }
         }
         let metadata =
@@ -579,7 +612,7 @@ where
         let Some(relative) = file.native_path.as_deref() else {
             continue;
         };
-        let target = home.join(relative);
+        let target = native_destination(home, Path::new(relative));
         reject_symlinked_destination(home, Path::new(relative))?;
         let bytes = bundle.files.get(&file.path).expect("verified file exists");
         match fs::read(&target) {
@@ -607,7 +640,9 @@ where
 }
 
 fn reject_symlinked_destination(home: &Path, relative: &Path) -> Result<(), GhError> {
-    let mut current = home.to_path_buf();
+    let (root, relative) = destination_root(home, relative);
+    let target = root.join(relative);
+    let mut current = root;
     for component in relative.components() {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
@@ -617,7 +652,7 @@ fn reject_symlinked_destination(home: &Path, relative: &Path) -> Result<(), GhEr
                     current.display()
                 )))
             }
-            Ok(metadata) if current != home.join(relative) && !metadata.is_dir() => {
+            Ok(metadata) if current != target && !metadata.is_dir() => {
                 return Err(invalid(format!(
                     "native destination parent is not a directory: {}",
                     current.display()
@@ -651,15 +686,14 @@ fn destination_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
 }
 
 pub fn ensure_safe_home_destination(home: &Path, target: &Path) -> Result<(), GhError> {
-    let relative = target
-        .strip_prefix(home)
-        .map_err(|_| invalid("native destination is outside the home directory"))?;
-    if !safe_relative(relative) {
+    let relative = portable_native_path(home, target)
+        .ok_or_else(|| invalid("native destination is outside the home directory"))?;
+    if !safe_relative(&relative) {
         return Err(invalid(
             "native destination is not a safe home-relative path",
         ));
     }
-    reject_symlinked_destination(home, relative)
+    reject_symlinked_destination(home, &relative)
 }
 
 #[cfg(test)]
@@ -836,5 +870,123 @@ mod tests {
         assert!(error.to_string().contains("traverses symlink"));
         assert!(!outside.join("sessions/s1.jsonl").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn portable_paths_round_trip_for_both_artifact_families() {
+        let home = temp("portable-round-trip");
+        let native = home.join(".codex/sessions/s1.jsonl");
+        assert_eq!(
+            portable_native_path(&home, &native).unwrap(),
+            Path::new(".codex").join("sessions").join("s1.jsonl")
+        );
+        assert_eq!(
+            native_destination(&home, &portable_native_path(&home, &native).unwrap()),
+            native
+        );
+
+        let managed =
+            crate::managed_runtime_dir(&home).join("kimi/sessions/p/s1/agents/main/wire.jsonl");
+        let wire = portable_native_path(&home, &managed).unwrap();
+        assert_eq!(
+            wire,
+            Path::new(MANAGED_RUNTIME_ROOT).join("kimi/sessions/p/s1/agents/main/wire.jsonl")
+        );
+        assert_eq!(native_destination(&home, &wire), managed);
+
+        assert!(portable_native_path(&home, Path::new("/elsewhere/wire.jsonl")).is_none());
+    }
+
+    /// The managed runtime is only *sometimes* under `$HOME/.config`: with
+    /// `XDG_CONFIG_HOME` pointed outside `$HOME` (and on Windows, where it is
+    /// under `%LOCALAPPDATA%`) a home-relative `strip_prefix` produces either
+    /// nothing or a path the manifest contract rejects. Both roots have to be
+    /// pinned for the whole process, so the check runs in a child.
+    #[test]
+    #[cfg(unix)]
+    fn kimi_bundles_record_a_portable_managed_runtime_path() {
+        let root = temp("kimi-portable-runtime");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("home")).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session_bundle::tests::portable_managed_runtime_child_helper",
+            ])
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("xdg"))
+            .env("BLUE_PORTABLE_RUNTIME_TEST_ROOT", &root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Runs inside the child spawned by
+    /// `kimi_bundles_record_a_portable_managed_runtime_path`.
+    #[test]
+    #[cfg(unix)]
+    fn portable_managed_runtime_child_helper() {
+        let Some(root) = std::env::var_os("BLUE_PORTABLE_RUNTIME_TEST_ROOT") else {
+            return;
+        };
+        let home = PathBuf::from(root).join("home");
+        let runtime = crate::managed_runtime_dir(&home);
+        assert!(
+            !runtime.starts_with(&home),
+            "runtime {} should sit outside {}",
+            runtime.display(),
+            home.display()
+        );
+
+        let transcript = runtime.join("kimi/sessions/project/session-1/agents/main/wire.jsonl");
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&transcript, b"{}\n").unwrap();
+
+        let state = transcript.ancestors().nth(3).unwrap().join("state.json");
+        fs::write(&state, b"{}").unwrap();
+
+        let definition = crate::adapters::definition(Harness::Kimi);
+        let registration = definition.implementations.last().unwrap();
+        let mut sources = registration
+            .implementation
+            .capture_session(definition, &home, "session-1", &serde_json::json!({}))
+            .unwrap();
+        // `blue session upload` labels the Kimi transcript and collects the
+        // session state beside it; the manifest contract requires both.
+        sources[0].role = "agent_wire_history".into();
+        sources.push(SessionSource {
+            role: "kimi_state".into(),
+            native_path: portable_native_path(&home, &state),
+            source: state,
+        });
+        assert_eq!(
+            sources[0].native_path.as_deref(),
+            Some(
+                Path::new(MANAGED_RUNTIME_ROOT)
+                    .join("kimi/sessions/project/session-1/agents/main/wire.jsonl")
+                    .as_path()
+            )
+        );
+
+        let made = create(
+            Harness::Kimi,
+            registration.interval.profile,
+            "session-1",
+            None,
+            None,
+            None,
+            sources,
+        )
+        .unwrap();
+        validate_manifest_contract(Harness::Kimi, &made.manifest).unwrap();
+        let wire = made
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.role == "agent_wire_history")
+            .and_then(|file| file.native_path.as_deref())
+            .unwrap();
+        assert_eq!(native_destination(&home, Path::new(wire)), transcript);
     }
 }

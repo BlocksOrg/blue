@@ -4074,8 +4074,13 @@ fn prepare_kimi_session_index(
             })
             .unwrap_or(native.parent().unwrap_or(&native))
     };
-    let index = if native.starts_with(".config/blue/runtime/kimi") {
-        home.join(".config/blue/runtime/kimi/session_index.jsonl")
+    let index = if native.starts_with(gh_config::session_bundle::MANAGED_RUNTIME_ROOT) {
+        gh_config::session_bundle::native_destination(
+            home,
+            Path::new(gh_config::session_bundle::MANAGED_RUNTIME_ROOT)
+                .join("kimi/session_index.jsonl")
+                .as_path(),
+        )
     } else {
         home.join(".kimi-code/session_index.jsonl")
     };
@@ -4439,7 +4444,7 @@ fn session_bundle_sources(
     home: &Path,
 ) -> Result<Vec<gh_config::session_bundle::SessionSource>> {
     use gh_config::session_bundle::SessionSource;
-    let native = |path: &Path| path.strip_prefix(home).ok().map(Path::to_path_buf);
+    let native = |path: &Path| gh_config::session_bundle::portable_native_path(home, path);
     let mut sources = vec![SessionSource {
         role: match harness {
             Harness::Codex => "rollout",
@@ -4518,7 +4523,7 @@ fn collect_session_companions(
                 _ => "session_companion",
             }
             .into(),
-            native_path: path.strip_prefix(home).ok().map(Path::to_path_buf),
+            native_path: gh_config::session_bundle::portable_native_path(home, &path),
             source: path,
         });
     }

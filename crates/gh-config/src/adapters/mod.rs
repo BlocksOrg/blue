@@ -321,7 +321,7 @@ pub trait HarnessImplementation: std::fmt::Debug + Sync {
         let source = self.transcript_path(definition, home, session_id, payload)?;
         Ok(vec![crate::session_bundle::SessionSource {
             role: "primary_transcript".into(),
-            native_path: source.strip_prefix(home).ok().map(Path::to_path_buf),
+            native_path: crate::session_bundle::portable_native_path(home, &source),
             source,
         }])
     }
