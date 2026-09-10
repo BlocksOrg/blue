@@ -201,7 +201,15 @@ impl ServiceClient {
     ) -> Result<GovernanceConfig, GhError> {
         match self.fetch(session, now) {
             Ok(cfg) => Ok(cfg),
-            Err(error @ (GhError::Config(_) | GhError::Serde(_))) => Err(error),
+            // Unauthorized and ActionRequired describe something only the user
+            // can fix. Falling back to cache here is what makes an expired
+            // session look like a working one.
+            Err(
+                error @ (GhError::Config(_)
+                | GhError::Serde(_)
+                | GhError::Unauthorized(_)
+                | GhError::ActionRequired(_)),
+            ) => Err(error),
             Err(fetch_err) => match cache::load() {
                 Err(cache_err) => Err(GhError::service(format!(
                     "live governance fetch failed ({fetch_err}); cached governance-config could not be read ({cache_err})"
@@ -215,6 +223,21 @@ impl ServiceClient {
                             "cached governance-config is unsupported by this client: {reason}"
                         ))
                     })?;
+                    // The cache deliberately carries no inference JWT, so a
+                    // gateway-mode config read from it can never be launched.
+                    // Fail closed rather than dropping to direct mode, which
+                    // would silently bill the user's own provider credentials.
+                    if config
+                        .gateway
+                        .as_ref()
+                        .is_some_and(|gateway| gateway.token.is_none())
+                    {
+                        return Err(GhError::Unauthorized(
+                            "gateway mode requires a live control service; the cached \
+                             configuration cannot carry an inference token (run `blue login`)"
+                                .to_string(),
+                        ));
+                    }
                     let age = now.saturating_sub(fetched_at);
                     if config.required && (age as u64) >= config.ttl_seconds() {
                         Err(GhError::service(format!(
@@ -340,6 +363,81 @@ pub fn require_session() -> Result<Session, GhError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::test_support::with_cache_home;
+    use crate::schema::GatewayConfig;
+
+    struct FailingSource(fn() -> GhError);
+
+    impl ConfigSource for FailingSource {
+        fn fetch(&self, _session: &Session) -> Result<GovernanceConfig, GhError> {
+            Err((self.0)())
+        }
+        fn describe(&self) -> String {
+            "failing".to_string()
+        }
+    }
+
+    fn governance_only() -> GovernanceConfig {
+        serde_json::from_str(r#"{"revision":"r1","allowed_harnesses":["codex"]}"#).unwrap()
+    }
+
+    fn gateway_mode() -> GovernanceConfig {
+        let mut config = governance_only();
+        config.gateway = Some(GatewayConfig {
+            kind: "litellm".into(),
+            proxy_url: Some("https://proxy.example/inference/".into()),
+            token: Some("header.payload.signature".into()),
+            auth_style: "bearer".into(),
+        });
+        config
+    }
+
+    fn client(error: fn() -> GhError) -> ServiceClient {
+        ServiceClient::with_source(Box::new(FailingSource(error)))
+    }
+
+    #[test]
+    fn unauthorized_is_never_served_from_cache() {
+        let _guard = with_cache_home("client-unauthorized");
+        cache::save(&governance_only(), 100).unwrap();
+        let error = client(|| GhError::unauthorized("expired"))
+            .fetch_or_cached(&Session::bearer("t"), 101)
+            .unwrap_err();
+        assert!(matches!(error, GhError::Unauthorized(_)), "{error:?}");
+    }
+
+    #[test]
+    fn action_required_is_never_served_from_cache() {
+        let _guard = with_cache_home("client-action-required");
+        cache::save(&governance_only(), 100).unwrap();
+        let error = client(|| GhError::action_required("run `blue gateway`"))
+            .fetch_or_cached(&Session::bearer("t"), 101)
+            .unwrap_err();
+        assert!(matches!(error, GhError::ActionRequired(_)), "{error:?}");
+    }
+
+    #[test]
+    fn an_unreachable_service_still_fails_soft_to_a_fresh_cache() {
+        let _guard = with_cache_home("client-fail-soft");
+        cache::save(&governance_only(), 100).unwrap();
+        let config = client(|| GhError::service("connection refused"))
+            .fetch_or_cached(&Session::bearer("t"), 101)
+            .unwrap();
+        assert_eq!(config.revision, "r1");
+    }
+
+    #[test]
+    fn a_cached_gateway_config_without_a_token_fails_closed() {
+        let _guard = with_cache_home("client-gateway-closed");
+        // save() strips the token, so this is what every gateway-mode cache
+        // looks like on disk.
+        cache::save(&gateway_mode(), 100).unwrap();
+        let error = client(|| GhError::service("connection refused"))
+            .fetch_or_cached(&Session::bearer("t"), 101)
+            .unwrap_err();
+        assert!(matches!(error, GhError::Unauthorized(_)), "{error:?}");
+        assert!(error.to_string().contains("blue login"), "{error}");
+    }
 
     #[test]
     fn parses_revision_events_and_ignores_heartbeats_and_other_events() {
