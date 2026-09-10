@@ -131,6 +131,11 @@ pub fn managed_shim(contents: &str, harness: Harness) -> bool {
     valid_managed_shim(contents, harness) || legacy_managed_shim(contents, harness)
 }
 
+/// Every shim this tool writes is a few hundred bytes of text. A candidate
+/// larger than this is a real binary, and can be ruled out on its size rather
+/// than by reading it.
+pub const MAX_SHIM_BYTES: u64 = 4096;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +158,7 @@ mod tests {
         assert!(valid_managed_shim(&rendered, Harness::Codex));
         assert!(!valid_managed_shim(&rendered, Harness::Claude));
         assert!(!valid_managed_shim(SHIM_MARKER, Harness::Codex));
+        assert!(rendered.len() as u64 <= MAX_SHIM_BYTES);
     }
 
     #[test]

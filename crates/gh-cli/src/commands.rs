@@ -1002,6 +1002,10 @@ pub(crate) fn doctor_text() -> Result<String> {
     lines.push(String::new());
     lines.push("Harnesses:".into());
     for (harness, detected) in gh_harness::detect_all() {
+        // `detect_all` already resolved the upstream binary, skipping any Blue
+        // shim ahead of it on PATH. Re-running `detect` below would rescan every
+        // PATH entry a second time for the same answer.
+        let upstream = detected.as_ref().map(|detected| detected.path.clone());
         let status: String;
         if let Some(d) = detected {
             let ver = d
@@ -1023,7 +1027,6 @@ pub(crate) fn doctor_text() -> Result<String> {
             .binary_names()
             .iter()
             .find_map(|name| gh_harness::which_all(name).into_iter().next());
-        let upstream = gh_harness::detect(harness).map(|detected| detected.path);
         if let (Some(first), Some(upstream)) = (first, upstream) {
             if first != upstream {
                 lines.push(format!(

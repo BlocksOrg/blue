@@ -24,5 +24,6 @@ pub use client_config::{BlueToml, IdentityConfig, ModeConfig, ServiceConfig};
 pub use error::{GhError, Result};
 pub use harness::{harness_registry, ComponentRules, Harness, HarnessMetadata, InstallInvocation};
 pub use shim::{
-    legacy_managed_shim, managed_shim, render_shim, shim_path, valid_managed_shim, SHIM_MARKER,
+    legacy_managed_shim, managed_shim, render_shim, shim_path, valid_managed_shim, MAX_SHIM_BYTES,
+    SHIM_MARKER,
 };
