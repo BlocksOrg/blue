@@ -6816,7 +6816,9 @@ async fn fetch_provider_archive(
             let next = url.join(location).map_err(|error| {
                 ApiError::bad_request(format!("invalid archive redirect: {error}"))
             })?;
-            if next.scheme() != "https" && !cfg!(test) {
+            // `cfg!(test)` keeps the plaintext test servers usable; the rule
+            // itself is covered by `redirect_scheme_allowed` unit tests.
+            if !redirect_scheme_allowed(&next, cfg!(test)) {
                 return Err(ApiError::bad_request(
                     "repository archive redirect must use HTTPS",
                 ));
@@ -6866,6 +6868,12 @@ fn same_url_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
     left.scheme() == right.scheme()
         && left.host_str() == right.host_str()
         && left.port_or_known_default() == right.port_or_known_default()
+}
+
+/// A managed archive redirect may only stay on HTTPS. Test builds pass
+/// `allow_plaintext` so local `http://` fixtures keep working.
+fn redirect_scheme_allowed(next: &reqwest::Url, allow_plaintext: bool) -> bool {
+    next.scheme() == "https" || allow_plaintext
 }
 
 fn managed_redirect_host_allowed(
@@ -10714,6 +10722,17 @@ mod tests {
             "api.example.test",
             "attacker.example"
         ));
+    }
+
+    #[test]
+    fn managed_archive_redirects_must_stay_on_https() {
+        // The call site passes `cfg!(test)` so plaintext fixtures keep working,
+        // which is exactly why the rule needs its own coverage here.
+        let plaintext = reqwest::Url::parse("http://assets.example.test/archive").unwrap();
+        let secure = reqwest::Url::parse("https://assets.example.test/archive").unwrap();
+        assert!(!redirect_scheme_allowed(&plaintext, false));
+        assert!(redirect_scheme_allowed(&secure, false));
+        assert!(redirect_scheme_allowed(&plaintext, true));
     }
 
     #[tokio::test]
