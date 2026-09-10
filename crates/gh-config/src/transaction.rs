@@ -668,6 +668,17 @@ fn recover_incomplete_transactions(home: &Path) -> Result<(), GhError> {
             .ok_or_else(|| GhError::config("filesystem transaction journal cycle"))?;
         let (root, journal) = journals.remove(leaf);
         if journal.phase != TransactionPhase::Committed {
+            if !journal.targets.is_empty() {
+                // Anything hand-edited between the interruption and now is about
+                // to be replaced by the backup, with no other record of it.
+                let targets = journal
+                    .targets
+                    .iter()
+                    .map(|target| target.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tracing::warn!(journal = %journal.id, %targets, "rolling back paths from an interrupted transaction; changes made to these paths since the interruption will be lost");
+            }
             // The crash-consistency boundary: live paths must be back to their
             // pre-transaction content before anything else runs.
             restore_targets(home, &journal.targets)?;
