@@ -1181,6 +1181,40 @@ mod transaction_tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
+    #[test]
+    fn stray_entries_in_the_transaction_root_are_skipped_not_fatal() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-stray-entry-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let transactions = home.join(".blue-transactions");
+        std::fs::create_dir_all(&transactions).unwrap();
+        // One Finder visit is enough to leave this behind.
+        std::fs::write(transactions.join(".DS_Store"), "junk").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&home, transactions.join("link")).unwrap();
+
+        let target = home.join("managed/config.json");
+        let plan = adapters::ReconcilePlan {
+            writes: vec![adapters::PlannedFile {
+                path: target.clone(),
+                body: b"new".to_vec(),
+                mode: Some(0o600),
+            }],
+            ..Default::default()
+        };
+        {
+            let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+            transaction.apply(&plan).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        // The stray entries are skipped, never deleted or followed.
+        assert!(transactions.join(".DS_Store").exists());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_failing_again_during_recovery_still_lets_a_transaction_begin() {

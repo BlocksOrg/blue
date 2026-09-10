@@ -625,10 +625,13 @@ fn recover_incomplete_transactions(home: &Path) -> Result<(), GhError> {
             source,
         })?;
         if !metadata.is_dir() || metadata.is_symlink() {
-            return Err(GhError::config(format!(
-                "unsafe entry in transaction root: {}",
-                root.display()
-            )));
+            // `.DS_Store`, `desktop.ini`, a cloud-sync artefact, or a Windows
+            // junction here is not a transaction. Failing would brick every
+            // later `blue apply`; the entry is never opened or followed, and
+            // `create_transaction_root` uses create-new semantics over 128-bit
+            // random names, so it cannot hijack a future transaction root.
+            tracing::warn!(entry = %root.display(), "skipping an entry in the transaction root that is not a transaction directory");
+            continue;
         }
         let journal_path = root.join("journal.json");
         let bytes = match std::fs::read(&journal_path) {
