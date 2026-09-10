@@ -2,7 +2,7 @@
 //!
 //! Identity is modeled as **claims, not a bare key** ([`Session`] carries
 //! `org_id`/`email`/`groups`) so the service can scope governance-config and
-//! pseudotoken issuance to org + group. Auth is a pluggable
+//! inference-token issuance to org + group. Auth is a pluggable
 //! [`IdentityProvider`]. The reference service uses OAuth device authorization;
 //! static token mode remains available for local files and BYO services.
 
@@ -151,6 +151,33 @@ impl Session {
         } else {
             Err(GhError::service(format!(
                 "logout revocation was rejected ({})",
+                response.status()
+            )))
+        }
+    }
+
+    /// Revoke the gateway session bound to this OAuth access token before the
+    /// refresh grant is revoked. Failure is surfaced so callers can warn while
+    /// still removing local credentials.
+    pub fn revoke_gateway_session(&self, service_url: &str) -> Result<(), GhError> {
+        if service_url.trim().is_empty() {
+            return Ok(());
+        }
+        let endpoint = reqwest::Url::parse(&format!("{}/", service_url.trim_end_matches('/')))
+            .and_then(|url| url.join("gateway/session/revoke"))
+            .map_err(|error| GhError::config(format!("invalid Control API URL: {error}")))?;
+        let response = reqwest::blocking::Client::new()
+            .post(endpoint)
+            .bearer_auth(&self.token)
+            .send()
+            .map_err(|error| {
+                GhError::service(format!("gateway session revocation failed: {error}"))
+            })?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(GhError::service(format!(
+                "gateway session revocation was rejected ({})",
                 response.status()
             )))
         }

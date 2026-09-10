@@ -4,7 +4,7 @@
 //!
 //! `apply_once` reconciles a single config revision; `reconcile_loop` polls the
 //! service on `revision`/TTL and reconciles on change. In gateway mode it also
-//! publishes the pseudotoken to GUI-visible environments so desktop apps see it.
+//! publishes the inference token to GUI-visible environments so desktop apps see it.
 
 use std::collections::BTreeMap;
 

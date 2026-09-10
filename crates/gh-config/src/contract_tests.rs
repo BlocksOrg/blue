@@ -162,7 +162,7 @@ fn every_production_interval_has_a_pure_golden_plan() {
                     "mcp":[{"name":"fixture", "command":"fixture-mcp", "args":["--stdio"]}]
                 }))
                 .unwrap();
-                let gateway: GatewayConfig = serde_json::from_value(serde_json::json!({"type":"litellm", "proxy_url":"https://gateway.example", "pseudotoken":"fixture-token"})).unwrap();
+                let gateway: GatewayConfig = serde_json::from_value(serde_json::json!({"type":"litellm", "proxy_url":"https://gateway.example", "token":"fixture-token"})).unwrap();
                 let wiring = gateway_enabled.then(|| {
                     registration
                         .implementation
@@ -571,7 +571,10 @@ fn synthetic_definition_runs_detection_packages_transition_commit_rollback_and_l
     std::fs::create_dir_all(package_root.join("skills")).unwrap();
     std::fs::write(package_root.join("skills/example.txt"), "example").unwrap();
     let policy = HarnessPolicy::default();
-    let gateway:GatewayConfig=serde_json::from_value(serde_json::json!({"type":"litellm","proxy_url":"https://gateway.example","pseudotoken":"token"})).unwrap();
+    let gateway: GatewayConfig = serde_json::from_value(
+        serde_json::json!({"type":"litellm","proxy_url":"https://gateway.example","token":"token"}),
+    )
+    .unwrap();
     for version in ["1.9.0", "2.0.0"] {
         std::fs::write(
             &binary,

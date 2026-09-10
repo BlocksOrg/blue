@@ -202,8 +202,11 @@ impl ServiceClient {
         match self.fetch(session, now) {
             Ok(cfg) => Ok(cfg),
             Err(error @ (GhError::Config(_) | GhError::Serde(_))) => Err(error),
-            Err(fetch_err) => match cache::load()? {
-                Some(CachedConfig { config, fetched_at }) => {
+            Err(fetch_err) => match cache::load() {
+                Err(cache_err) => Err(GhError::service(format!(
+                    "live governance fetch failed ({fetch_err}); cached governance-config could not be read ({cache_err})"
+                ))),
+                Ok(Some(CachedConfig { config, fetched_at })) => {
                     // A cache written by a newer client must not bypass the
                     // current binary's contract/capability gate after a
                     // downgrade.
@@ -227,7 +230,7 @@ impl ServiceClient {
                         Ok(config)
                     }
                 }
-                None => Err(GhError::service(format!(
+                Ok(None) => Err(GhError::service(format!(
                     "service unreachable and no cached governance-config: {fetch_err}"
                 ))),
             },

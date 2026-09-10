@@ -302,13 +302,17 @@ pub fn setup() -> Result<()> {
 }
 
 fn detach_tenant(cfg: &BlueToml) -> Result<()> {
-    let session = Session::load()?;
+    let mut session = Session::load()?;
     archive_active_tenant(cfg).context("archiving tenant state")?;
     gh_config::remove_all_managed_configuration()
         .context("removing Blue-managed agent configuration")?;
     clear_active_tenant_state().context("clearing active tenant state")?;
     Session::remove()?;
-    if let Some(session) = session {
+    if let Some(session) = session.as_mut() {
+        let _ = session.refresh_if_needed(now_unix());
+        if let Err(error) = session.revoke_gateway_session(&cfg.service.url) {
+            tracing::warn!(%error, "gateway session revocation failed during detach");
+        }
         if let Err(error) = session.revoke() {
             tracing::warn!(%error, "remote token revocation failed; local tokens were removed");
         }
@@ -584,8 +588,19 @@ pub fn login() -> Result<()> {
 }
 
 pub fn logout() -> Result<()> {
-    let revocation = Session::load()?.map(|session| session.revoke()).transpose();
+    let cfg = BlueToml::load().ok();
+    let mut session = Session::load()?;
+    let gateway_revocation = session.as_mut().map(|session| {
+        let _ = session.refresh_if_needed(now_unix());
+        cfg.as_ref()
+            .map(|cfg| session.revoke_gateway_session(&cfg.service.url))
+            .unwrap_or(Ok(()))
+    });
+    let revocation = session.as_ref().map(|session| session.revoke()).transpose();
     Session::remove()?;
+    if let Some(Err(error)) = gateway_revocation {
+        tracing::warn!(%error, "remote gateway session revocation failed; local tokens were removed");
+    }
     if let Err(error) = revocation {
         tracing::warn!(%error, "remote token revocation failed; local tokens were removed");
     }
@@ -5190,7 +5205,7 @@ mod tests {
         let gateway: gh_service::GatewayConfig = serde_json::from_value(serde_json::json!({
             "type": "litellm",
             "proxy_url": "https://inference.example",
-            "pseudotoken": "token"
+            "token": "token"
         }))
         .unwrap();
 

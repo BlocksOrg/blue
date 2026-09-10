@@ -60,13 +60,14 @@ pub struct GovernanceConfig {
 
 impl GovernanceConfig {
     pub const DEFAULT_TTL_SECONDS: u64 = 300;
-    pub const CONTRACT_VERSION: u32 = 2;
+    pub const CONTRACT_VERSION: u32 = 3;
     pub const CAPABILITIES: &'static [&'static str] = &[
         "adapter_intervals",
         "compiled_harness_registry",
         "transactional_reconcile",
         "versioned_state",
         "unverified_harness_versions",
+        "gateway_inference_jwt",
     ];
 
     pub fn ttl_seconds(&self) -> u64 {
@@ -498,12 +499,12 @@ pub struct GatewayConfig {
     /// Runtime-only: the control API injects this when delivering a config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
-    /// Per-user opaque stand-in; the proxy swaps it for an upstream credential.
-    /// Runtime-only: the control API injects this for the authenticated user.
+    /// Session-bound inference JWT. Runtime-only: the control API injects this
+    /// for the authenticated user and never persists the encoded token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pseudotoken: Option<String>,
-    /// How the pseudotoken is presented to the proxy. Retained for wire
-    /// compatibility; `"bearer"` is the only supported value.
+    pub token: Option<String>,
+    /// How the inference JWT is presented to the proxy. `"bearer"` is the
+    /// only supported value.
     #[serde(default = "default_auth_style")]
     pub auth_style: String,
 }
@@ -575,7 +576,7 @@ mod tests {
             "gateway": {
                 "type": "litellm",
                 "proxy_url": "https://svc/inference",
-                "pseudotoken": "psk_abc"
+                "token": "jwt.abc.signature"
             },
             "harnesses": {
                 "claude": {
@@ -587,7 +588,7 @@ mod tests {
         let g = cfg.gateway.as_ref().unwrap();
         assert_eq!(g.kind, "litellm");
         assert_eq!(g.auth_style, "bearer");
-        assert_eq!(g.pseudotoken.as_deref(), Some("psk_abc"));
+        assert_eq!(g.token.as_deref(), Some("jwt.abc.signature"));
     }
 
     #[test]
@@ -605,11 +606,11 @@ harnesses:
         let cfg: GovernanceConfig = serde_yaml::from_str(yaml).unwrap();
         let gateway = cfg.gateway.as_ref().unwrap();
         assert!(gateway.proxy_url.is_none());
-        assert!(gateway.pseudotoken.is_none());
+        assert!(gateway.token.is_none());
 
         let serialized = serde_yaml::to_string(&cfg).unwrap();
         assert!(!serialized.contains("proxy_url"));
-        assert!(!serialized.contains("pseudotoken"));
+        assert!(!serialized.contains("token"));
     }
 
     #[test]

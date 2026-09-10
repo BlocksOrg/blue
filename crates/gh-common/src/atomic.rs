@@ -53,7 +53,7 @@ pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), GhErr
         }
     })?;
 
-    // Managed files may carry secrets (pseudotokens); keep them owner-only.
+    // Managed files may carry inference tokens; keep them owner-only.
     restrict_permissions(path);
     Ok(())
 }
