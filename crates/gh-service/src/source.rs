@@ -60,8 +60,8 @@ impl ConfigSource for HttpConfigSource {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(GhError::service(
-                "service rejected the session token (run `blue login`)".to_string(),
+            return Err(GhError::unauthorized(
+                "your session is no longer valid (run `blue login`)",
             ));
         }
         if status == reqwest::StatusCode::UPGRADE_REQUIRED {
@@ -69,6 +69,11 @@ impl ConfigSource for HttpConfigSource {
             return Err(GhError::config(format!(
                 "control service rejected this client version: {body}"
             )));
+        }
+        if status == reqwest::StatusCode::CONFLICT {
+            // The server's 409 message names the command to run and is already
+            // written for a human, so pass it through verbatim.
+            return Err(GhError::action_required(resp.text().unwrap_or_default()));
         }
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();
