@@ -7,7 +7,7 @@ pub mod gate;
 pub mod inventory;
 pub mod launch;
 
-pub use detect::{detect, detect_all, detect_at, parse_version, which, Detected};
+pub use detect::{detect, detect_all, detect_at, parse_version, which, which_all, Detected};
 pub use gate::ensure_allowed;
 pub use inventory::{HarnessInventory, HarnessInventoryEntry};
 pub use launch::{launch, terminal_size, PtyEvent, PtySession, RawGuard, TerminalModeGuard};

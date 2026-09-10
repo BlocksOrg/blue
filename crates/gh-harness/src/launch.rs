@@ -35,6 +35,8 @@ pub struct PtySession {
     output: Arc<Mutex<OutputQueue>>,
     #[cfg(unix)]
     process_group: Option<libc::pid_t>,
+    #[cfg(windows)]
+    job: usize,
 }
 
 impl Drop for PtySession {
@@ -50,6 +52,10 @@ impl Drop for PtySession {
             if let Ok(child) = self.child.get_mut() {
                 let _ = child.kill();
             }
+        }
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.job as _);
         }
     }
 }
@@ -86,6 +92,8 @@ impl PtySession {
             .slave
             .spawn_command(cmd)
             .map_err(|e| GhError::other(format!("spawning {}: {e}", bin.display())))?;
+        #[cfg(windows)]
+        let job = create_kill_on_close_job(child.process_id())?;
         drop(pair.slave);
         #[cfg(unix)]
         let process_group = pair.master.process_group_leader();
@@ -137,6 +145,8 @@ impl PtySession {
             output,
             #[cfg(unix)]
             process_group,
+            #[cfg(windows)]
+            job,
         })
     }
 
@@ -196,12 +206,63 @@ impl PtySession {
     }
 
     pub fn force_kill(&self) -> Result<(), GhError> {
+        #[cfg(windows)]
+        if unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job as _, 1) }
+            != 0
+        {
+            return Ok(());
+        }
         self.child
             .lock()
             .unwrap()
             .kill()
             .map_err(|e| GhError::other(format!("terminating child: {e}")))
     }
+}
+
+#[cfg(windows)]
+fn create_kill_on_close_job(process_id: Option<u32>) -> Result<usize, GhError> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+    let process_id =
+        process_id.ok_or_else(|| GhError::other("ConPTY child did not expose a process id"))?;
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        return Err(GhError::other(format!(
+            "creating Windows Job Object: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const info).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    };
+    let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, process_id) };
+    let assigned = !process.is_null() && unsafe { AssignProcessToJobObject(job, process) } != 0;
+    if !process.is_null() {
+        unsafe { CloseHandle(process) };
+    }
+    if configured == 0 || !assigned {
+        unsafe { CloseHandle(job) };
+        return Err(GhError::other(format!(
+            "attaching ConPTY child to Windows Job Object: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(job as usize)
 }
 
 /// Launch `bin` with `args`, injecting `extra_env` (e.g. the Codex inference JWT).
@@ -211,6 +272,14 @@ pub fn launch(
     args: &[String],
     extra_env: &BTreeMap<String, String>,
 ) -> Result<i32, GhError> {
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        let mut command = std::process::Command::new(bin);
+        command.args(args).envs(extra_env);
+        let status = command
+            .status()
+            .map_err(|e| GhError::other(format!("spawning {}: {e}", bin.display())))?;
+        return Ok(status.code().unwrap_or(1));
+    }
     let (rows, cols) = terminal_size();
     let session = Arc::new(PtySession::spawn(bin, args, extra_env, rows, cols)?);
 
@@ -279,7 +348,22 @@ pub fn terminal_size() -> (u16, u16) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn terminal_size() -> (u16, u16) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::GetConsoleScreenBufferInfo;
+    let handle = std::io::stdout().as_raw_handle();
+    let mut info = unsafe { std::mem::zeroed() };
+    if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } != 0 {
+        let rows = (info.srWindow.Bottom - info.srWindow.Top + 1).max(1) as u16;
+        let cols = (info.srWindow.Right - info.srWindow.Left + 1).max(1) as u16;
+        (rows, cols)
+    } else {
+        (24, 80)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn terminal_size() -> (u16, u16) {
     (24, 80)
 }
@@ -390,7 +474,27 @@ fn spawn_resize_thread(session: Arc<PtySession>) {
     });
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn spawn_resize_thread(session: Arc<PtySession>) {
+    std::thread::spawn(move || {
+        let mut previous = terminal_size();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let current = terminal_size();
+            if current != previous {
+                if session.resize(current.0, current.1).is_err() {
+                    break;
+                }
+                previous = current;
+            }
+            if session.try_wait().ok().flatten().is_some() {
+                break;
+            }
+        }
+    });
+}
+
+#[cfg(not(any(unix, windows)))]
 fn spawn_resize_thread(_session: Arc<PtySession>) {}
 
 /// RAII raw-mode guard for the parent terminal.
@@ -436,10 +540,61 @@ impl Drop for RawGuard {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub struct RawGuard {
+    input: windows_sys::Win32::Foundation::HANDLE,
+    input_mode: u32,
+    output: windows_sys::Win32::Foundation::HANDLE,
+    output_mode: u32,
+}
+
+#[cfg(windows)]
+impl RawGuard {
+    pub fn enter() -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Console::{
+            GetConsoleMode, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+            ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        };
+        let input = std::io::stdin().as_raw_handle();
+        let output = std::io::stdout().as_raw_handle();
+        let (mut input_mode, mut output_mode) = (0, 0);
+        if unsafe { GetConsoleMode(input, &mut input_mode) } == 0
+            || unsafe { GetConsoleMode(output, &mut output_mode) } == 0
+        {
+            return None;
+        }
+        let raw = (input_mode & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        if unsafe { SetConsoleMode(input, raw) } == 0 {
+            return None;
+        }
+        let _ = unsafe { SetConsoleMode(output, output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) };
+        Some(Self {
+            input,
+            input_mode,
+            output,
+            output_mode,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::SetConsoleMode;
+        unsafe {
+            SetConsoleMode(self.input, self.input_mode);
+            SetConsoleMode(self.output, self.output_mode);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub struct RawGuard;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl RawGuard {
     pub fn enter() -> Option<Self> {
         None

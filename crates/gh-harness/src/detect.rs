@@ -20,7 +20,10 @@ pub struct Detected {
 /// Locate `harness` on `PATH`, if installed.
 pub fn detect(harness: Harness) -> Option<Detected> {
     for name in harness.binary_names() {
-        if let Some(path) = which(name) {
+        for path in which_all(name) {
+            if is_blue_or_shim(&path) {
+                continue;
+            }
             return Some(detect_at(harness, path));
         }
     }
@@ -61,14 +64,104 @@ pub fn detect_all() -> Vec<(Harness, Option<Detected>)> {
 
 /// Minimal `which`: scan `$PATH` for an executable file named `name`.
 pub fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
+    which_all(name)
+        .into_iter()
+        .find(|path| !is_blue_or_shim(path))
+}
+
+/// Locate every matching executable in PATH order.
+pub fn which_all(name: &str) -> Vec<PathBuf> {
+    let mut matches = Vec::new();
+    let Some(path) = std::env::var_os("PATH") else {
+        return matches;
+    };
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if is_executable(&candidate) {
-            return Some(candidate);
+        for candidate in executable_candidates(&dir, name) {
+            if is_executable(&candidate) {
+                matches.push(candidate);
+            }
         }
     }
-    None
+    matches
+}
+
+#[cfg(not(windows))]
+fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
+    vec![dir.join(name)]
+}
+
+#[cfg(windows)]
+fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
+    let path = std::path::Path::new(name);
+    if path.extension().is_some() {
+        return vec![dir.join(path)];
+    }
+    let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    pathext
+        .to_string_lossy()
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| dir.join(format!("{name}{extension}")))
+        .collect()
+}
+
+fn is_blue_or_shim(path: &std::path::Path) -> bool {
+    if std::env::current_exe()
+        .ok()
+        .and_then(|current| std::fs::canonicalize(current).ok())
+        .zip(std::fs::canonicalize(path).ok())
+        .is_some_and(|(current, candidate)| paths_equal(&current, &candidate))
+    {
+        return true;
+    }
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    Harness::ALL
+        .iter()
+        .copied()
+        .any(|harness| valid_blue_shim(&contents, harness))
+}
+
+#[cfg(windows)]
+fn valid_blue_shim(contents: &str, harness: Harness) -> bool {
+    let Some(command) = contents.strip_prefix("@rem Blue command shim v1\r\n@\"") else {
+        return false;
+    };
+    let Some(executable) = command.strip_suffix(&format!("\" run {} -- %*\r\n", harness.key()))
+    else {
+        return false;
+    };
+    !executable.is_empty()
+        && std::path::Path::new(executable).is_absolute()
+        && !executable.contains('"')
+        && !executable.contains('%')
+}
+
+#[cfg(not(windows))]
+fn valid_blue_shim(contents: &str, harness: Harness) -> bool {
+    let Some(command) =
+        contents.strip_prefix("#!/usr/bin/env bash\n# Blue command shim v1\nexec \"")
+    else {
+        return false;
+    };
+    let Some(executable) = command.strip_suffix(&format!("\" run {} -- \"$@\"\n", harness.key()))
+    else {
+        return false;
+    };
+    !executable.is_empty() && std::path::Path::new(executable).is_absolute()
+}
+
+#[cfg(windows)]
+fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
 }
 
 #[cfg(unix)]
