@@ -1,0 +1,183 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import BrandMark from "../components/BrandMark.astro";
+
+const docsBase = "https://docs.bluee.sh/next";
+const github = "https://github.com/BlocksOrg/blue";
+const externalLinkProps = { target: "_blank", rel: "noopener noreferrer" };
+
+const governanceGaps = [
+  {
+    number: "01",
+    title: "Policy fragments across clients",
+    body: "Each agent has its own configuration files, extension formats, hooks, and release boundaries. A policy written for one client does not automatically apply to another.",
+  },
+  {
+    number: "02",
+    title: "Device control has limited reach",
+    body: "MDM can push files to enrolled employee devices. It is less useful for contractors, unmanaged devices, and policy that needs to follow a user across machines.",
+  },
+  {
+    number: "03",
+    title: "Gateway keys spread to endpoints",
+    body: "Without an identity-aware exchange, virtual keys are copied into local agent configuration. Long-lived credentials then remain in plaintext on developer machines.",
+  },
+  {
+    number: "04",
+    title: "Usage loses its work context",
+    body: "A gateway sees the user, model, and client, but not the local repository, working directory, commit, or Jira, Linear, or GitHub work item behind a session.",
+  },
+];
+---
+
+<BaseLayout
+  title="Why a metaharness? | Blue"
+  description="The governance problems that appear when organizations use multiple coding agents, model providers, and inference systems."
+>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Blue home">
+      <BrandMark size={32} />
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="/#product">Product</a>
+      <a href="/#how-it-works">How it works</a>
+      <a href="/manifesto" aria-current="page">Why Blue</a>
+      <a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a>
+      <a class="nav-github" href={github} {...externalLinkProps}>GitHub <span class="link-caret" aria-hidden="true"></span></a>
+    </nav>
+  </header>
+
+  <main id="main-content" class="manifesto-page">
+    <article>
+      <header class="manifesto-hero reveal">
+        <h1>Why a metaharness?</h1>
+        <p>
+          What changes when an organization moves beyond one coding-agent provider and begins using several agents, models, and inference systems.
+        </p>
+      </header>
+
+      <section class="manifesto-prose manifesto-opening">
+        <p class="manifesto-lead">
+          Governance is fairly direct inside one provider’s ecosystem. Developers use the same coding agent, sign in through the same account system, and receive tools and access through one administrative path.
+        </p>
+        <p>
+          That arrangement provides more than access to a model. It also provides identity, subscription management, client distribution, and a common place to apply controls. Much of the governance is inherited from the provider ecosystem.
+        </p>
+        <p>
+          The arrangement changes when an organization wants to try another agent, use models from several providers, run open-weight models, or host inference itself. The new tools may be useful, but they sit outside the original administrative boundary. Governance no longer comes with the ecosystem.
+        </p>
+      </section>
+
+      <section class="manifesto-statement">
+        <p>As tool choice expands, governance stops being inherited and becomes infrastructure the organization must provide.</p>
+      </section>
+
+      <section class="manifesto-prose">
+        <h2>The problem is not the number of agents</h2>
+        <p>
+          The problem is that every agent has a different control surface. Configuration lives in different files. Skills, plugins, hooks, and MCP servers use different formats. Version changes can move paths or change what a client supports. Authentication and model routing also vary.
+        </p>
+        <p>
+          Platform teams can address some of this with scripts or device management. Those tools work well for files on managed employee devices, but they are a poor identity layer and may not reach contractors or other machines. They also leave the organization maintaining separate logic for every agent and version.
+        </p>
+        <p>
+          An inference gateway solves a different part of the problem. It centralizes model access and records requests, but it does not configure local agents, distribute extensions, or know what is happening in the developer’s working directory.
+        </p>
+      </section>
+
+      <section class="manifesto-values" aria-labelledby="value-heading">
+        <h2 id="value-heading">Where the gaps appear</h2>
+        <div class="manifesto-value-grid">
+          {governanceGaps.map((item) => (
+            <article>
+              <span>{item.number}</span>
+              <h3>{item.title}</h3>
+              <p>{item.body}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section class="manifesto-prose">
+        <h2>The gateway credential problem</h2>
+        <p>
+          A gateway usually gives each user a virtual key. Someone must create that key, deliver it to the developer, and place it where each agent expects it. The key often ends up as plaintext in a local configuration file. It may remain there long after the session that needed it.
+        </p>
+        <p>
+          Placing the gateway behind a private network reduces who can reach it, but it introduces another requirement: developers must stay connected to a VPN or private tunnel whenever they use inference. This is a network boundary, not a user-level credential exchange.
+        </p>
+        <p>
+          A metaharness can use the organization’s identity provider instead. The developer signs in through a browser and receives a short-lived token for the current session. A proxy validates that token and substitutes the real gateway credential on the server. The upstream key never needs to be copied into the agent’s configuration.
+        </p>
+      </section>
+
+      <section class="manifesto-prose">
+        <h2>The work attribution problem</h2>
+        <p>
+          Inference gateways already know who made a request, which model handled it, and often which agent sent it. What they cannot discover on their own is what the developer was working on: the current directory, repository, branch, commit, or the Jira, Linear, or GitHub issue behind the session.
+        </p>
+        <p>
+          A layer running on the developer’s machine can collect approved local context and ask the developer to choose a work item for the session. It can then carry that metadata into gateway request records. The result is a link between model consumption and a specific body of work, rather than another total grouped only by user or model.
+        </p>
+        <p>
+          This link gives finance teams request-level evidence tied to specific work items. That makes inference spend easier to allocate and supports the organization’s CapEx and OpEx analysis.
+        </p>
+      </section>
+
+      <section class="manifesto-principles">
+        <h2>What a metaharness should do</h2>
+        <ol>
+          <li><strong>Keep the native agent intact.</strong> The shared layer should not replace each agent’s interface or remove its unique features.</li>
+          <li><strong>Translate one policy.</strong> Organizations should define intent once, while adapters handle the configuration expected by each supported agent and version.</li>
+          <li><strong>Attach policy to identity.</strong> Governance should follow a person across supported machines instead of depending only on device enrollment.</li>
+          <li><strong>Keep long-lived credentials off clients.</strong> Short-lived session tokens should stand between developer machines and server-held gateway keys.</li>
+          <li><strong>Keep gateway routing optional.</strong> Configuration governance should still work when agents connect directly to their providers.</li>
+          <li><strong>State the limit clearly.</strong> Configuration governance is not an operating-system sandbox. A user who bypasses the shared entry point also bypasses its managed launch.</li>
+        </ol>
+      </section>
+
+      <section class="manifesto-prose manifesto-close">
+        <h2>Blue’s approach</h2>
+        <p>
+          Blue is an open-source, self-hosted implementation of this metaharness pattern. It wraps supported native CLIs, authenticates the developer, fetches organization policy, checks version compatibility, prepares managed configuration for the launch, and then passes control to the selected agent.
+        </p>
+        <p>
+          Its gateway mode uses session-bound inference tokens while keeping upstream credentials on the server. Its request model includes repository, branch, commit, working-state, and run fields. Explicit Jira, Linear, and GitHub work-item binding is not implemented yet.
+        </p>
+        <p class="manifesto-final-line">The aim is a common administrative layer for organizations that no longer use one coding-agent ecosystem.</p>
+        <div class="actions">
+          <a class="button button-primary" href={`${docsBase}/concepts/architecture`} {...externalLinkProps}>Read the architecture</a>
+          <a class="text-link" href={github} {...externalLinkProps}>View the source <span class="link-caret" aria-hidden="true"></span></a>
+        </div>
+      </section>
+    </article>
+  </main>
+
+  <footer id="footer" class="manifesto-footer">
+    <div class="footer-columns">
+      <div class="footer-links">
+        <div class="footer-column">
+          <h4>Product</h4>
+          <ul><li><a href="/manifesto">Why Blue</a></li><li><a href={`${docsBase}/introduction`} {...externalLinkProps}>Overview</a></li><li><a href={`${docsBase}/quickstart`} {...externalLinkProps}>Quickstart</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Concepts</h4>
+          <ul><li><a href={`${docsBase}/concepts/architecture`} {...externalLinkProps}>Architecture</a></li><li><a href={`${docsBase}/concepts/configuration`} {...externalLinkProps}>Configuration</a></li><li><a href={`${docsBase}/concepts/gateway-mode`} {...externalLinkProps}>Gateway mode</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Project</h4>
+          <ul><li><a href={github} {...externalLinkProps}>GitHub</a></li><li><a href={`${github}/releases`} {...externalLinkProps}>Releases</a></li><li><a href={`${github}/blob/main/CONTRIBUTING.md`} {...externalLinkProps}>Contributing</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Trust</h4>
+          <ul><li><a href={`${github}/blob/main/SECURITY.md`} {...externalLinkProps}>Security</a></li><li><a href={`${github}/blob/main/LICENSE`} {...externalLinkProps}>MIT License</a></li></ul>
+        </div>
+        <div class="footer-column">
+          <h4>Connect</h4>
+          <ul><li><a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a></li><li><a href="https://blocks.team" {...externalLinkProps}>Blocks</a></li></ul>
+        </div>
+      </div>
+    </div>
+    <div class="footer-copyright"><span>Blue, an open-source project from Blocks.</span></div>
+  </footer>
+</BaseLayout>
