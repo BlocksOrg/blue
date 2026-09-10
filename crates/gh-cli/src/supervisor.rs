@@ -84,7 +84,8 @@ impl InputReader {
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let thread_stop = stop.clone();
             let handle = std::thread::spawn(move || {
-                use windows_sys::Win32::System::Threading::{WaitForSingleObject, WAIT_OBJECT_0};
+                use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+                use windows_sys::Win32::System::Threading::WaitForSingleObject;
                 let mut input = stdin;
                 let mut bytes = [0u8; 4096];
                 while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {

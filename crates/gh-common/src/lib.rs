@@ -9,6 +9,8 @@
 pub mod atomic;
 pub mod client_config;
 pub mod error;
+#[cfg(windows)]
+pub mod fs_identity;
 pub mod harness;
 pub mod network;
 pub mod paths;

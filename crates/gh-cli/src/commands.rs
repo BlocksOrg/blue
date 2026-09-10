@@ -1176,10 +1176,14 @@ fn managed_path_fingerprint(path: &Path) -> Result<ManagedPathFingerprint> {
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
+            // `MetadataExt::volume_serial_number`/`file_index` are nightly-only
+            // (`windows_by_handle`), so the identity pair comes from
+            // `GetFileInformationByHandle` instead.
+            let identity = gh_common::fs_identity::file_identity(path);
             (
                 Some(i128::from(metadata.last_write_time()) * 100),
-                metadata.volume_serial_number().map(u64::from),
-                metadata.file_index(),
+                identity.map(|(volume, _)| volume),
+                identity.map(|(_, index)| index),
             )
         }
         #[cfg(not(windows))]
