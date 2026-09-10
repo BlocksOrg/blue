@@ -897,6 +897,39 @@ mod tests {
         assert!(portable_native_path(&home, Path::new("/elsewhere/wire.jsonl")).is_none());
     }
 
+    /// The destination walk starts at the root that authorises the path, so a
+    /// dotfile-managed `~/.config` no longer blocks Blue's own managed runtime.
+    /// A symlinked *native* harness root is how a bundle escapes the home
+    /// directory, and must still be refused.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_managed_root_is_allowed_but_a_symlinked_native_root_is_not() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp("symlinked-roots");
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let outside = root.join("outside");
+        fs::create_dir_all(home.join(".config-target/blue")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(home.join(".config-target"), home.join(".config")).unwrap();
+        symlink(&outside, home.join(".codex")).unwrap();
+
+        reject_symlinked_destination(
+            &home,
+            Path::new(MANAGED_RUNTIME_ROOT)
+                .join("kimi/sessions/p/s1/agents/main/wire.jsonl")
+                .as_path(),
+        )
+        .expect("a symlinked managed config root should not block the managed runtime");
+
+        let error = reject_symlinked_destination(&home, Path::new(".codex/sessions/s1.jsonl"))
+            .expect_err("a symlinked native harness root must still be refused");
+        assert!(error.to_string().contains("traverses symlink"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// The managed runtime is only *sometimes* under `$HOME/.config`: with
     /// `XDG_CONFIG_HOME` pointed outside `$HOME` (and on Windows, where it is
     /// under `%LOCALAPPDATA%`) a home-relative `strip_prefix` produces either

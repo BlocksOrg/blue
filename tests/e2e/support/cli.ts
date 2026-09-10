@@ -27,6 +27,43 @@ export async function prepareEmptyClient(name: string): Promise<string> {
   return home;
 }
 
+/**
+ * A client whose Blue roots sit *outside* its `$HOME`, as an `XDG_CONFIG_HOME`
+ * pointed elsewhere does. This is the layout where Blue's managed runtime stops
+ * being a subdirectory of the home directory — the same split Windows has
+ * permanently, and the only way to reproduce it on Linux CI.
+ */
+export async function prepareRelocatedClient(
+  name: string,
+): Promise<{ home: string; configHome: string; cacheHome: string }> {
+  const home = path.join(stateRoot(), `${name}-home`);
+  const configHome = path.join(stateRoot(), `${name}-xdg-config`);
+  const cacheHome = path.join(stateRoot(), `${name}-xdg-cache`);
+  await mkdir(home, { recursive: true });
+  await mkdir(path.join(configHome, "blue"), { recursive: true });
+  await mkdir(cacheHome, { recursive: true });
+  return { home, configHome, cacheHome };
+}
+
+/** The XDG overrides that pin a relocated client's roots. */
+export function relocatedEnv(client: { configHome: string; cacheHome: string }): NodeJS.ProcessEnv {
+  return { XDG_CONFIG_HOME: client.configHome, XDG_CACHE_HOME: client.cacheHome };
+}
+
+/**
+ * Run `blue` with `$HOME` removed entirely — the HOME-less container case,
+ * where every root has to come from XDG or not be needed at all.
+ */
+export async function runCliWithoutHome(
+  home: string,
+  args: string[],
+  extra: NodeJS.ProcessEnv = {},
+): Promise<CliResult> {
+  const env = cliEnv(home, extra);
+  delete env.HOME;
+  return collect(spawn("blue", args, { env, stdio: ["pipe", "pipe", "pipe"] }));
+}
+
 export function cliEnv(home: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     ...process.env,
