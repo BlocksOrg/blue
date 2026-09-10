@@ -1,3 +1,6 @@
+-- Contract migration: replaces the pseudotoken gateway credential contract
+-- with session-bound inference JWTs. Older serving binaries cannot read this
+-- schema, so the compatibility floor is raised to 32 at the end of the file.
 -- Gateway authentication is bound to the Better Auth session that authorized
 -- the governance response. Inference JWTs are deliberately not persisted.
 CREATE TABLE public.gateway_auth_sessions (
@@ -133,6 +136,4 @@ ALTER TABLE public.gateway_key_selections
 
 -- This migration removes the previous authentication contract and is not safe
 -- for older serving binaries.
-UPDATE public.schema_compatibility
-SET minimum_migration_version = 32, updated_at = now()
-WHERE singleton = true;
+UPDATE public.schema_compatibility SET minimum_migration_version = 32, updated_at = now() WHERE singleton = true;
