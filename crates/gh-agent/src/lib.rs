@@ -6,7 +6,7 @@
 //! service on `revision`/TTL and reconciles on change. In gateway mode it also
 //! publishes the inference token to GUI-visible environments so desktop apps see it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gh_common::{GhError, Harness};
 use gh_config::{
@@ -250,6 +250,7 @@ fn apply_once_with_inventory_and_optional_fetcher(
 
 /// Poll the service and reconcile whenever the `revision` changes. Runs until
 /// the process is killed. `sleep` is injected so this is testable / interruptible.
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_loop(
     client: &ServiceClient,
     session: &Session,
@@ -258,11 +259,15 @@ pub fn reconcile_loop(
     now: impl Fn() -> i64,
     sleep: impl Fn(u64),
     mut on_reconciled: impl FnMut(&GovernanceConfig, &mut HarnessInventory, &[HarnessReconcile], bool),
+    mut on_unauthorized: impl FnMut(&str),
 ) {
     let mut last_revision: Option<String> = None;
+    let mut published_env: BTreeSet<String> = BTreeSet::new();
+    let mut unauthorized = false;
     loop {
         let ttl = match client.fetch_or_cached(session, now()) {
             Ok(config) => {
+                unauthorized = false;
                 let packages_drifted = gh_config::package_statuses()
                     .map(|statuses| {
                         statuses.iter().any(|status| {
@@ -324,6 +329,12 @@ pub fn reconcile_loop(
                         }
                     }
                 }
+                published_env.extend(
+                    results
+                        .iter()
+                        .filter_map(|result| result.result.as_ref().ok())
+                        .flat_map(|write| write.env.keys().cloned()),
+                );
                 on_reconciled(&config, &mut inventory, &results, all_succeeded);
                 if all_succeeded {
                     last_revision = Some(config.revision.clone());
@@ -332,12 +343,42 @@ pub fn reconcile_loop(
                 }
                 config.ttl_seconds()
             }
-            Err(e) => {
-                tracing::error!(error = %e, "config fetch failed; will retry");
-                GovernanceConfig::DEFAULT_TTL_SECONDS
+            Err(error) => {
+                let (ttl, needs_user) = failure_backoff(&error);
+                if needs_user {
+                    // Reconciling here would rewrite agent config from a cache
+                    // that carries no usable token. Back off, log once on the
+                    // transition rather than every poll, and take the dead
+                    // credentials back out of the GUI environment.
+                    if !unauthorized {
+                        unauthorized = true;
+                        tracing::error!(%error, "control service needs the user to act; not reconciling");
+                        if !published_env.is_empty() {
+                            unpublish_gui_env(&published_env);
+                            published_env.clear();
+                        }
+                    }
+                    on_unauthorized(&error.to_string());
+                } else {
+                    unauthorized = false;
+                    tracing::error!(%error, "config fetch failed; will retry");
+                }
+                ttl
             }
         };
         sleep(ttl);
+    }
+}
+
+/// Poll interval after a failed fetch, and whether the failure is one only the
+/// user can clear. An outage should be retried promptly; a dead session should
+/// not be, because nothing the daemon does will fix it.
+fn failure_backoff(error: &GhError) -> (u64, bool) {
+    match error {
+        GhError::Unauthorized(_) | GhError::ActionRequired(_) => {
+            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
+        }
+        _ => (GovernanceConfig::DEFAULT_TTL_SECONDS, false),
     }
 }
 
@@ -356,6 +397,22 @@ pub fn publish_gui_env(vars: &BTreeMap<String, String>) {
         };
         if !ok {
             tracing::debug!(var = %k, "could not publish env var to GUI environment (best-effort)");
+        }
+    }
+}
+
+/// Remove env vars from the GUI-visible environment. A GUI Codex that finds a
+/// known-dead JWT there fails with an opaque proxy 401; one that finds nothing
+/// says it has no credentials, which is both true and actionable.
+pub fn unpublish_gui_env(names: &BTreeSet<String>) {
+    for name in names {
+        let ok = if cfg!(target_os = "macos") {
+            run("launchctl", &["unsetenv", name])
+        } else {
+            run("systemctl", &["--user", "unset-environment", name])
+        };
+        if !ok {
+            tracing::debug!(var = %name, "could not clear env var from GUI environment (best-effort)");
         }
     }
 }
@@ -454,5 +511,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("revision preflight failed")));
+    }
+}
+
+#[cfg(test)]
+mod unauthorized_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_rejected_session_backs_the_daemon_off() {
+        assert_eq!(
+            failure_backoff(&GhError::service("connection refused")),
+            (GovernanceConfig::DEFAULT_TTL_SECONDS, false)
+        );
+        assert_eq!(
+            failure_backoff(&GhError::unauthorized("your session is no longer valid")),
+            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
+        );
+        assert_eq!(
+            failure_backoff(&GhError::action_required("run `blue gateway`")),
+            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
+        );
     }
 }

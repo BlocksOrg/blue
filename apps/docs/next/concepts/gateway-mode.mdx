@@ -39,11 +39,17 @@ sequenceDiagram
 
 The Control API matches the signed-in governance user to a LiteLLM user by exact, case-insensitive email. The deployment provisions one managed key per user according to provisioner policy. The shipped LiteLLM provisioners use `blue:<email>` as the base key alias and add a numeric suffix if that alias is occupied. The Control API stores the resulting server-side virtual key only in PostgreSQL.
 
-When the client fetches policy, the Control API requires its OAuth token's `sid`, verifies and renews the active backing Better Auth session, and injects the inference proxy URL plus a session-bound inference JWT into the global gateway block. Each new Blue launch receives a fresh JWT limited to `gateway:infer` and at most 12 hours; an already-running agent keeps its fixed launch expiry. The JWT is never persisted by the Control API. The wrapper writes agent-specific routing for allowed agents. The inference proxy validates the JWT, resolves its Blue user and OAuth session through the M2M channel, and substitutes the server-side virtual key.
+When the client fetches policy, the Control API requires its OAuth token's `sid`, verifies the active backing Better Auth session, and injects the inference proxy URL plus a session-bound inference JWT into the global gateway block. Each new Blue launch receives a fresh JWT limited to `gateway:infer` and to `gateway.inference_jwt.token_ttl_seconds` (12 hours by default), never outliving the backing session. Fetching policy does not extend that session — the dashboard owns its lifetime. The JWT is never persisted by the Control API, and the client never writes it to its config cache. The wrapper writes agent-specific routing for allowed agents. The inference proxy validates the JWT, resolves its Blue user and OAuth session through the M2M channel, and substitutes the server-side virtual key.
 
 <Note>
   Gateway routing applies when an allowed agent is launched through `blue`. Starting the native agent command directly uses its native configuration and credentials.
 </Note>
+
+An already-running agent keeps its fixed launch expiry: the JWT is in the child process's environment and is not rotated in flight. Ten minutes before it expires, `blue` shows a countdown in the status row and offers to quit and reload the agent, which mints a fresh token. It never restarts on its own, because that would end an in-flight turn.
+
+If the browser session ends — you sign out of the dashboard, or it simply expires — the CLI's next policy fetch gets a 401 and `blue` says so directly: a **Session expired — sign in** banner, a prompt to stop the agent and sign in, and `blue doctor` reporting `session : EXPIRED`. Logging back in from a live browser session restores gateway access; JWTs minted before the logout stay rejected.
+
+Signing back in after `blue logout` reuses the same browser session, so gateway access resumes without a new browser sign-in.
 
 ## How governance-only mode works
 
