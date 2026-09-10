@@ -58,7 +58,7 @@
           { "group": "Start here", "pages": ["next/introduction", "next/quickstart"] },
           { "group": "Deployment", "pages": ["next/deployment/runtime-contract", "next/deployment/production", "next/deployment/blue-yaml", "next/deployment/managed-repositories"] },
           { "group": "Concepts", "pages": ["next/concepts/architecture", "next/concepts/configuration", "next/concepts/harness-version-compatibility", "next/concepts/gateway-mode", "next/concepts/authentication"] },
-          { "group": "CLI", "pages": ["next/cli/commands", "next/cli/harnesses", "next/cli/troubleshooting"] },
+          { "group": "CLI", "pages": ["next/cli/commands", "next/cli/harnesses", "next/cli/windows-paths", "next/cli/troubleshooting"] },
           { "group": "Administration", "pages": ["next/admin/dashboard", "next/admin/user-management", "next/admin/identity-provisioning", "next/admin/managed-packages", "next/admin/configuration", "next/admin/gateway-access", "next/admin/custom-gateway-provisioners", "next/admin/session-capture"] },
           { "group": "Development", "pages": ["next/development/local-compose", "next/development/contributing", "next/development/harness-adapter-architecture", "next/development/gateway-adapter-architecture"] },
           { "group": "Reference", "pages": ["next/reference/governance-config", "next/reference/auth-endpoints"] },

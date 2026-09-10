@@ -24,7 +24,7 @@ The binary is named `blue`. Run `blue --help` for the arguments supported by you
 | `blue gateway` | Provision or reconcile the current user's single managed gateway key. |
 | `blue run NAME -- ARGS` | Reconcile and launch one governed native agent, notifying when a newer revision requires a restart. |
 | `blue NAME ARGS` | Shorthand for `blue run NAME -- ARGS`. |
-| `blue shim install [--dir PATH]` | Install command shims into `~/.local/bin` by default or another directory. |
+| `blue shim install [--dir PATH]` | Install command shims into `~/.local/bin` on Unix or `%LOCALAPPDATA%\Blue\bin` on Windows by default. |
 | `blue shim uninstall [--dir PATH]` | Remove shims previously installed by Blue from the default or specified directory. |
 
 ## Typical workflow
@@ -83,7 +83,7 @@ When you confirm, Blue:
 4. Attempts to revoke the OAuth refresh credential, always deletes the local session, and never puts credentials in the archive.
 5. Removes the active `blue.toml` and governance cache so policy from the previous tenant cannot be used by a different tenant.
 
-Blue keeps a separate installation ID for each tenant under `~/.config/blue/identities`. Those identities, reconciliation locks, transaction data, and installed PATH shims remain in place. Reconnecting to the same tenant reuses its ID; connecting to another tenant creates a different one.
+Blue keeps a separate installation ID for each tenant under `~/.config/blue/identities` on Unix or `%APPDATA%\Blue\identities` on Windows. Reconnecting to the same tenant reuses its ID; connecting to another tenant creates a different one. See [Windows paths and migration](/next/cli/windows-paths) for the complete native layout.
 
 ### Connect again
 
@@ -99,7 +99,7 @@ Entering a new URL starts with clean tenant state. Running `blue setup` while an
 
 ## Exit behavior
 
-The wrapper attaches the agent to a pseudo-terminal and forwards arguments, input, output, resize events, signals, and the native exit code. Governance or reconciliation failures occur before launch and return a non-zero harness exit status.
+For an interactive terminal, the wrapper attaches the agent to a pseudo-terminal and forwards arguments, input, output, resize events, signals, and the native exit code. Redirected or piped execution uses native inherited handles without allocating a pseudo-terminal. Governance or reconciliation failures occur before launch and return a non-zero harness exit status.
 
 Package reconciliation is independent per package. Successful packages activate even if another package fails, and a failed update retains its last usable version when its adapter remains compatible. The command still exits non-zero and the affected harness cannot launch until every required package is active.
 
