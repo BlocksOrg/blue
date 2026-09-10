@@ -2044,6 +2044,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// `tar::Builder::append_data` normalises `./` away, so the fixture has to
+    /// write the literal member name into the raw header block.
+    fn literal_path_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, body) in entries {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_entry_type(if path.ends_with('/') {
+                tar::EntryType::Directory
+            } else {
+                tar::EntryType::Regular
+            });
+            let name = path.as_bytes();
+            header.as_mut_bytes()[..name.len()].copy_from_slice(name);
+            header.set_cksum();
+            archive.append(&header, *body).unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn accepts_current_directory_prefixed_archive_paths() {
+        let root = std::env::temp_dir().join(format!("gh-package-curdir-{}", std::process::id()));
+        let dest = root.join("extracted");
+        let bytes = literal_path_archive(&[
+            ("./", b""),
+            ("./skills/", b""),
+            ("./skills/example/SKILL.md", b"body"),
+        ]);
+        extract_safe(&bytes, &dest, "curdir").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("skills/example/SKILL.md")).unwrap(),
+            "body"
+        );
+
+        // Normalisation must not open an escape or defeat the duplicate check.
+        let duplicate = literal_path_archive(&[("./same.txt", b"x"), ("same.txt", b"x")]);
+        let duplicate_error = extract_safe(&duplicate, &root.join("duplicate"), "curdir")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            duplicate_error.contains("duplicate path"),
+            "{duplicate_error}"
+        );
+        let escape = literal_path_archive(&[("./../escape.txt", b"x")]);
+        assert!(extract_safe(&escape, &root.join("escape"), "curdir").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_existing_and_broken_symlink_staging_ancestors() {

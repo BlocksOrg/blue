@@ -97,12 +97,20 @@ pub(crate) fn extract_safe_with_limits(
         if kind.is_dir() {
             relative_text.truncate(relative_text.trim_end_matches('/').len());
         }
-        let components = relative_text.split('/').collect::<Vec<_>>();
+        // `tar -czf pkg.tgz .` and Python `tarfile` store members as
+        // `./skills/...`; drop those no-op components before validating so a
+        // hand-built package extracts like a codeload tarball.
+        let components = relative_text
+            .split('/')
+            .filter(|part| *part != ".")
+            .collect::<Vec<_>>();
         if components.len() > limits.path_components
             || components.iter().any(|part| {
                 part.is_empty()
-                    || matches!(*part, "." | "..")
+                    || *part == ".."
                     || part.contains(['\\', '\0'])
+                    // `:` stays rejected on every platform: Windows parity is an
+                    // active workstream and NTFS reads it as an ADS separator.
                     || part.contains(':')
             })
         {
@@ -110,7 +118,17 @@ pub(crate) fn extract_safe_with_limits(
                 "package `{id}` contains unsafe path `{relative_text}`"
             )));
         }
-        if !paths_seen.insert(relative_text.clone()) {
+        let relative_path = components.join("/");
+        if relative_path.is_empty() {
+            // A bare `./` root member carries no payload of its own.
+            if kind.is_dir() {
+                continue;
+            }
+            return Err(GhError::config(format!(
+                "package `{id}` contains unsafe path `{relative_text}`"
+            )));
+        }
+        if !paths_seen.insert(relative_path.clone()) {
             return Err(GhError::config(format!(
                 "package `{id}` contains duplicate path `{relative_text}`"
             )));
@@ -124,7 +142,7 @@ pub(crate) fn extract_safe_with_limits(
                 "package `{id}` contains unsupported link or special entry `{relative_text}`"
             )));
         }
-        let target = dest.join(&relative_text);
+        let target = dest.join(&relative_path);
         if kind.is_dir() {
             secure_create_dir_all(&target)?;
             continue;
