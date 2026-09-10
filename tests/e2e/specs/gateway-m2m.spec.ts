@@ -399,6 +399,95 @@ test.describe.serial("Gateway M2M auth", () => {
     expect(after - before).toBeLessThanOrEqual(2);
   });
 
+  test("restores gateway access when the CLI logs back in from a live browser session", async ({ page, browser }) => {
+    test.setTimeout(120_000);
+    await loginAsAdmin(page);
+    const member = await createMember(page, browser);
+
+    // One browser context for the whole test. The revocation test above calls
+    // browser.newContext() per iteration, so it gets a fresh sid every time —
+    // which is exactly why this bug went unnoticed.
+    const login = await signInMember(browser, member.email);
+    try {
+      const home = await prepareClient(`gateway-reactivation-${Date.now()}`);
+      const first = await mintInferenceToken(home, login.page);
+      expect(await inferenceStatus(login.context.request, first)).toBe(200);
+      const invalidations = parseMetric(
+        await (await login.context.request.get(`${PROXY}/metrics`)).text(),
+        "gateway_proxy_invalidation_events_total",
+      );
+
+      const logout = await runCli(home, ["logout"]);
+      expect(logout.code, logout.stderr).toBe(0);
+      await expectRevoked(login.context.request, first, invalidations);
+
+      // Log back in from the same signed-in browser: no new browser session.
+      const second = await mintInferenceToken(home, login.page);
+      // Without this, a future Better Auth change that mints a new sid would
+      // make the rest of the test pass vacuously.
+      expect(jwtClaims(second).blue_oauth_session_id).toBe(
+        jwtClaims(first).blue_oauth_session_id,
+      );
+
+      await expect
+        .poll(() => inferenceStatus(login.context.request, second), {
+          timeout: 10_000,
+          intervals: [50, 100, 250],
+        })
+        .toBe(200);
+      // The pre-logout token stays dead: session_not_before.
+      expect(await inferenceStatus(login.context.request, first)).toBe(401);
+    } finally {
+      await login.context.close();
+    }
+  });
+
+  test("fails closed and never reinstalls a stale inference token after the browser session ends", async ({ page, browser }) => {
+    test.setTimeout(120_000);
+    await loginAsAdmin(page);
+    const member = await createMember(page, browser);
+    const login = await signInMember(browser, member.email);
+    try {
+      const home = await prepareClient(`gateway-fail-closed-${Date.now()}`);
+      const token = await mintInferenceToken(home, login.page);
+      expect(await inferenceStatus(login.context.request, token)).toBe(200);
+      const applied = await runCli(home, ["apply", "--yes"]);
+      expect(applied.code, applied.stderr).toBe(0);
+
+      // The runtime credential must never reach the on-disk cache: it is what
+      // used to get reinstalled into agent config after the proxy 401'd.
+      const cached = JSON.parse(
+        await readClientFile(home, ".cache/blue/governance-config.json"),
+      );
+      expect(cached.config.gateway?.type).toBe("litellm");
+      expect(cached.config.gateway?.token).toBeUndefined();
+      expect(cached.config.gateway?.proxy_url).toBeUndefined();
+
+      const signOut = await login.context.request.post(
+        `${DASHBOARD}/api/auth/sign-out`,
+        { headers: { origin: DASHBOARD }, data: {} },
+      );
+      expect(signOut.status(), await signOut.text()).toBe(200);
+
+      // The session file is still on disk and its access token still refreshes,
+      // so only a live check can tell the truth here.
+      await expect
+        .poll(async () => (await runCli(home, ["doctor"])).stdout, {
+          timeout: 30_000,
+          intervals: [250, 500, 1_000],
+        })
+        .toContain("session       : EXPIRED (run `blue login`)");
+
+      // A gateway launch must refuse rather than fall back to a cached config
+      // holding no usable token — or, worse, to the user's own provider keys.
+      const launched = await runCli(home, ["run", "codex", "--", "after-signout"]);
+      expect(launched.code).not.toBe(0);
+      expect(`${launched.stdout}${launched.stderr}`).toContain("blue login");
+    } finally {
+      await login.context.close();
+    }
+  });
+
   test("revokes cached inference access for every session and user lifecycle path", async ({ page, browser }) => {
     test.setTimeout(240_000);
     await loginAsAdmin(page);

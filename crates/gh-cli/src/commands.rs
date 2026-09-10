@@ -643,6 +643,15 @@ fn gateway_api_error_message(status: reqwest::StatusCode, message: &str) -> Stri
     ) {
         return gateway_unavailable_message();
     }
+    // `blue run` reaches this hop before it ever fetches policy, so without
+    // this arm an expired session surfaces as a bare "gateway access: ..." and
+    // the user is never told what to do about it.
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return "your session is no longer valid (run `blue login`)".to_owned();
+    }
     format!("gateway access: {message}")
 }
 
@@ -5040,6 +5049,23 @@ mod tests {
         assert!(message.contains("gateway or its provisioner"));
         assert!(!message.contains("http://"));
         assert!(!message.contains("error sending request"));
+    }
+
+    #[test]
+    fn a_rejected_session_names_the_command_that_fixes_it() {
+        // `blue run` hits /gateway/key/ensure before it fetches policy, so this
+        // is the first place an expired session becomes visible.
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            let message = gateway_api_error_message(status, "unauthorized");
+            assert!(message.contains("blue login"), "{message}");
+        }
+        assert!(
+            gateway_api_error_message(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom")
+                .contains("boom")
+        );
     }
 
     fn gateway_access(enabled: bool, status: &str) -> GatewayKeyResponse {

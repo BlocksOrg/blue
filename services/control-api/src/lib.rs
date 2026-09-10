@@ -11384,3 +11384,27 @@ pub async fn migrate_database_from_env() -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
+
+#[cfg(test)]
+mod gateway_ttl_config_tests {
+    use super::*;
+
+    #[test]
+    fn the_shipped_gateway_overlay_declares_a_parsable_token_ttl() {
+        let overlay: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../deploy/blue.gateway.yaml")).unwrap();
+        let settings = Some(overlay);
+        // Reading through the same helper AppConfig uses, so a typo in the key
+        // path or a non-integer value fails here rather than at boot.
+        assert_eq!(
+            positive_setting(
+                "HARNESS_GATEWAY_INFERENCE_TOKEN_TTL_SECONDS__UNSET",
+                &settings,
+                &["gateway", "inference_jwt", "token_ttl_seconds"],
+                1,
+            )
+            .unwrap(),
+            43_200
+        );
+    }
+}
