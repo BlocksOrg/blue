@@ -196,6 +196,11 @@ pub struct AppConfig {
     pub gateway_inference_proxy_health_url: Option<String>,
     pub gateway_jwt_issuer: String,
     pub gateway_jwt_audience: String,
+    /// Lifetime of a minted inference JWT, clamped to the remaining browser
+    /// session. A shorter TTL is the better security answer, but the token is
+    /// baked into the agent's process environment at spawn and there is no
+    /// in-flight rotation, so shortening it shortens the usable agent run.
+    pub gateway_inference_token_ttl_seconds: u64,
     pub gateway_jwt_active_kid: Option<String>,
     pub gateway_jwt_private_key_file: Option<PathBuf>,
     pub gateway_jwt_jwks_file: Option<PathBuf>,
@@ -439,6 +444,12 @@ impl AppConfig {
                 &["gateway", "inference_jwt", "audience"],
                 "blue-inference-proxy",
             )?,
+            gateway_inference_token_ttl_seconds: positive_setting(
+                "HARNESS_GATEWAY_INFERENCE_TOKEN_TTL_SECONDS",
+                &settings,
+                &["gateway", "inference_jwt", "token_ttl_seconds"],
+                43_200,
+            )? as u64,
             gateway_jwt_active_kid: env_or_setting(
                 "HARNESS_GATEWAY_JWT_ACTIVE_KID",
                 &settings,
@@ -1058,6 +1069,7 @@ pub struct AppState {
 struct GatewayJwtKeyRing {
     issuer: String,
     audience: String,
+    token_ttl: Duration,
     active_kid: String,
     signing_key: EncodingKey,
     public_jwks: JwkSet,
@@ -1123,6 +1135,7 @@ fn load_gateway_jwt_key_ring(config: &AppConfig) -> Result<Option<GatewayJwtKeyR
     Ok(Some(GatewayJwtKeyRing {
         issuer: config.gateway_jwt_issuer.clone(),
         audience: config.gateway_jwt_audience.clone(),
+        token_ttl: Duration::seconds(config.gateway_inference_token_ttl_seconds as i64),
         active_kid,
         signing_key,
         public_jwks,
@@ -10070,6 +10083,7 @@ mod tests {
             gateway_inference_proxy_health_url: Some("https://proxy.example.com/health".into()),
             gateway_jwt_issuer: "https://api.example.com".into(),
             gateway_jwt_audience: "blue-inference-proxy".into(),
+            gateway_inference_token_ttl_seconds: 43_200,
             gateway_jwt_active_kid: Some("test-key".into()),
             gateway_jwt_private_key_file: Some(PathBuf::from("/run/secrets/gateway-jwt.pem")),
             gateway_jwt_jwks_file: Some(PathBuf::from("/run/config/gateway-jwks.json")),

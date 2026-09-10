@@ -240,6 +240,7 @@ gateway:
     active_kid: gateway-2026-09
     private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
     jwks_file: /var/run/blue/gateway-jwt/jwks.json
+    token_ttl_seconds: 43200
   secret_encryption:
     provider: aws-kms
     key_id: arn:aws:kms:us-west-2:123456789012:key/example
@@ -260,6 +261,7 @@ gateway:
 | `inference_jwt.active_kid` | Signing-key ID; it must identify a key in `inference_jwt.jwks_file`. |
 | `inference_jwt.private_key_file` | Active RS256 private signing key, mounted only in Control API replicas. |
 | `inference_jwt.jwks_file` | Public JWKS with the active key and retained verification keys for rotation. |
+| `inference_jwt.token_ttl_seconds` | Inference JWT lifetime; defaults to `43200` (12 hours) and is always clamped to the remaining browser session. The token is written into the agent process environment at spawn and is not rotated in flight, so a shorter value shortens the usable agent run. |
 | `secret_encryption.provider` | `aws-kms` for production or `environment` for development. |
 | `secret_encryption.key_id` | AWS KMS key used for envelope encryption. |
 | `secret_encryption.key` | Base64 environment key required by the development `environment` provider. |

@@ -445,7 +445,9 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
-    async fn gateway_session_renewal_is_rolling_but_cannot_revive_revocation(pool: PgPool) {
+    async fn gateway_renewal_never_extends_the_session_and_reactivation_needs_a_newer_token(
+        pool: PgPool,
+    ) {
         super::migrate_pool(&pool).await.unwrap();
         let org_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
@@ -489,6 +491,14 @@ mod tests {
         .await
         .unwrap();
 
+        let before = sqlx::query_scalar!(
+            "select \"expiresAt\" from auth.\"session\" where id=$1",
+            session_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
         let now = OffsetDateTime::now_utc();
         let renewed = crate::gateway_auth::renew_gateway_auth_session(
             &pool, session_id, subject, user_id, now,
@@ -496,9 +506,19 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+
+        // The binding tracks the browser session; it does not extend it.
+        let after = sqlx::query_scalar!(
+            "select \"expiresAt\" from auth.\"session\" where id=$1",
+            session_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(renewed, after);
         let remaining = renewed - OffsetDateTime::now_utc();
-        assert!(remaining > time::Duration::hours(11));
-        assert!(remaining <= time::Duration::hours(12));
+        assert!(remaining <= time::Duration::minutes(5), "{remaining}");
 
         let revoked_at = sqlx::query_scalar!(
             "update gateway_auth_sessions set revoked_at=now() where oauth_session_id=$1 returning revoked_at",

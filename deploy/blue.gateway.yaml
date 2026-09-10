@@ -12,6 +12,10 @@ gateway:
     active_kid: os.environ/HARNESS_GATEWAY_JWT_ACTIVE_KID
     private_key_file: os.environ/HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE
     jwks_file: os.environ/HARNESS_GATEWAY_JWT_JWKS_FILE
+    # Clamped to the remaining browser session. The token is baked into the
+    # agent's environment at spawn with no in-flight rotation, so lowering this
+    # shortens how long an agent run can keep working.
+    token_ttl_seconds: 43200
   secret_encryption:
     provider: environment
     key: os.environ/HARNESS_GATEWAY_ENCRYPTION_KEY

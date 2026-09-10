@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "update auth.\"session\" set \"expiresAt\"=now() + interval '12 hours', \"updatedAt\"=now() where id=$1 and \"userId\"=$2 and \"expiresAt\">now() returning \"expiresAt\"",
+  "query": "select \"expiresAt\" from auth.\"session\" where id=$1 and \"userId\"=$2 and \"expiresAt\">now()",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "b4dc90888f99baffefedb11c2984bffce54719bac004431122896edf5a82e01d"
+  "hash": "765cb151a9ba527c54d85ed93f5a32d43dd792e76ad814659a643b7c4d9a4c50"
 }

@@ -7,7 +7,7 @@ use jsonwebtoken::{encode, Algorithm, Header};
 use serde::Serialize;
 use sqlx::PgPool;
 use std::sync::Arc;
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{ApiError, AppState, Principal};
@@ -44,13 +44,16 @@ pub(crate) async fn renew_gateway_auth_session(
     user_id: Uuid,
     issued_at: OffsetDateTime,
 ) -> Result<Option<OffsetDateTime>, ApiError> {
-    let mut transaction = pool.begin().await?;
+    // Read, never extend. Sliding the browser session from a CLI poll let the
+    // gateway binding outlive the session the user actually maintains, and put
+    // the session lifetime in two places at once; apps/dashboard/lib/auth.ts
+    // owns it now.
     let source_expires_at: Option<OffsetDateTime> = sqlx::query_scalar!(
-        "update auth.\"session\" set \"expiresAt\"=now() + interval '12 hours', \"updatedAt\"=now() where id=$1 and \"userId\"=$2 and \"expiresAt\">now() returning \"expiresAt\"",
+        "select \"expiresAt\" from auth.\"session\" where id=$1 and \"userId\"=$2 and \"expiresAt\">now()",
         oauth_session_id,
         subject
     )
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(pool)
     .await?;
     let Some(source_expires_at) = source_expires_at else {
         return Ok(None);
@@ -63,12 +66,11 @@ pub(crate) async fn renew_gateway_auth_session(
         source_expires_at,
         issued_at
     )
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(pool)
     .await?;
     let Some(renewed) = renewed else {
         return Ok(None);
     };
-    transaction.commit().await?;
     if let Some(reactivated_at) = renewed.reactivated_at {
         // A clock-skewed fleet shows up here as a reactivation the operator
         // did not expect. `iat` is signature-verified, so the skew exposure is
@@ -113,7 +115,7 @@ pub(crate) async fn mint_gateway_inference_token(
         .as_ref()
         .ok_or_else(|| ApiError::internal("gateway inference JWT signing is not configured"))?;
     let now = OffsetDateTime::now_utc();
-    let expires_at = std::cmp::min(now + Duration::days(30), source_expires_at);
+    let expires_at = inference_token_expiry(now, key_ring.token_ttl, source_expires_at);
     let claims = GatewayInferenceClaims {
         iss: key_ring.issuer.clone(),
         aud: key_ring.audience.clone(),
@@ -130,6 +132,16 @@ pub(crate) async fn mint_gateway_inference_token(
         .map_err(|error| ApiError::internal(format!("signing gateway inference JWT: {error}")))
 }
 
+/// The JWT must never outlive the browser session that authorized it, so the
+/// configured TTL is only a ceiling.
+fn inference_token_expiry(
+    now: OffsetDateTime,
+    ttl: time::Duration,
+    source_expires_at: OffsetDateTime,
+) -> OffsetDateTime {
+    std::cmp::min(now + ttl, source_expires_at)
+}
+
 pub(crate) async fn gateway_jwks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<JwkSet>, ApiError> {
@@ -138,4 +150,25 @@ pub(crate) async fn gateway_jwks(
         .as_ref()
         .map(|ring| Json(ring.public_jwks.clone()))
         .ok_or_else(|| ApiError::not_found("gateway mode is not enabled"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_inference_token_expiry_clamps_to_the_nearer_bound() {
+        let now = OffsetDateTime::now_utc();
+        let ttl = time::Duration::hours(12);
+
+        // A session with hours left: the TTL is the binding constraint.
+        assert_eq!(
+            inference_token_expiry(now, ttl, now + time::Duration::days(2)),
+            now + ttl
+        );
+
+        // A session about to end: the session is.
+        let ending = now + time::Duration::minutes(3);
+        assert_eq!(inference_token_expiry(now, ttl, ending), ending);
+    }
 }
