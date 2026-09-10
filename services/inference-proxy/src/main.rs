@@ -36,6 +36,9 @@ struct Mapping {
     credential_version: Option<String>,
     credential_expires_at: Option<OffsetDateTime>,
     gateway_session_expires_at: Option<OffsetDateTime>,
+    /// Instant the backing session was last reactivated after a CLI logout.
+    /// Tokens issued before it are rejected.
+    session_not_before: Option<OffsetDateTime>,
 }
 
 struct CacheEntry {
@@ -244,6 +247,10 @@ struct GatewayInferenceClaims {
 struct GatewayIdentity {
     user_id: Uuid,
     oauth_session_id: String,
+    /// Signature-verified `iat`, compared against the session's
+    /// `session_not_before`. Deliberately **not** part of `cache_key`: every
+    /// JWT for a session would otherwise get its own cache entry.
+    issued_at: i64,
 }
 
 impl GatewayIdentity {
@@ -975,6 +982,7 @@ struct ResolveResponse {
     credential_version: Option<String>,
     credential_expires_at: Option<String>,
     gateway_session_expires_at: Option<String>,
+    session_not_before: Option<String>,
 }
 #[derive(Debug)]
 enum ResolveError {
@@ -1085,6 +1093,7 @@ async fn validate_gateway_token(
     Ok(GatewayIdentity {
         user_id: claims.sub.parse().map_err(|_| ResolveError::Invalid)?,
         oauth_session_id: claims.blue_oauth_session_id,
+        issued_at: claims.iat,
     })
 }
 
@@ -1145,6 +1154,10 @@ async fn resolve_dynamic(
             .gateway_session_expires_at
             .as_deref()
             .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
+        session_not_before: body
+            .session_not_before
+            .as_deref()
+            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
     })
 }
 
@@ -1178,6 +1191,7 @@ fn load_map() -> HashMap<String, Mapping> {
                     credential_version: None,
                     credential_expires_at: None,
                     gateway_session_expires_at: None,
+                    session_not_before: None,
                 },
             )
         })
@@ -1631,6 +1645,7 @@ async fn proxy_auth_guard(
                 credential_version: None,
                 credential_expires_at: None,
                 gateway_session_expires_at: None,
+                session_not_before: None,
             }
         } else {
             return (StatusCode::UNAUTHORIZED, "invalid local development token").into_response();
@@ -1695,6 +1710,18 @@ async fn proxy_auth_guard(
             }
         }
     };
+
+    // Reject JWTs minted before the session was reactivated. Pure integer
+    // compare against a value already in the mapping — no resolver traffic.
+    if let (Some(identity), Some(not_before)) = (identity.as_ref(), mapping.session_not_before) {
+        if identity.issued_at < not_before.unix_timestamp() {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "inference token predates this session",
+            )
+                .into_response();
+        }
+    }
 
     request.extensions_mut().insert(mapping);
     request.extensions_mut().insert(permit);
@@ -1980,6 +2007,7 @@ mod tests {
             credential_version: Some("v1".into()),
             credential_expires_at: None,
             gateway_session_expires_at: None,
+            session_not_before: None,
         }
     }
     #[test]

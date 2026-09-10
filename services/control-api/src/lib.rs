@@ -2692,7 +2692,7 @@ async fn reconcile_deployment_governance(
     Ok(())
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 struct Principal {
     user_id: Uuid,
     organization_id: Uuid,
@@ -2702,6 +2702,10 @@ struct Principal {
     expires_at: OffsetDateTime,
     scopes: Vec<String>,
     oauth_session_id: Option<String>,
+    /// Signature-verified `iat` of the presenting bearer token. Gateway
+    /// reactivation compares it against the recorded revocation instant, so
+    /// it must come from the token, never from the server clock.
+    issued_at: Option<OffsetDateTime>,
     bearer_token: bool,
 }
 
@@ -3093,6 +3097,7 @@ async fn upsert_principal(state: &AppState, identity: AuthIdentity) -> Result<Pr
         expires_at: identity.expires_at,
         scopes: identity.scopes,
         oauth_session_id: identity.oauth_session_id,
+        issued_at: identity.issued_at,
         bearer_token: identity.bearer_token,
     })
 }
@@ -4121,6 +4126,9 @@ struct ResolvedGatewayCredentialRow {
     user_id: Uuid,
     organization_id: Uuid,
     gateway_session_expires_at: OffsetDateTime,
+    /// When this binding was last reactivated after a `blue logout`. The proxy
+    /// rejects any JWT whose `iat` predates it.
+    session_not_before: Option<OffsetDateTime>,
     gateway_email: String,
     source_key_hash: Option<String>,
     source_key_alias: Option<String>,
@@ -4178,7 +4186,7 @@ async fn resolved_gateway_credential_row(
     oauth_session_id: &str,
 ) -> Result<Option<ResolvedGatewayCredentialRow>, sqlx::Error> {
     sqlx::query_as!(ResolvedGatewayCredentialRow,
-        "select s.user_id,u.organization_id,least(ga.source_expires_at,ba.\"expiresAt\") as \"gateway_session_expires_at!\",s.gateway_email,s.source_key_hash,s.source_key_alias,s.proxy_key_alias,s.provisioner_config_hash,s.provisioner_metadata,s.credential_expires_at,s.last_reconciled_at,s.provisioning_error,s.credential_ciphertext,s.credential_nonce,s.credential_wrapped_key,s.encryption_key_id,s.credential_version,s.credential_state,s.invalidated_at,s.invalidation_reason,s.recovery_attempts,s.next_recovery_at,s.recovery_lease_until,s.last_validated_at from public.gateway_key_selections s join users u on u.id=s.user_id join public.gateway_auth_sessions ga on ga.user_id=s.user_id join auth.\"session\" ba on ba.id=ga.oauth_session_id and ba.\"userId\"=u.subject where s.user_id=$1 and ga.oauth_session_id=$2 and ga.revoked_at is null and ga.source_expires_at>now() and ba.\"expiresAt\">now() and u.active=true",
+        "select s.user_id,u.organization_id,least(ga.source_expires_at,ba.\"expiresAt\") as \"gateway_session_expires_at!\",ga.reactivated_at as session_not_before,s.gateway_email,s.source_key_hash,s.source_key_alias,s.proxy_key_alias,s.provisioner_config_hash,s.provisioner_metadata,s.credential_expires_at,s.last_reconciled_at,s.provisioning_error,s.credential_ciphertext,s.credential_nonce,s.credential_wrapped_key,s.encryption_key_id,s.credential_version,s.credential_state,s.invalidated_at,s.invalidation_reason,s.recovery_attempts,s.next_recovery_at,s.recovery_lease_until,s.last_validated_at from public.gateway_key_selections s join users u on u.id=s.user_id join public.gateway_auth_sessions ga on ga.user_id=s.user_id join auth.\"session\" ba on ba.id=ga.oauth_session_id and ba.\"userId\"=u.subject where s.user_id=$1 and ga.oauth_session_id=$2 and ga.revoked_at is null and ga.source_expires_at>now() and ba.\"expiresAt\">now() and u.active=true",
         user_id,
         oauth_session_id)
     .fetch_optional(pool)
@@ -4217,6 +4225,7 @@ async fn resolve_gateway_key(
         "credential_version": credential.credential_version,
         "credential_expires_at": credential.credential_expires_at.and_then(|value| value.format(&Rfc3339).ok()),
         "gateway_session_expires_at": resolved.gateway_session_expires_at.format(&Rfc3339).ok(),
+        "session_not_before": resolved.session_not_before.and_then(|value| value.format(&Rfc3339).ok()),
     })))
 }
 
@@ -4291,6 +4300,7 @@ async fn report_invalid_gateway_credential(
         expires_at: row.expires_at,
         scopes: row.scopes,
         oauth_session_id: None,
+        issued_at: None,
         bearer_token: false,
     });
     if let Some(who) = who {
@@ -11202,6 +11212,7 @@ mod service_token_tests {
             expires_at: OffsetDateTime::now_utc() + Duration::hours(1),
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             oauth_session_id: None,
+            issued_at: None,
             bearer_token: true,
         }
     }

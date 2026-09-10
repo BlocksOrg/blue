@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into public.gateway_auth_sessions(oauth_session_id,user_id,source_expires_at) values($1,$2,$3) on conflict(oauth_session_id) do update set source_expires_at=excluded.source_expires_at,revoked_at=null,reactivated_at=greatest(gateway_auth_sessions.reactivated_at,gateway_auth_sessions.revoked_at),updated_at=now() where gateway_auth_sessions.user_id=excluded.user_id and (gateway_auth_sessions.revoked_at is null or gateway_auth_sessions.revoked_at < $4) returning source_expires_at, reactivated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 1,
+        "name": "reactivated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "b87aaf798b8dddecc5879201923a7ecfee39aaf138da1eeb9af00b0b3c993a89"
+}

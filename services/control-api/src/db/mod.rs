@@ -489,28 +489,203 @@ mod tests {
         .await
         .unwrap();
 
-        let renewed =
-            crate::gateway_auth::renew_gateway_auth_session(&pool, session_id, subject, user_id)
-                .await
-                .unwrap()
-                .unwrap();
+        let now = OffsetDateTime::now_utc();
+        let renewed = crate::gateway_auth::renew_gateway_auth_session(
+            &pool, session_id, subject, user_id, now,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let remaining = renewed - OffsetDateTime::now_utc();
         assert!(remaining > time::Duration::hours(11));
         assert!(remaining <= time::Duration::hours(12));
 
-        sqlx::query!(
-            "update gateway_auth_sessions set revoked_at=now() where oauth_session_id=$1",
+        let revoked_at = sqlx::query_scalar!(
+            "update gateway_auth_sessions set revoked_at=now() where oauth_session_id=$1 returning revoked_at",
             session_id
         )
-        .execute(&pool)
+        .fetch_one(&pool)
         .await
+        .unwrap()
         .unwrap();
+
+        // A token minted before the logout must not resurrect the binding.
         assert!(crate::gateway_auth::renew_gateway_auth_session(
-            &pool, session_id, subject, user_id
+            &pool,
+            session_id,
+            subject,
+            user_id,
+            revoked_at - time::Duration::minutes(1)
         )
         .await
         .unwrap()
         .is_none());
+        let untouched = sqlx::query!(
+            "select revoked_at, reactivated_at from gateway_auth_sessions where oauth_session_id=$1",
+            session_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(untouched.revoked_at, Some(revoked_at));
+        assert_eq!(untouched.reactivated_at, None);
+
+        // A token minted by the fresh login does.
+        assert!(crate::gateway_auth::renew_gateway_auth_session(
+            &pool,
+            session_id,
+            subject,
+            user_id,
+            revoked_at + time::Duration::seconds(1)
+        )
+        .await
+        .unwrap()
+        .is_some());
+        let reactivated = sqlx::query!(
+            "select revoked_at, reactivated_at from gateway_auth_sessions where oauth_session_id=$1",
+            session_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reactivated.revoked_at, None);
+        assert_eq!(reactivated.reactivated_at, Some(revoked_at));
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_deleted_browser_session_is_never_reactivatable(pool: PgPool) {
+        super::migrate_pool(&pool).await.unwrap();
+        let org_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let subject = "deleted-gateway-subject";
+        let session_id = "deleted-gateway-session";
+        seed_gateway_session(&pool, org_id, user_id, subject, session_id).await;
+
+        let now = OffsetDateTime::now_utc();
+        assert!(crate::gateway_auth::renew_gateway_auth_session(
+            &pool, session_id, subject, user_id, now
+        )
+        .await
+        .unwrap()
+        .is_some());
+
+        // Deleting the Better Auth session revokes the binding via trigger.
+        sqlx::query!("delete from auth.\"session\" where id=$1", session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(crate::gateway_auth::renew_gateway_auth_session(
+            &pool,
+            session_id,
+            subject,
+            user_id,
+            OffsetDateTime::now_utc() + time::Duration::hours(1)
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn only_a_revocation_edge_publishes_a_cache_event(pool: PgPool) {
+        super::migrate_pool(&pool).await.unwrap();
+        let org_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let subject = "events-gateway-subject";
+        let session_id = "events-gateway-session";
+        seed_gateway_session(&pool, org_id, user_id, subject, session_id).await;
+
+        let events = |pool: PgPool| async move {
+            sqlx::query_scalar!(
+                "select count(*) from public.gateway_cache_events where oauth_session_id=$1",
+                session_id
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .unwrap()
+        };
+
+        let now = OffsetDateTime::now_utc();
+        crate::gateway_auth::renew_gateway_auth_session(&pool, session_id, subject, user_id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        // An ordinary renewal writes revoked_at=null over an already-null
+        // value; the trigger's edge guard must swallow it.
+        crate::gateway_auth::renew_gateway_auth_session(&pool, session_id, subject, user_id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(events(pool.clone()).await, 0);
+
+        let revoked_at = sqlx::query_scalar!(
+            "update gateway_auth_sessions set revoked_at=now() where oauth_session_id=$1 returning revoked_at",
+            session_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(events(pool.clone()).await, 1);
+
+        crate::gateway_auth::renew_gateway_auth_session(
+            &pool,
+            session_id,
+            subject,
+            user_id,
+            revoked_at + time::Duration::seconds(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(events(pool.clone()).await, 2);
+    }
+
+    async fn seed_gateway_session(
+        pool: &PgPool,
+        org_id: Uuid,
+        user_id: Uuid,
+        subject: &str,
+        session_id: &str,
+    ) {
+        sqlx::query!(
+            "insert into organizations(id,slug,name) values($1,$2,$3)",
+            org_id,
+            subject,
+            subject
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into users(id,organization_id,subject,email,role) values($1,$2,$3,$4,'member')",
+            user_id,
+            org_id,
+            subject,
+            format!("{subject}@example.com")
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into auth.\"user\"(id,name,email,\"emailVerified\",\"updatedAt\") values($1,$2,$3,true,now())",
+            subject,
+            subject,
+            format!("{subject}@example.com")
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "insert into auth.\"session\"(id,\"expiresAt\",token,\"updatedAt\",\"userId\") values($1,now()+interval '5 minutes',$2,now(),$3)",
+            session_id,
+            format!("{session_id}-token"),
+            subject
+        )
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[sqlx::test(migrations = false)]
