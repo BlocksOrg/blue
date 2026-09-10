@@ -132,14 +132,14 @@ fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
     {
         return Err(std::io::Error::last_os_error());
     }
-    let mut attributes = SECURITY_ATTRIBUTES {
+    let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: the path and security attributes remain valid for the call.
-    let created = unsafe { CreateDirectoryW(wide.as_ptr(), &mut attributes) };
+    let created = unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) };
     unsafe { LocalFree(descriptor.cast()) };
     if created == 0 {
         Err(std::io::Error::last_os_error())
@@ -329,7 +329,7 @@ fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
     {
         return Err(std::io::Error::last_os_error());
     }
-    let mut attributes = SECURITY_ATTRIBUTES {
+    let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
@@ -341,7 +341,7 @@ fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
             wide.as_ptr(),
             FILE_GENERIC_WRITE,
             0,
-            &mut attributes,
+            &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),

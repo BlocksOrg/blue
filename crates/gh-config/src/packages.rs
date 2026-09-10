@@ -1141,11 +1141,11 @@ fn valid_managed_helper(path: &Path) -> bool {
             return false;
         };
         let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-        return pathext.split(';').any(|candidate| {
+        pathext.split(';').any(|candidate| {
             candidate
                 .trim_start_matches('.')
                 .eq_ignore_ascii_case(extension)
-        });
+        })
     }
     #[cfg(not(windows))]
     path.is_file()

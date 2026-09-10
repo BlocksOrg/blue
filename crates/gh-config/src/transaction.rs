@@ -804,25 +804,27 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), GhError> {
         source: source_error,
     })?;
     if metadata.file_type().is_symlink() {
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let target = std::fs::read_link(source).map_err(|source_error| GhError::Io {
-            path: source.to_path_buf(),
-            source: source_error,
-        })?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, destination).map_err(|source| GhError::Io {
-            path: destination.to_path_buf(),
-            source,
-        })?;
         #[cfg(not(unix))]
         return Err(GhError::config(
             "symlink snapshots are unsupported on this platform",
         ));
+        #[cfg(unix)]
+        {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| GhError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            let target = std::fs::read_link(source).map_err(|source_error| GhError::Io {
+                path: source.to_path_buf(),
+                source: source_error,
+            })?;
+            std::os::unix::fs::symlink(target, destination).map_err(|source| GhError::Io {
+                path: destination.to_path_buf(),
+                source,
+            })?;
+        }
     } else if metadata.is_dir() {
         std::fs::create_dir_all(destination).map_err(|source| GhError::Io {
             path: destination.to_path_buf(),
