@@ -50,7 +50,8 @@ AWS dependency starter.
 
 Gateway deployments should enable `blue.enableInferenceProxy`, set
 `blue.gatewayType` to the same value as `gateway.type` in `blue.yaml`, set
-`blue.publicUrls.inferenceProxy` and `ingress.proxyHost`, and provide
+`blue.publicUrls.inferenceProxy` and `ingress.proxyHost`, configure the
+`blue.inferenceJwt` signing-key Secret, active key ID, and audience, and provide
 `HARNESS_GATEWAY_URL`, `HARNESS_PROXY_OAUTH_CLIENT_SECRET`, and gateway
 encryption settings through the runtime Secret. The inference proxy authenticates
 to the Control API with a short-lived OAuth2 client-credentials token minted by
@@ -92,5 +93,5 @@ pods use a ten-minute termination grace period for connection draining.
 
 Before production cutover, run `scripts/load-gateway.js` twice with k6: once in
 the default `rps` mode for 2,500 requests/second and once with `MODE=streams`
-for 25,000 concurrent streams. Supply `PROXY_URL`, `PSEUDOTOKEN`, and a gateway
+for 25,000 concurrent streams. Supply `PROXY_URL`, `INFERENCE_TOKEN`, and a gateway
 model intended for load testing.

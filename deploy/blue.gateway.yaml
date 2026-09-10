@@ -6,6 +6,12 @@ gateway:
   inference_proxy_url: os.environ/HARNESS_INFERENCE_PROXY_URL
   inference_proxy_health_url: os.environ/HARNESS_INFERENCE_PROXY_HEALTH_URL
   internal_allowed_client_id: blue-inference-proxy
+  inference_jwt:
+    issuer: os.environ/HARNESS_GATEWAY_JWT_ISSUER
+    audience: os.environ/HARNESS_GATEWAY_JWT_AUDIENCE
+    active_kid: os.environ/HARNESS_GATEWAY_JWT_ACTIVE_KID
+    private_key_file: os.environ/HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE
+    jwks_file: os.environ/HARNESS_GATEWAY_JWT_JWKS_FILE
   secret_encryption:
     provider: environment
     key: os.environ/HARNESS_GATEWAY_ENCRYPTION_KEY
