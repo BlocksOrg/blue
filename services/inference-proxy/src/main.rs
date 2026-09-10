@@ -1652,6 +1652,14 @@ fn cached_mapping(state: &AppState, cache_key: &str) -> Option<Mapping> {
     }
 }
 
+fn inference_token_predates_session(issued_at: i64, not_before: OffsetDateTime) -> bool {
+    // JWT NumericDate values have whole-second precision, while PostgreSQL
+    // timestamptz retains fractions of a second. Treat the entire revocation
+    // second as revoked; otherwise a token minted just before a fractional
+    // revocation compares equal after unix_timestamp() truncates the boundary.
+    issued_at <= not_before.unix_timestamp()
+}
+
 fn too_many_requests(message: &'static str) -> Response {
     let mut response = (StatusCode::TOO_MANY_REQUESTS, message).into_response();
     response
@@ -1823,10 +1831,11 @@ async fn proxy_auth_guard(
         }
     };
 
-    // Reject JWTs minted before the session was reactivated. Pure integer
-    // compare against a value already in the mapping — no resolver traffic.
+    // Reject JWTs minted before the session was reactivated. The helper also
+    // rejects the revocation second because JWT iat cannot represent the
+    // database boundary's sub-second precision.
     if let (Some(identity), Some(not_before)) = (identity.as_ref(), mapping.session_not_before) {
-        if identity.issued_at < not_before.unix_timestamp() {
+        if inference_token_predates_session(identity.issued_at, not_before) {
             return (
                 StatusCode::UNAUTHORIZED,
                 "inference token predates this session",
@@ -2141,6 +2150,26 @@ mod tests {
         cache.invalidate(Some("session-a"), "u1");
         assert!(cache.get("session-a:u1").is_none());
         assert!(cache.get("session-b:u1").is_some());
+    }
+
+    #[test]
+    fn revocation_rejects_tokens_from_the_same_fractional_second() {
+        let revocation_second = 1_789_006_527;
+        let revoked_at = OffsetDateTime::from_unix_timestamp(revocation_second).unwrap()
+            + time::Duration::milliseconds(447);
+
+        assert!(inference_token_predates_session(
+            revocation_second - 1,
+            revoked_at
+        ));
+        assert!(inference_token_predates_session(
+            revocation_second,
+            revoked_at
+        ));
+        assert!(!inference_token_predates_session(
+            revocation_second + 1,
+            revoked_at
+        ));
     }
 
     #[test]
