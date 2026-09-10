@@ -48,9 +48,11 @@ The form adds the package to the pending selection first; it does not publish an
 Public GitHub repositories do not require a managed repository connection. In the **Public repository or archive** tab, enter one of these source forms:
 
 - `github:owner/repository@ref` for a public GitHub repository. The ref may be a branch, tag, or full commit SHA. Blue resolves it to an immutable commit and records the corresponding GitHub codeload URL.
-- An immutable public HTTPS `.tar.gz` URL. Blue uses the URL as supplied and does not resolve a branch or tag encoded in it.
+- An immutable public HTTPS `.tar.gz` URL. Blue uses the URL as supplied and does not resolve a branch or tag encoded in it. The URL must return the archive itself: Blue does not follow redirects.
 
-Do not enter a repository webpage such as `https://github.com/owner/repository`; it returns HTML rather than a package archive. Prefer a release tag or full commit SHA when using the GitHub form. Although Blue resolves a branch to the current commit during inspection, an explicit immutable ref makes the administrator's intent easier to audit.
+Do not enter a repository webpage such as `https://github.com/owner/repository`; it returns HTML rather than a package archive.
+
+Do not enter a GitHub release-asset URL (`https://github.com/owner/repository/releases/download/...`) either. It answers with a 302 to a short-lived signed `objects.githubusercontent.com` URL, so pointing at the final URL is not a workaround — that URL expires. Use the `github:owner/repository@ref` form, whose codeload URL serves the archive directly, or a managed repository connection. Prefer a release tag or full commit SHA when using the GitHub form. Although Blue resolves a branch to the current commit during inspection, an explicit immutable ref makes the administrator's intent easier to audit.
 
 <Steps>
   <Step title="Inspect the public source">
@@ -78,6 +80,8 @@ packages:
 ```
 
 Public clients must be able to reach the recorded host directly. Blue does not use environment proxy settings for public package downloads: it resolves every address, rejects the entire request if any answer is non-public, and connects only to the validated addresses without following redirects. Public URLs cannot contain embedded credentials or fragments, and diagnostics omit query strings. Blue does not mirror public sources into organization artifact storage. If an archive URL later serves different bytes, reconciliation fails digest verification instead of activating changed content.
+
+The host must also resolve to public addresses **from each client's resolver**, not just from the control plane. Blue rejects the whole DNS answer set when any address in it is non-public, so a split-horizon deployment whose internal resolver returns a private address for a genuinely public hostname fails with `package URL must resolve only to public addresses`. Do not work around this by making the client trust private answers: use a [managed package source connection](/next/deployment/managed-repositories), which keeps its own explicit host allowlist, for anything an internal resolver rewrites.
 
 ### Scope a package to harness versions
 
