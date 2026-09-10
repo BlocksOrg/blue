@@ -266,6 +266,7 @@ fn reconcile_prepared_at(
     transaction.apply(&plan)?;
     commit_packages(package_write)?;
     transaction.commit()?;
+    report.warnings.extend(transaction.take_warnings());
     Ok(report)
 }
 
@@ -1154,7 +1155,10 @@ mod transaction_tests {
         {
             let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
             transaction.apply(&plan).unwrap();
-            assert!(transaction.commit_with_cleanup_fault().is_err());
+            // The write landed durably before cleanup ran, so a cleanup failure
+            // is a warning on a successful commit, not a failed apply.
+            assert!(transaction.commit_with_cleanup_fault().is_ok());
+            assert_eq!(transaction.take_warnings().len(), 1);
         }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         assert_eq!(
@@ -1162,6 +1166,66 @@ mod transaction_tests {
                 .unwrap()
                 .count(),
             1
+        );
+
+        {
+            let _recovery = FileTransaction::begin_paths(&home, vec![target.clone()]).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(home.join(".blue-transactions"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_failing_again_during_recovery_still_lets_a_transaction_begin() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = std::env::temp_dir().join(format!(
+            "blue-cleanup-recovery-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let managed = home.join("managed");
+        std::fs::create_dir_all(&managed).unwrap();
+        let target = managed.join("config.json");
+        std::fs::write(&target, "old").unwrap();
+        let plan = adapters::ReconcilePlan {
+            writes: vec![adapters::PlannedFile {
+                path: target.clone(),
+                body: b"new".to_vec(),
+                mode: Some(0o600),
+            }],
+            ..Default::default()
+        };
+        {
+            let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+            transaction.apply(&plan).unwrap();
+            transaction.commit_with_cleanup_fault().unwrap();
+        }
+
+        // The previous content is still parked in a trash sibling; deny writes
+        // to its directory so recovery cannot remove it either.
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let recovery = FileTransaction::begin_paths(&home, vec![target.clone()]);
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            recovery.is_ok(),
+            "a repeated cleanup failure must not wedge `begin`"
+        );
+        drop(recovery);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(home.join(".blue-transactions"))
+                .unwrap()
+                .count(),
+            1,
+            "the journal is retained until cleanup succeeds"
         );
 
         {

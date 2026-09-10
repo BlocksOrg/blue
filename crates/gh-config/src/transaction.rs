@@ -90,6 +90,7 @@ pub(crate) struct FileTransaction {
     _lock: TransactionLock,
     committed: bool,
     cleanup_complete: bool,
+    warnings: Vec<String>,
 }
 
 impl FileTransaction {
@@ -117,6 +118,9 @@ impl FileTransaction {
     ) -> Result<Self, GhError> {
         let (transaction_lock, outermost) = TransactionLock::acquire(home)?;
         if outermost {
+            // Load-bearing ordering: recovery runs before the snapshot below, so
+            // leftovers retained by a failed cleanup are cleared before this
+            // transaction backs anything up.
             recover_incomplete_transactions(home)?;
         }
         for path in &paths {
@@ -184,6 +188,7 @@ impl FileTransaction {
             _lock: transaction_lock,
             committed: false,
             cleanup_complete: false,
+            warnings: Vec::new(),
         })
     }
 
@@ -285,17 +290,40 @@ impl FileTransaction {
     }
 
     fn commit_inner(&mut self, inject_cleanup_fault: bool) -> Result<(), GhError> {
+        // The journal persist stays fatal: `committed` is only set afterwards,
+        // so a failure here still lets `Drop` roll the transaction back.
         self.journal.phase = TransactionPhase::Committed;
         persist_journal(&self.root, &self.journal)?;
         self.committed = true;
         crash_point("committed_journal_persisted");
-        if inject_cleanup_fault {
-            return Err(GhError::other("injected transaction cleanup fault"));
+        // Past this point the apply has durably landed. Cleanup only deletes
+        // staging, trash, and empty created directories, so its failure cannot
+        // un-land a target and must not be reported as a failed apply. The
+        // journal is retained and startup recovery retries the cleanup.
+        let cleanup = if inject_cleanup_fault {
+            Err(GhError::other("injected transaction cleanup fault"))
+        } else {
+            cleanup_after_transaction(&self.journal)
+                .and_then(|()| remove_transaction_root(&self.root))
+        };
+        match cleanup {
+            Ok(()) => self.cleanup_complete = true,
+            Err(error) => {
+                tracing::warn!(%error, journal = %self.root.display(), "committed transaction cleanup failed; journal retained for startup recovery");
+                self.warnings.push(format!(
+                    "configuration was written, but cleaning up transaction leftovers at {} failed: {error}",
+                    self.root.display()
+                ));
+            }
         }
-        cleanup_after_transaction(&self.journal)?;
-        remove_transaction_root(&self.root)?;
-        self.cleanup_complete = true;
         Ok(())
+    }
+
+    /// Non-fatal problems observed while committing. Callers with a reconcile
+    /// report surface these; a retained trash sibling is a verbatim copy of the
+    /// user's previous config, so it must not be silent.
+    pub(crate) fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     #[cfg(test)]
@@ -637,10 +665,22 @@ fn recover_incomplete_transactions(home: &Path) -> Result<(), GhError> {
             .ok_or_else(|| GhError::config("filesystem transaction journal cycle"))?;
         let (root, journal) = journals.remove(leaf);
         if journal.phase != TransactionPhase::Committed {
+            // The crash-consistency boundary: live paths must be back to their
+            // pre-transaction content before anything else runs.
             restore_targets(home, &journal.targets)?;
+            cleanup_after_transaction(&journal)?;
+            remove_transaction_root(&root)?;
+            continue;
         }
-        cleanup_after_transaction(&journal)?;
-        remove_transaction_root(&root)?;
+        // The apply already landed durably. A cleanup that keeps failing here
+        // (EACCES, a file a running harness holds open, NFS ESTALE) must not
+        // fail `begin` — that would wedge every later `blue apply` before it
+        // does any work at all. Warn and retain the journal for the next run.
+        if let Err(error) =
+            cleanup_after_transaction(&journal).and_then(|()| remove_transaction_root(&root))
+        {
+            tracing::warn!(%error, journal = %root.display(), "cleaning up a committed transaction journal failed; retained for a later run");
+        }
     }
     Ok(())
 }
