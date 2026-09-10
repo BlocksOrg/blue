@@ -108,7 +108,6 @@ fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -137,7 +136,7 @@ fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = crate::paths::wide_path(path)?;
     // SAFETY: the path and security attributes remain valid for the call.
     let created = unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) };
     unsafe { LocalFree(descriptor.cast()) };
@@ -302,7 +301,6 @@ fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
 
 #[cfg(windows)]
 fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::{LocalFree, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::Authorization::{
@@ -334,7 +332,7 @@ fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = crate::paths::wide_path(path)?;
     // SAFETY: all pointers remain valid for the duration of CreateFileW.
     let handle = unsafe {
         CreateFileW(
@@ -375,17 +373,12 @@ const REPLACE_ATTEMPTS: u32 = 12;
 
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let source = crate::paths::wide_path(source)?;
+    let destination = crate::paths::wide_path(destination)?;
     // Windows refuses the replace while anything else holds the destination
     // open: a concurrent publisher, a running harness reading its own config,
     // the search indexer, or antivirus. The window is short and the caller
@@ -555,6 +548,27 @@ mod tests {
         unsafe { LocalFree(descriptor.cast()) };
         sids.sort();
         (control & SE_DACL_PROTECTED != 0, sids)
+    }
+
+    #[test]
+    fn owner_only_writes_survive_past_the_legacy_windows_path_limit() {
+        // Raw `W` calls get no `\\?\` promotion from `std`, which caps
+        // `CreateDirectoryW` at 248 characters and `CreateFileW` at 260. A
+        // managed marketplace plugin tree crosses both on an ordinary profile,
+        // so exercise a directory, a file and a republish beyond the limit.
+        let dir = std::env::temp_dir().join(format!("gh-atomic-long-{}", std::process::id()));
+        let mut deep = dir.clone();
+        while deep.as_os_str().len() < 280 {
+            deep = deep.join("nested-directory-segment");
+        }
+        create_owner_only_dir_all(&deep).unwrap();
+        assert!(deep.is_dir(), "{}", deep.display());
+        let target = deep.join("config.json");
+        write_atomic(&target, b"hello").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
+        write_atomic(&target, b"world").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "world");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

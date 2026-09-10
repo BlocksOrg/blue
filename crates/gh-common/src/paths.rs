@@ -204,6 +204,46 @@ pub fn mcp_staging_path() -> Result<PathBuf, GhError> {
     Ok(blue_config_dir()?.join("mcp.json"))
 }
 
+/// The wide, NUL-terminated form of `path` for a raw Win32 `W` call.
+///
+/// Calling those APIs directly skips the `\\?\` promotion `std::fs` performs
+/// on our behalf, which silently caps them at `MAX_PATH` — 248 for
+/// `CreateDirectoryW`, since the directory has to leave room for an 8.3 child.
+/// A managed tree crosses that on an ordinary profile once a marketplace
+/// plugin nests a few levels down, so promote here instead.
+///
+/// The prefix suppresses normalisation, so the path has to be absolute and
+/// separator-clean before it is applied: `absolute` resolves `.`, `..` and `/`
+/// through `GetFullPathNameW`, and returns an already-verbatim path untouched.
+/// Device paths (`\\.\`) are passed through — they are not ours to rewrite.
+#[cfg(windows)]
+pub(crate) fn wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    let absolute = std::path::absolute(path)?;
+    let promotion = match absolute.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            // `C:\dir` -> `\\?\C:\dir`
+            Prefix::Disk(_) => Some((r"\\?\", 0)),
+            // `\\server\share` -> `\\?\UNC\server\share`
+            Prefix::UNC(..) => Some((r"\\?\UNC", 1)),
+            // Already verbatim, or a device namespace we must not rewrite.
+            _ => None,
+        },
+        _ => None,
+    };
+    let wide = absolute.as_os_str().encode_wide().collect::<Vec<u16>>();
+    let promoted = match promotion {
+        Some((prefix, skip)) => prefix
+            .encode_utf16()
+            .chain(wide.into_iter().skip(skip))
+            .collect(),
+        None => wide,
+    };
+    Ok(promoted.into_iter().chain(Some(0)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

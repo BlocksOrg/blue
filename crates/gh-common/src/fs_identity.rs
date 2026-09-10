@@ -14,7 +14,6 @@ use std::path::Path;
 /// Opens the link itself rather than following it, matching the
 /// `symlink_metadata` semantics callers use for the rest of a fingerprint.
 pub fn file_identity(path: &Path) -> Option<(u64, u64)> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
@@ -22,7 +21,7 @@ pub fn file_identity(path: &Path) -> Option<(u64, u64)> {
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = crate::paths::wide_path(path).ok()?;
     // SAFETY: `wide` is NUL-terminated and outlives the call. Zero desired
     // access asks for metadata only; BACKUP_SEMANTICS lets directories open and
     // OPEN_REPARSE_POINT keeps us on the link instead of its target.
