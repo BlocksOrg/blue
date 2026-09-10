@@ -29,30 +29,19 @@ fn snapshot(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 /// Render a plan for comparison against its golden fixture.
 ///
-/// Fixtures are authored once, with Unix rendering: `/` between path
-/// components and `:` between PATH entries. Windows names the same paths with
-/// `\` (which JSON escapes to `\\`) and joins PATH with `;`, so normalise both
-/// rather than forking every fixture per platform.
+/// Only reachable from the `#[cfg(unix)]` comparison in
+/// `every_production_interval_has_a_pure_golden_plan`; the fixtures record Unix
+/// rendering and are compared on Unix alone.
+#[cfg(unix)]
 fn render_plan(value: &serde_json::Value, home: &Path) -> String {
-    let unescaped = |text: &str| text.replace('\\', "/");
-    let mut rendered = serde_json::to_string_pretty(value).unwrap();
-    if cfg!(windows) {
-        rendered = rendered.replace("\\\\", "/");
-    }
-    rendered = rendered
-        .replace(&unescaped(home.to_str().unwrap()), "$HOME")
-        .replace(
-            &unescaped(std::env::current_exe().unwrap().to_str().unwrap()),
-            "$BLUE",
-        );
+    let mut rendered = serde_json::to_string_pretty(value)
+        .unwrap()
+        .replace(home.to_str().unwrap(), "$HOME");
     // An empty pattern would splice `$PATH` between every character.
     if let Some(path) = std::env::var("PATH").ok().filter(|path| !path.is_empty()) {
-        rendered = rendered.replace(&unescaped(&path), "$PATH");
+        rendered = rendered.replace(&path, "$PATH");
     }
-    if cfg!(windows) {
-        rendered = rendered.replace(";$PATH", ":$PATH");
-    }
-    rendered
+    rendered.replace(std::env::current_exe().unwrap().to_str().unwrap(), "$BLUE")
 }
 
 fn context(harness: Harness, version: &str) -> HarnessContext {
@@ -229,33 +218,47 @@ fn every_production_interval_has_a_pure_golden_plan() {
                     &plan.env,
                     &plan.launch_args,
                 );
-                let value = serde_json::json!({
-                    "writes":plan.writes.iter().map(|write| serde_json::json!({"path":write.path,"body":String::from_utf8(write.body.clone()).unwrap(),"mode":write.mode})).collect::<Vec<_>>(),
-                    "removals":plan.remove_paths, "ownership":plan.owned_paths,
-                    "files":plan.files,"env":plan.env,"args":plan.launch_args,"warnings":plan.warnings
-                });
-                let actual = render_plan(&value, &home);
-                let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/golden")
-                    .join(format!(
-                        "{}-{}.json",
-                        registration.interval.profile,
-                        if gateway_enabled {
-                            "gateway"
-                        } else {
-                            "governance"
-                        }
-                    ));
-                if std::env::var_os("BLUE_UPDATE_GOLDENS").is_some() {
-                    std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
-                    std::fs::write(&fixture, format!("{actual}\n")).unwrap();
+                // A golden plan is a rendering snapshot, and the rendering is
+                // genuinely platform-specific: Windows names paths with `\`,
+                // joins PATH with `;`, and — because a basic TOML string would
+                // read the `\U` in `C:\Users\...` as a unicode escape — emits
+                // `source = '...'` where Unix emits `source = "..."`. That last
+                // one is a content difference no separator normalisation can
+                // undo, so compare the snapshot on Unix rather than fork every
+                // fixture per platform. The behavioural assertions around this
+                // block — plan purity, `validate_plan`, the wrapped update
+                // controls, the transaction and `launch()` — all still run on
+                // Windows.
+                #[cfg(unix)]
+                {
+                    let value = serde_json::json!({
+                        "writes":plan.writes.iter().map(|write| serde_json::json!({"path":write.path,"body":String::from_utf8(write.body.clone()).unwrap(),"mode":write.mode})).collect::<Vec<_>>(),
+                        "removals":plan.remove_paths, "ownership":plan.owned_paths,
+                        "files":plan.files,"env":plan.env,"args":plan.launch_args,"warnings":plan.warnings
+                    });
+                    let actual = render_plan(&value, &home);
+                    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/golden")
+                        .join(format!(
+                            "{}-{}.json",
+                            registration.interval.profile,
+                            if gateway_enabled {
+                                "gateway"
+                            } else {
+                                "governance"
+                            }
+                        ));
+                    if std::env::var_os("BLUE_UPDATE_GOLDENS").is_some() {
+                        std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+                        std::fs::write(&fixture, format!("{actual}\n")).unwrap();
+                    }
+                    assert_eq!(
+                        actual.trim(),
+                        std::fs::read_to_string(&fixture).unwrap().trim(),
+                        "{}",
+                        fixture.display()
+                    );
                 }
-                assert_eq!(
-                    actual.trim(),
-                    std::fs::read_to_string(&fixture).unwrap().trim(),
-                    "{}",
-                    fixture.display()
-                );
                 let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
                 transaction.apply(&plan).unwrap();
                 transaction.commit().unwrap();

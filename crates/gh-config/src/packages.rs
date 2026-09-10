@@ -2084,7 +2084,9 @@ mod tests {
         );
         let deep = encoded(&[(0..33).map(|_| "x").collect::<Vec<_>>().join("/")]);
         assert!(extract_safe(&deep, &root.join("deep"), "test").is_err());
-        let portable = encoded(&["folder\\payload".into()]);
+        // `append_data` rewrites `\` to `/` on Windows, so the backslash member
+        // name has to go into the raw header block to survive.
+        let portable = literal_path_archive(&[("folder\\payload", b"x")]);
         assert!(extract_safe(&portable, &root.join("portable"), "test").is_err());
         let _ = std::fs::remove_dir_all(root);
     }

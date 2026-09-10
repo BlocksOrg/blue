@@ -420,11 +420,9 @@ mod tests {
             .remove("autoupdate");
         assert_eq!(without_launch_control, managed);
         assert!(!report.env.contains_key("OPENCODE_CONFIG"));
-        assert_eq!(
-            report.env["OPENCODE_CONFIG_DIR"],
-            home.join(".config/blue/runtime/opencode")
-                .display()
-                .to_string()
+        crate::assert_same_path(
+            report.env.get("OPENCODE_CONFIG_DIR").map(String::as_str),
+            &home.join(".config/blue/runtime/opencode"),
         );
         assert!(report.launch_args.is_empty());
         let _ = std::fs::remove_dir_all(home);
