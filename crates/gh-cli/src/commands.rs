@@ -1015,12 +1015,14 @@ struct AppliedState {
     #[serde(default)]
     binary_fingerprints: BTreeMap<String, BinaryFingerprint>,
     #[serde(default)]
+    blue_binary_fingerprint: Option<BinaryFingerprint>,
+    #[serde(default)]
     managed_fingerprints: BTreeMap<String, Vec<ManagedPathFingerprint>>,
     #[serde(default)]
     gateway_enabled: bool,
 }
 
-const APPLIED_STATE_SCHEMA_VERSION: u32 = 3;
+const APPLIED_STATE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct BinaryFingerprint {
@@ -1058,6 +1060,10 @@ fn binary_fingerprint(path: &Path) -> Option<BinaryFingerprint> {
         size: metadata.len(),
         modified_nanos,
     })
+}
+
+fn blue_binary_fingerprint() -> Option<BinaryFingerprint> {
+    binary_fingerprint(&std::env::current_exe().ok()?)
 }
 
 fn managed_path_fingerprint(path: &Path) -> Result<ManagedPathFingerprint> {
@@ -1204,6 +1210,7 @@ fn selected_applied_state_is_current(
         || state.gateway_enabled != gateway_enabled
         || !state.harnesses.iter().any(|name| name == harness.key())
         || state.binary_fingerprints.get(harness.key()) != binary_fingerprint(binary).as_ref()
+        || state.blue_binary_fingerprint != blue_binary_fingerprint()
     {
         return false;
     }
@@ -1365,6 +1372,7 @@ fn update_selected_applied_state(
     applied_inventory.mark_reconciled(state.harnesses.clone());
     state.harness_inventory = applied_inventory.entries;
     state.binary_fingerprints = inventory_fingerprints(inventory);
+    state.blue_binary_fingerprint = blue_binary_fingerprint();
     state.applied_at = now_unix();
     Ok(())
 }
@@ -2289,6 +2297,7 @@ fn run_prepared(name: &str, args: &[String], prepared: PreparedLaunch) -> Result
             harness_inventory: Vec::new(),
             files_by_harness: BTreeMap::new(),
             binary_fingerprints: BTreeMap::new(),
+            blue_binary_fingerprint: None,
             managed_fingerprints: BTreeMap::new(),
             gateway_enabled: false,
         });
@@ -3031,6 +3040,7 @@ fn apply_loaded(
             harness_inventory: Vec::new(),
             files_by_harness: BTreeMap::new(),
             binary_fingerprints: BTreeMap::new(),
+            blue_binary_fingerprint: None,
             managed_fingerprints: BTreeMap::new(),
             gateway_enabled: false,
         });
@@ -3115,6 +3125,7 @@ pub fn daemon(interval: Option<u64>) -> Result<()> {
                     harness_inventory: Vec::new(),
                     files_by_harness: BTreeMap::new(),
                     binary_fingerprints: BTreeMap::new(),
+                    blue_binary_fingerprint: None,
                     managed_fingerprints: BTreeMap::new(),
                     gateway_enabled: false,
                 });
@@ -4852,6 +4863,7 @@ mod tests {
                 name.clone(),
                 binary_fingerprint(binary).unwrap(),
             )]),
+            blue_binary_fingerprint: blue_binary_fingerprint(),
             managed_fingerprints: BTreeMap::from([(
                 name,
                 managed_fingerprints(&[managed]).unwrap(),
@@ -4881,6 +4893,28 @@ mod tests {
             false,
         ));
         std::fs::write(&nested, "locally changed").unwrap();
+        assert!(!selected_applied_state_is_current(
+            &state,
+            &config,
+            Harness::Codex,
+            &binary,
+            false,
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn selected_state_fast_path_detects_blue_binary_relocation() {
+        let root = std::env::temp_dir().join(format!("blue-relocation-{}", uuid::Uuid::new_v4()));
+        let managed = root.join("managed.toml");
+        let binary = root.join("codex");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&managed, "managed = true").unwrap();
+        std::fs::write(&binary, "binary").unwrap();
+        let config = daemon_test_config("revision");
+        let mut state = selected_test_state("revision", Harness::Codex, managed, &binary);
+        state.blue_binary_fingerprint.as_mut().unwrap().path = root.join("old-checkout/blue");
+
         assert!(!selected_applied_state_is_current(
             &state,
             &config,

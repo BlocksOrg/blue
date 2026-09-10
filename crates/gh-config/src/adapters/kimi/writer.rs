@@ -308,7 +308,7 @@ mod tests {
         let result = write(&mut plan, home, policy, wiring, session_upload_hooks, None)?;
         let mut transaction = crate::FileTransaction::begin(home, &plan)?;
         transaction.apply(&plan)?;
-        transaction.commit();
+        transaction.commit()?;
         Ok(result)
     }
 

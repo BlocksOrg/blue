@@ -145,11 +145,9 @@ impl ReconcilePlan {
             return Err(GhError::config("component must be a regular file"));
         }
         self.write(target, self.read(source)?)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            self.writes.last_mut().unwrap().mode = Some(metadata.permissions().mode() & 0o777);
-        }
+        // Package content never chooses managed-file permissions. Generated
+        // configuration is owner-only; manifest-declared helpers remain in the
+        // package store and are made executable there.
         Ok(())
     }
 

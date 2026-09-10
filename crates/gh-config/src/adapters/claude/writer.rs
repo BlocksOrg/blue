@@ -289,7 +289,7 @@ mod tests {
         )?;
         let mut transaction = crate::FileTransaction::begin(home, &plan)?;
         transaction.apply(&plan)?;
-        transaction.commit();
+        transaction.commit()?;
         Ok(result)
     }
 

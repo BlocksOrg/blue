@@ -83,7 +83,7 @@ Add connections under `control_api.package_sources.connections`. Connection IDs 
                 - platform-engineering
     ```
 
-    Add a hostname to `download_hosts` only when the configured server redirects archive downloads to that trusted hostname. Same-host downloads require no entry.
+    Add an exact hostname to `download_hosts` only when the configured server redirects archive downloads to that trusted hostname. Wildcards, ports, paths, and embedded credentials are rejected. Same-host downloads require no entry.
   </Tab>
 
   <Tab title="Bitbucket Cloud">
@@ -207,7 +207,7 @@ Namespace comparisons are case-insensitive. A `"*"` entry permits every namespac
 | `api_base_url` | Enterprise | GitHub REST API root or Bitbucket Data Center instance root. |
 | `web_base_url` | Optional | Bitbucket Cloud web origin override; omit for `bitbucket.org`. |
 | `ca_bundle` | Optional | PEM CA bundle or secret reference for a private enterprise CA. |
-| `download_hosts` | Optional | Additional trusted cross-host archive redirect destinations. |
+| `download_hosts` | Optional | Additional exact trusted cross-host archive redirect destinations. HTTP archive redirects are HTTPS-only and capped at five hops, and credentials are sent only to the original scheme, host, and port. Bitbucket Cloud's Git acquisition path refuses redirects entirely. |
 | `organizations` | Yes | Blue organization slugs mapped to allowed repository namespaces. |
 
 ## Troubleshooting

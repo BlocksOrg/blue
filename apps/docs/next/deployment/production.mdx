@@ -135,6 +135,7 @@ Ingress or load balancer.
 - Terminate TLS for dashboard, API, inference, and object-storage URLs.
 - Restrict the internal gateway resolver to the inference proxy and rotate its OAuth client secret; the proxy authenticates with a short-lived client-credentials token verified against the better-auth JWKS.
 - Use least-privilege database roles and object-storage permissions.
+- Keep default-deny egress enabled and allow only approved package/provider CIDRs. Application-level DNS validation and address pinning protect public package requests; NetworkPolicy remains defense in depth. A public package host must resolve to public addresses from each client's resolver as well: Blue rejects the entire DNS answer set when any address in it is private, so on-prem split-horizon DNS needs a [managed package source connection](/next/deployment/managed-repositories) rather than a public archive URL.
 - Encrypt database backups and session objects.
 - Publish collection and retention policy before enabling session upload.
 - Monitor failed JWT authentication, failed session-bound credential resolution, upload completion failures, and stale client revisions.

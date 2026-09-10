@@ -778,6 +778,23 @@ fn package_source_connections(
             .take()
             .map(|value| resolve_secret_reference(&value))
             .transpose()?;
+        for host in &mut connection.download_hosts {
+            let normalized = host.to_ascii_lowercase();
+            if normalized.is_empty()
+                || normalized.contains(['/', ':', '@'])
+                || reqwest::Url::parse(&format!("https://{normalized}"))
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .as_deref()
+                    != Some(normalized.as_str())
+            {
+                return Err(ApiError::internal(format!(
+                    "package source connection `{}` has invalid download host `{host}`",
+                    connection.id
+                )));
+            }
+            *host = normalized;
+        }
         match connection.provider.as_str() {
             "github" if connection.app_id.is_some() && connection.private_key.is_some() => {}
             "bitbucket_cloud" | "bitbucket_data_center" if connection.token.is_some() => {}
@@ -6996,17 +7013,16 @@ async fn fetch_provider_archive(
     }
     let original_host = source.archive_url.host_str().unwrap_or_default().to_owned();
     let mut url = source.archive_url.clone();
-    for redirect in 0..=3 {
-        let same_host = url.host_str() == Some(original_host.as_str());
+    for redirect in 0..=5 {
         let mut request = client.get(url.clone());
-        if same_host {
+        if same_url_origin(&url, &source.archive_url) {
             request = request.header("Authorization", &source.authorization);
         }
         let mut response = request.send().await.map_err(|error| {
             ApiError::bad_request(format!("fetching repository archive: {error}"))
         })?;
         if response.status().is_redirection() {
-            if redirect == 3 {
+            if redirect == 5 {
                 return Err(ApiError::bad_request(
                     "repository archive redirected too many times",
                 ));
@@ -7021,22 +7037,15 @@ async fn fetch_provider_archive(
             let next = url.join(location).map_err(|error| {
                 ApiError::bad_request(format!("invalid archive redirect: {error}"))
             })?;
+            // `cfg!(test)` keeps the plaintext test servers usable; the rule
+            // itself is covered by `redirect_scheme_allowed` unit tests.
+            if !redirect_scheme_allowed(&next, cfg!(test)) {
+                return Err(ApiError::bad_request(
+                    "repository archive redirect must use HTTPS",
+                ));
+            }
             let host = next.host_str().unwrap_or_default();
-            let cloud_host = match connection.provider.as_str() {
-                "github" => matches!(
-                    host,
-                    "codeload.github.com" | "objects.githubusercontent.com"
-                ),
-                "bitbucket_cloud" => host == "bitbucket.org",
-                _ => false,
-            };
-            if host != original_host
-                && !cloud_host
-                && !connection
-                    .download_hosts
-                    .iter()
-                    .any(|allowed| allowed.eq_ignore_ascii_case(host))
-            {
+            if !managed_redirect_host_allowed(connection, &original_host, host) {
                 return Err(ApiError::bad_request(
                     "repository archive redirected to an untrusted host",
                 ));
@@ -7076,6 +7085,37 @@ async fn fetch_provider_archive(
     ))
 }
 
+fn same_url_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+/// A managed archive redirect may only stay on HTTPS. Test builds pass
+/// `allow_plaintext` so local `http://` fixtures keep working.
+fn redirect_scheme_allowed(next: &reqwest::Url, allow_plaintext: bool) -> bool {
+    next.scheme() == "https" || allow_plaintext
+}
+
+fn managed_redirect_host_allowed(
+    connection: &PackageSourceConnection,
+    original_host: &str,
+    host: &str,
+) -> bool {
+    host.eq_ignore_ascii_case(original_host)
+        || matches!(
+            (connection.provider.as_str(), host),
+            (
+                "github",
+                "codeload.github.com" | "objects.githubusercontent.com"
+            ) | ("bitbucket_cloud", "bitbucket.org")
+        )
+        || connection
+            .download_hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host))
+}
+
 async fn fetch_bitbucket_cloud_git_archive(
     connection: &PackageSourceConnection,
     repository: &str,
@@ -7094,11 +7134,9 @@ async fn fetch_bitbucket_cloud_git_archive(
     let clone_url = api_url(web, &[namespace, &format!("{repository_name}.git")])?;
     let temp_root = std::env::temp_dir().join(format!("harness-bitbucket-{}", Uuid::new_v4()));
     let checkout = temp_root.join("checkout");
-    tokio::fs::create_dir_all(&temp_root)
-        .await
-        .map_err(|error| {
-            ApiError::internal(format!("creating Bitbucket checkout directory: {error}"))
-        })?;
+    gh_common::create_owner_only_dir(&temp_root).map_err(|error| {
+        ApiError::internal(format!("creating Bitbucket checkout directory: {error}"))
+    })?;
 
     let result = async {
         let init = tokio::process::Command::new("git")
@@ -7115,19 +7153,44 @@ async fn fetch_bitbucket_cloud_git_archive(
         use base64::Engine as _;
         let credentials =
             base64::engine::general_purpose::STANDARD.encode(format!("x-token-auth:{token}"));
-        let fetch = tokio::process::Command::new("git")
+        let mut origin = clone_url.clone();
+        origin.set_path("/");
+        origin.set_query(None);
+        origin.set_fragment(None);
+        let mut git_config = vec![
+            ("http.followRedirects".to_owned(), "false".to_owned()),
+            ("http.extraHeader".to_owned(), String::new()),
+            ("credential.helper".to_owned(), String::new()),
+            (
+                format!("http.{origin}.extraHeader"),
+                format!("Authorization: Basic {credentials}"),
+            ),
+        ];
+        if let Some(pem) = connection.ca_bundle.as_deref() {
+            let ca_path = temp_root.join("provider-ca.pem");
+            gh_common::write_atomic(&ca_path, pem.as_bytes()).map_err(|error| {
+                ApiError::internal(format!("writing Bitbucket CA bundle: {error}"))
+            })?;
+            git_config.push((
+                format!("http.{origin}.sslCAInfo"),
+                ca_path.to_string_lossy().into_owned(),
+            ));
+        }
+        let mut fetch_command = tokio::process::Command::new("git");
+        fetch_command
             .arg("-C")
             .arg(&checkout)
             .args(["fetch", "--quiet", "--depth=1", "--no-tags"])
             .arg(clone_url.as_str())
             .arg(commit)
             .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-            .env(
-                "GIT_CONFIG_VALUE_0",
-                format!("Authorization: Basic {credentials}"),
-            )
+            .env("GIT_CONFIG_COUNT", git_config.len().to_string());
+        for (index, (key, value)) in git_config.iter().enumerate() {
+            fetch_command
+                .env(format!("GIT_CONFIG_KEY_{index}"), key)
+                .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+        }
+        let fetch = fetch_command
             .output()
             .await
             .map_err(|error| ApiError::internal(format!("starting git fetch: {error}")))?;
@@ -7191,29 +7254,79 @@ fn public_https_url(value: &str) -> Result<reqwest::Url, ApiError> {
             "custom package sources must use HTTPS",
         ));
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ApiError::bad_request(
+            "custom package URLs must not contain credentials",
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(ApiError::bad_request(
+            "custom package URLs must not contain fragments",
+        ));
+    }
     let host = url
         .host_str()
         .ok_or_else(|| ApiError::bad_request("package URL has no host"))?;
     if host.eq_ignore_ascii_case("localhost") || host.ends_with(".local") {
         return Err(ApiError::bad_request("package URL must use a public host"));
     }
-    if let Ok(address) = host.parse::<std::net::IpAddr>() {
-        let private = match address {
-            std::net::IpAddr::V4(value) => {
-                value.is_private()
-                    || value.is_loopback()
-                    || value.is_link_local()
-                    || value.is_unspecified()
-            }
-            std::net::IpAddr::V6(value) => {
-                value.is_loopback() || value.is_unspecified() || value.is_unique_local()
-            }
-        };
-        if private {
+    let address_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = address_host.parse::<std::net::IpAddr>() {
+        if !gh_common::network::is_public_ip(address) {
             return Err(ApiError::bad_request("package URL must use a public host"));
         }
     }
     Ok(url)
+}
+
+fn public_request_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request timed out"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_body() {
+        "response body failed"
+    } else if error.is_decode() {
+        "response decoding failed"
+    } else {
+        "request failed"
+    }
+}
+
+async fn public_https_client(url: &reqwest::Url) -> Result<reqwest::Client, ApiError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ApiError::bad_request("package URL has no host"))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    let address_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let addresses = if let Ok(address) = address_host.parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(address, port)]
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|error| ApiError::bad_request(format!("resolving package host: {error}")))?
+            .collect::<Vec<_>>()
+    };
+    if !gh_common::network::all_addresses_are_public(&addresses) {
+        return Err(ApiError::bad_request(
+            "package URL must resolve only to public addresses",
+        ));
+    }
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent("blue-control-api")
+        .no_proxy()
+        .https_only(true)
+        .resolve_to_addrs(host, &addresses)
+        .build()
+        .map_err(|error| ApiError::internal(format!("building package inspector: {error}")))
 }
 
 async fn resolve_package_source(source_ref: &str) -> Result<reqwest::Url, ApiError> {
@@ -7234,19 +7347,16 @@ async fn resolve_package_source(source_ref: &str) -> Result<reqwest::Url, ApiErr
                 "GitHub package source contains unsafe characters",
             ));
         }
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(15))
-            .user_agent("blue-control-api")
-            .build()
-            .map_err(|error| ApiError::internal(format!("building package inspector: {error}")))?;
         let commit_url =
             format!("https://api.github.com/repos/{owner}/{repo}/commits/{requested_ref}");
-        let response = client
-            .get(commit_url)
-            .send()
-            .await
-            .map_err(|error| ApiError::bad_request(format!("resolving GitHub ref: {error}")))?;
+        let commit_url = public_https_url(&commit_url)?;
+        let client = public_https_client(&commit_url).await?;
+        let response = client.get(commit_url).send().await.map_err(|error| {
+            ApiError::bad_request(format!(
+                "resolving GitHub ref: {}",
+                public_request_error_kind(&error)
+            ))
+        })?;
         if !response.status().is_success() {
             return Err(ApiError::bad_request(format!(
                 "GitHub ref resolution returned HTTP {}",
@@ -7283,6 +7393,8 @@ async fn inspect_package_source(
         let requested_ref = input
             .requested_ref
             .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| ApiError::bad_request("ref is required"))?;
         let (namespace, _) = safe_repository(repository)?;
         let org_slug = organization_slug(&state.pool, who.organization_id).await?;
@@ -7380,16 +7492,13 @@ async fn inspect_package_source(
         .ok_or_else(|| ApiError::bad_request("source_ref or connection_id is required"))?;
     let url = resolve_package_source(source_ref).await?;
     public_https_url(url.as_str())?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|error| ApiError::internal(format!("building package inspector: {error}")))?;
-    let mut response = client
-        .get(url.clone())
-        .send()
-        .await
-        .map_err(|error| ApiError::bad_request(format!("fetching package source: {error}")))?;
+    let client = public_https_client(&url).await?;
+    let mut response = client.get(url.clone()).send().await.map_err(|error| {
+        ApiError::bad_request(format!(
+            "fetching package source: {}",
+            public_request_error_kind(&error)
+        ))
+    })?;
     if !response.status().is_success() {
         return Err(ApiError::bad_request(format!(
             "package source returned HTTP {}",
@@ -10820,7 +10929,278 @@ mod tests {
     fn package_source_inspection_rejects_private_hosts() {
         assert!(public_https_url("http://packages.example/archive.tar.gz").is_err());
         assert!(public_https_url("https://127.0.0.1/archive.tar.gz").is_err());
+        assert!(public_https_url("https://[::1]/archive.tar.gz").is_err());
+        assert!(public_https_url("https://[::127.0.0.1]/archive.tar.gz").is_err());
+        assert!(public_https_url("https://[64:ff9b::7f00:1]/archive.tar.gz").is_err());
+        assert!(public_https_url("https://[fec0::1]/archive.tar.gz").is_err());
+        assert!(public_https_url("https://[2001:db8::1]/archive.tar.gz").is_err());
+        assert!(public_https_url("https://metadata.local/archive.tar.gz").is_err());
+        assert!(public_https_url("https://secret@packages.example/archive.tar.gz").is_err());
+        assert!(public_https_url("https://packages.example/archive.tar.gz#fragment").is_err());
         assert!(public_https_url("https://packages.example/archive.tar.gz").is_ok());
+    }
+
+    #[test]
+    fn managed_package_redirects_are_host_allowlisted_and_credentials_are_origin_bound() {
+        let source = reqwest::Url::parse("https://api.example.test/archive").unwrap();
+        assert!(same_url_origin(
+            &source,
+            &reqwest::Url::parse("https://api.example.test/other").unwrap()
+        ));
+        assert!(!same_url_origin(
+            &source,
+            &reqwest::Url::parse("https://api.example.test:8443/other").unwrap()
+        ));
+        assert!(!same_url_origin(
+            &source,
+            &reqwest::Url::parse("https://assets.example.test/archive").unwrap()
+        ));
+
+        let connection = PackageSourceConnection {
+            id: "test".into(),
+            name: None,
+            provider: "github".into(),
+            api_base_url: None,
+            web_base_url: None,
+            app_id: None,
+            private_key: None,
+            token: None,
+            ca_bundle: None,
+            download_hosts: vec!["assets.example.test".into()],
+            organizations: Default::default(),
+        };
+        assert!(managed_redirect_host_allowed(
+            &connection,
+            "api.example.test",
+            "codeload.github.com"
+        ));
+        assert!(managed_redirect_host_allowed(
+            &connection,
+            "api.example.test",
+            "assets.example.test"
+        ));
+        assert!(!managed_redirect_host_allowed(
+            &connection,
+            "api.example.test",
+            "attacker.example"
+        ));
+    }
+
+    #[test]
+    fn managed_archive_redirects_must_stay_on_https() {
+        // The call site passes `cfg!(test)` so plaintext fixtures keep working,
+        // which is exactly why the rule needs its own coverage here.
+        let plaintext = reqwest::Url::parse("http://assets.example.test/archive").unwrap();
+        let secure = reqwest::Url::parse("https://assets.example.test/archive").unwrap();
+        assert!(!redirect_scheme_allowed(&plaintext, false));
+        assert!(redirect_scheme_allowed(&secure, false));
+        assert!(redirect_scheme_allowed(&plaintext, true));
+    }
+
+    #[tokio::test]
+    async fn bitbucket_git_fetch_refuses_initial_redirect_without_forwarding_credentials() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_address = source.local_addr().unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let destination_address = destination.local_addr().unwrap();
+        let source_thread = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+            }
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{destination_address}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        let connection = PackageSourceConnection {
+            id: "bitbucket-test".into(),
+            name: None,
+            provider: "bitbucket_cloud".into(),
+            api_base_url: None,
+            web_base_url: Some(format!("http://{source_address}")),
+            app_id: None,
+            private_key: None,
+            token: Some("redirect-secret".into()),
+            ca_bundle: None,
+            download_hosts: vec![destination_address.ip().to_string()],
+            organizations: Default::default(),
+        };
+        assert!(fetch_bitbucket_cloud_git_archive(
+            &connection,
+            "workspace/repository",
+            "0123456789012345678901234567890123456789",
+        )
+        .await
+        .is_err());
+        let request = source_thread.join().unwrap();
+        assert!(request.contains("Authorization: Basic "), "{request}");
+        assert!(matches!(
+            destination.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[tokio::test]
+    async fn managed_http_redirect_strips_credentials_at_a_new_origin() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        fn capture_request(
+            listener: TcpListener,
+            response: String,
+        ) -> std::thread::JoinHandle<String> {
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                stream.write_all(response.as_bytes()).unwrap();
+                String::from_utf8_lossy(&request).into_owned()
+            })
+        }
+
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination_address = destination.local_addr().unwrap();
+        let origin_thread = capture_request(
+            origin,
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{destination_address}/archive\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        let destination_thread = capture_request(
+            destination,
+            "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\narchive".into(),
+        );
+        let connection = PackageSourceConnection {
+            id: "redirect-test".into(),
+            name: None,
+            provider: "bitbucket_data_center".into(),
+            api_base_url: Some(format!("http://{origin_address}")),
+            web_base_url: None,
+            app_id: None,
+            private_key: None,
+            token: Some("secret".into()),
+            ca_bundle: None,
+            download_hosts: Vec::new(),
+            organizations: Default::default(),
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let source = ResolvedProviderSource {
+            source_ref: "test".into(),
+            commit: "commit".into(),
+            archive_url: reqwest::Url::parse(&format!("http://{origin_address}/archive")).unwrap(),
+            authorization: "Bearer origin-secret".into(),
+        };
+        assert_eq!(
+            fetch_provider_archive(&client, &connection, "project/repo", &source)
+                .await
+                .unwrap(),
+            b"archive"
+        );
+        let origin_request = origin_thread.join().unwrap();
+        let destination_request = destination_thread.join().unwrap();
+        assert!(origin_request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer origin-secret"));
+        assert!(!destination_request
+            .to_ascii_lowercase()
+            .contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn managed_provider_proxy_child_helper() {
+        let Some(marker) = std::env::var_os("BLUE_MANAGED_PROXY_TEST") else {
+            return;
+        };
+        let connection = PackageSourceConnection {
+            id: "proxy-test".into(),
+            name: None,
+            provider: "bitbucket_data_center".into(),
+            api_base_url: Some("http://managed-provider.invalid".into()),
+            web_base_url: None,
+            app_id: None,
+            private_key: None,
+            token: Some("token".into()),
+            ca_bundle: None,
+            download_hosts: Vec::new(),
+            organizations: Default::default(),
+        };
+        let response = provider_client(&connection)
+            .unwrap()
+            .get("http://managed-provider.invalid/proxy-check")
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(marker, "1");
+    }
+
+    #[test]
+    fn managed_provider_clients_honor_environment_proxy_configuration() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let proxy_thread = std::thread::spawn(move || {
+            let (mut stream, _) = proxy.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        let proxy_url = format!("http://{proxy_address}");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::managed_provider_proxy_child_helper"])
+            .env("BLUE_MANAGED_PROXY_TEST", "1")
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("NO_PROXY", "")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let request = proxy_thread.join().unwrap();
+        assert!(request.starts_with("GET http://managed-provider.invalid/proxy-check "));
     }
 
     #[test]

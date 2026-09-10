@@ -293,7 +293,9 @@ export async function inspectPackageSource(
       ? {
           connection_id: connectionId,
           repository: form.get("repository"),
-          ref: form.get("ref"),
+          // A blank field must reach the API as an absent ref so it answers
+          // "ref is required" instead of rejecting "" as an unsafe character.
+          ref: String(form.get("ref") ?? "").trim() || undefined,
         }
       : { source_ref: form.get("source_ref") };
     return await api<InspectPackageState>("/admin/package-source/inspect", {

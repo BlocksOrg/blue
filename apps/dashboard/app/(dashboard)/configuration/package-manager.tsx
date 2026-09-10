@@ -2,7 +2,6 @@
 
 import { useActionState, useEffect, useMemo, useState } from "react";
 import { Ellipsis, PackageOpen, Plus, Search, ShieldAlert } from "lucide-react";
-import { compare, parse, type SemVer } from "semver";
 import {
   inspectPackageSource,
   saveExtensions,
@@ -64,29 +63,19 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useUnsavedChangesWarning } from "@/hooks/use-unsaved-changes-warning";
 import type { HarnessMetadata } from "@/lib/harness-metadata";
+import {
+  adapterSupportsHarness,
+  compareSemver,
+  describeMappingIssue,
+  harnessMappingIssue,
+  semverTuple,
+  type PackageAdapter,
+} from "@/lib/mapping-compatibility";
+
+export type { PackageAdapter };
 import { TablePaginationFooter } from "@/components/table-pagination-footer";
 import { Skeleton } from "@/components/ui/skeleton";
 
-export type PackageAdapter = {
-  introduced?: string;
-  before?: string;
-  plugin_dir?: string;
-  skills_dir?: string;
-  agents_dir?: string;
-  hooks_file?: string;
-  plugins?: string[];
-  helpers?: Record<string, { paths: Record<string, string> }>;
-  variants?: Array<{
-    introduced: string;
-    before?: string;
-    plugin_dir?: string;
-    skills_dir?: string;
-    agents_dir?: string;
-    hooks_file?: string;
-    plugins?: string[];
-    helpers?: Record<string, { paths: Record<string, string> }>;
-  }>;
-};
 
 export type ManagedPackage = {
   id: string;
@@ -148,12 +137,6 @@ const componentKinds = [
 type ComponentKind = (typeof componentKinds)[number][0];
 const emptyDraft: Draft = { id: "", name: "", version: "", source_ref: "", artifact_id: undefined, sha256: "", adapters: {} };
 
-function semverTuple(value: string): SemVer | undefined {
-  return parse(value.trim(), { loose: false }) ?? undefined;
-}
-function compareSemver(left: SemVer, right: SemVer) {
-  return compare(left, right);
-}
 
 function inventory(item: ManagedPackage): InventoryRow[] {
   const rows: InventoryRow[] = [];
@@ -200,111 +183,6 @@ function installLocation(row: InventoryRow) {
   return `$XDG_CONFIG_HOME/blue/packages/${row.packageId}/<sha256>/content/${row.sourcePath}`;
 }
 
-function mappingSupported(
-  mapping: PackageAdapter,
-  capabilities: string[],
-  rules: HarnessMetadata["component_rules"],
-) {
-  const supported = new Set(capabilities);
-  if (mapping.skills_dir && !supported.has("skills")) return false;
-  if (mapping.plugin_dir && !supported.has("plugins")) return false;
-  if (mapping.plugins?.length && !supported.has("plugins")) return false;
-  if (Object.keys(mapping.helpers ?? {}).length && !supported.has("helpers")) return false;
-  if (mapping.agents_dir) {
-    const supportedDirectly = supported.has("agents");
-    const supportedByPlugin =
-      rules.agents_require_plugin
-      && Boolean(mapping.plugin_dir)
-      && supported.has("plugins");
-    if (!supportedDirectly && !supportedByPlugin) return false;
-  }
-  if (mapping.hooks_file) {
-    if (!supported.has("hooks") || rules.hooks_as_plugin_modules) return false;
-    if (rules.hooks_require_plugin && !mapping.plugin_dir) return false;
-  }
-  return true;
-}
-
-function inInterval(version: SemVer, introduced: string, before?: string | null) {
-  const lower = semverTuple(introduced);
-  const upper = before ? semverTuple(before) : undefined;
-  return Boolean(
-    lower
-      && compareSemver(version, lower) >= 0
-      && (!upper || compareSemver(version, upper) < 0),
-  );
-}
-
-function adapterSupportsHarness(
-  adapter: PackageAdapter,
-  harness: HarnessMetadata,
-) {
-  const availableFrom = semverTuple(adapter.introduced ?? "0.0.0");
-  const availableBefore = adapter.before ? semverTuple(adapter.before) : undefined;
-  if (
-    !availableFrom
-    || (adapter.before && !availableBefore)
-    || (availableBefore && compareSemver(availableFrom, availableBefore) >= 0)
-  ) return false;
-  const variants = adapter.variants ?? [];
-  const fallback = { ...adapter, variants: [] };
-  const hasFallback = Boolean(
-    adapter.plugin_dir
-      || adapter.skills_dir
-      || adapter.agents_dir
-      || adapter.hooks_file
-      || adapter.plugins?.length
-      || Object.keys(adapter.helpers ?? {}).length,
-  );
-
-  let overlapsCertifiedGeneration = false;
-  const valid = harness.generations.every((generation) => {
-    const certifiedEnd = [generation.before, generation.verified_before]
-      .filter((value): value is string => Boolean(value))
-      .map(semverTuple)
-      .filter((value): value is SemVer => Boolean(value))
-      .sort(compareSemver)[0];
-    const generationStart = semverTuple(generation.introduced);
-    if (
-      !generationStart
-      || !certifiedEnd
-      || compareSemver(availableFrom, certifiedEnd) >= 0
-      || (availableBefore && compareSemver(generationStart, availableBefore) >= 0)
-    ) return true;
-    overlapsCertifiedGeneration = true;
-    const variantBoundaries = variants.flatMap((variant) =>
-      [variant.introduced, variant.before].filter(
-        (value): value is string => Boolean(value),
-      ),
-    );
-    const candidates = [
-      generation.introduced,
-      adapter.introduced ?? "0.0.0",
-      adapter.before,
-      ...variantBoundaries,
-    ].filter((value): value is string => Boolean(value));
-    return candidates
-      .map(semverTuple)
-      .filter((version): version is SemVer => Boolean(version))
-      .filter((version) => inInterval(version, generation.introduced, certifiedEnd?.version))
-      .filter((version) => inInterval(version, adapter.introduced ?? "0.0.0", adapter.before))
-      .every((version) => {
-        const matching = variants.filter((variant) =>
-          inInterval(version, variant.introduced, variant.before),
-        );
-        if (
-          matching.length > 1
-          || (matching.length === 0 && variants.length > 0 && !hasFallback)
-        ) return false;
-        return mappingSupported(
-          matching[0] ?? fallback,
-          generation.capabilities,
-          generation.component_rules,
-        );
-      });
-  });
-  return overlapsCertifiedGeneration && valid;
-}
 
 function DetailSheet({
   item,
@@ -724,8 +602,8 @@ function AddDialog({
           if (!intervals[index - 1].end || compareSemver(intervals[index - 1].end!, intervals[index].start!) !== 0)
             return setError(`${harness} adapter intervals contain a gap before ${intervals[index].variant.introduced}.`);
       }
-      if (!adapterSupportsHarness(adapter, metadata))
-        return setError(`${metadata.label} mappings are incompatible with one or more overlapping certified generations.`);
+      const issue = harnessMappingIssue(adapter, metadata);
+      if (issue) return setError(describeMappingIssue(issue, adapter, metadata));
     }
     if (catalogIds.has(id) || customPackages.some((item) => item.id === id)) return setError(`Extension ${id} is already configured.`);
     onAdd({ ...draft, id, name: draft.name?.trim() || undefined }); close();
