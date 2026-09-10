@@ -1565,6 +1565,9 @@ async fn invalidation_worker(
         }
         match request.send().await {
             Ok(response) if response.status().is_success() => {
+                // Events published while the stream was down were never seen,
+                // so anything cached from before the gap is untrustworthy.
+                state.cache.lock().expect("cache poisoned").clear();
                 state.invalidation_healthy.store(true, Ordering::Release);
                 let mut bytes = response.bytes_stream();
                 let mut buffer = String::new();
@@ -1626,6 +1629,11 @@ async fn invalidation_worker(
     }
 }
 
+/// Marks the invalidation stream down. Deliberately does **not** clear the
+/// cache: `cached_mapping` already refuses to serve entries while unhealthy,
+/// so they are unreachable anyway, and dropping them only guarantees that
+/// recovery is a cold-start fan-out too. The reconnect path clears instead,
+/// which is where entries actually became untrustworthy.
 fn mark_invalidation_unhealthy(state: &AppState) {
     if state.invalidation_healthy.swap(false, Ordering::AcqRel) {
         state
@@ -1633,7 +1641,6 @@ fn mark_invalidation_unhealthy(state: &AppState) {
             .invalidation_disconnects
             .fetch_add(1, Ordering::Relaxed);
     }
-    state.cache.lock().expect("cache poisoned").clear();
 }
 
 fn cached_mapping(state: &AppState, cache_key: &str) -> Option<Mapping> {
@@ -2137,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    fn invalidation_disconnect_clears_and_bypasses_the_cache() {
+    fn invalidation_disconnect_bypasses_but_retains_the_cache() {
         let state = test_state(None);
         state
             .cache
@@ -2149,6 +2156,9 @@ mod tests {
 
         assert!(!state.invalidation_healthy.load(Ordering::Acquire));
         assert!(cached_mapping(&state, "session-a:u1").is_none());
+        // Unreachable, but retained: recovery must not be a cold start. The
+        // reconnect path is what clears.
+        assert!(state.cache.lock().unwrap().get("session-a:u1").is_some());
         assert_eq!(
             state
                 .metrics
