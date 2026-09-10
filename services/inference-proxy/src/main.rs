@@ -4,12 +4,13 @@
 //! Control API event stream. Request metadata is delivered in bounded batches.
 
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{Extension, State};
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -129,7 +130,10 @@ struct Metrics {
     invalidation_disconnects: AtomicU64,
     cache_bypasses: AtomicU64,
     resolver_errors: AtomicU64,
-    rate_limited: AtomicU64,
+    rate_limited_unverified: AtomicU64,
+    rate_limited_session: AtomicU64,
+    jwks_fetches: AtomicU64,
+    jwks_unknown_kid: AtomicU64,
     log_dropped: AtomicU64,
     active_streams: AtomicU64,
     oauth_token_fetches: AtomicU64,
@@ -215,6 +219,10 @@ struct AppState {
     rates: Mutex<HashMap<String, RateWindow>>,
     per_token_rps: u64,
     per_token_burst: u64,
+    /// Budget for tokens that fail signature verification, charged per peer
+    /// address. Legitimate traffic never touches it.
+    unverified_rps: u64,
+    jwks_refetch_cooldown: Duration,
     resolver_permits: Arc<Semaphore>,
     request_permits: Arc<Semaphore>,
     max_body_bytes: usize,
@@ -228,7 +236,21 @@ struct AppState {
 struct CachedGatewayJwks {
     set: JwkSet,
     fetched_at: Instant,
+    /// When the JWKS endpoint was last called, successfully or not. Bounds how
+    /// often an unknown kid can make us call it again.
+    last_attempt: Instant,
 }
+
+impl CachedGatewayJwks {
+    fn key(&self, kid: &str) -> Option<&Jwk> {
+        self.set
+            .keys
+            .iter()
+            .find(|key| key.common.key_id.as_deref() == Some(kid))
+    }
+}
+
+const GATEWAY_JWKS_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Deserialize, Serialize)]
 struct GatewayInferenceClaims {
@@ -449,6 +471,11 @@ async fn main() {
         rates: Mutex::new(HashMap::new()),
         per_token_rps: env_u64("HARNESS_PROXY_PER_TOKEN_RPS", 50),
         per_token_burst: env_u64("HARNESS_PROXY_PER_TOKEN_BURST", 100),
+        unverified_rps: env_u64("HARNESS_PROXY_UNVERIFIED_RPS", 20),
+        jwks_refetch_cooldown: Duration::from_secs(env_u64(
+            "HARNESS_PROXY_JWKS_REFETCH_COOLDOWN",
+            30,
+        )),
         resolver_permits: Arc::new(Semaphore::new(env_usize(
             "HARNESS_PROXY_MAX_RESOLVER_CONCURRENCY",
             64,
@@ -547,12 +574,15 @@ async fn main() {
         .await
         .unwrap_or_else(|error| panic!("binding {listen}: {error}"));
     let mut server_shutdown = shutdown_rx;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = server_shutdown.changed().await;
-        })
-        .await
-        .expect("server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = server_shutdown.changed().await;
+    })
+    .await
+    .expect("server error");
     let _ = tokio::time::timeout(Duration::from_secs(10), log_handle).await;
 }
 
@@ -802,7 +832,10 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
             "gateway_proxy_cache_bypasses_total {}\n",
             "gateway_proxy_invalidation_stream_healthy {}\n",
             "gateway_proxy_resolver_errors_total {}\n",
-            "gateway_proxy_rate_limited_total {}\n",
+            "gateway_proxy_rate_limited_unverified_total {}\n",
+            "gateway_proxy_rate_limited_session_total {}\n",
+            "gateway_proxy_jwks_fetches_total {}\n",
+            "gateway_proxy_jwks_unknown_kid_total {}\n",
             "gateway_proxy_log_dropped_total {}\n",
             "gateway_proxy_active_streams {}\n",
             "gateway_proxy_oauth_token_fetches_total {}\n",
@@ -820,7 +853,13 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
         state.metrics.cache_bypasses.load(Ordering::Relaxed),
         u8::from(state.invalidation_healthy.load(Ordering::Acquire)),
         state.metrics.resolver_errors.load(Ordering::Relaxed),
-        state.metrics.rate_limited.load(Ordering::Relaxed),
+        state
+            .metrics
+            .rate_limited_unverified
+            .load(Ordering::Relaxed),
+        state.metrics.rate_limited_session.load(Ordering::Relaxed),
+        state.metrics.jwks_fetches.load(Ordering::Relaxed),
+        state.metrics.jwks_unknown_kid.load(Ordering::Relaxed),
         state.metrics.log_dropped.load(Ordering::Relaxed),
         state.metrics.active_streams.load(Ordering::Relaxed),
         state.metrics.oauth_token_fetches.load(Ordering::Relaxed),
@@ -993,17 +1032,21 @@ enum ResolveError {
 async fn gateway_jwk_for(state: &AppState, kid: &str) -> Result<Jwk, ResolveError> {
     {
         let cached = state.gateway_jwks.read().await;
-        if let Some(cache) = cached
-            .as_ref()
-            .filter(|cache| cache.fetched_at.elapsed() < Duration::from_secs(300))
-        {
-            if let Some(key) = cache
-                .set
-                .keys
-                .iter()
-                .find(|key| key.common.key_id.as_deref() == Some(kid))
-            {
-                return Ok(key.clone());
+        if let Some(cache) = cached.as_ref() {
+            if let Some(key) = cache.key(kid) {
+                if cache.fetched_at.elapsed() < GATEWAY_JWKS_TTL {
+                    return Ok(key.clone());
+                }
+            } else if cache.last_attempt.elapsed() < state.jwks_refetch_cooldown {
+                // Unknown kid against a set we just fetched. Refetching per
+                // request turns a trickle of bogus kids into a JWKS flood
+                // against the Control API; rotation still converges within one
+                // cooldown.
+                state
+                    .metrics
+                    .jwks_unknown_kid
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(ResolveError::Invalid);
             }
         }
     }
@@ -1011,6 +1054,7 @@ async fn gateway_jwk_for(state: &AppState, kid: &str) -> Result<Jwk, ResolveErro
         .gateway_jwks_url
         .as_ref()
         .ok_or(ResolveError::Unavailable)?;
+    state.metrics.jwks_fetches.fetch_add(1, Ordering::Relaxed);
     let response = if state.oauth.is_some() {
         let token = get_valid_token(state)
             .await
@@ -1034,24 +1078,38 @@ async fn gateway_jwk_for(state: &AppState, kid: &str) -> Result<Jwk, ResolveErro
             .send()
             .await
     };
-    let set = response
-        .map_err(|_| ResolveError::Unavailable)?
-        .error_for_status()
-        .map_err(|_| ResolveError::Unavailable)?
-        .json::<JwkSet>()
-        .await
-        .map_err(|_| ResolveError::Unavailable)?;
-    let key = set
-        .keys
-        .iter()
-        .find(|key| key.common.key_id.as_deref() == Some(kid))
-        .cloned()
-        .ok_or(ResolveError::Invalid)?;
-    *state.gateway_jwks.write().await = Some(CachedGatewayJwks {
+    let fetched = match response {
+        Ok(response) => match response.error_for_status() {
+            Ok(response) => response.json::<JwkSet>().await.map_err(|_| ()),
+            Err(_) => Err(()),
+        },
+        Err(_) => Err(()),
+    };
+    let now = Instant::now();
+    let mut cached = state.gateway_jwks.write().await;
+    let Ok(set) = fetched else {
+        // Record the attempt even on failure, so a broken JWKS endpoint is not
+        // retried once per request.
+        if let Some(cache) = cached.as_mut() {
+            cache.last_attempt = now;
+        }
+        return Err(ResolveError::Unavailable);
+    };
+    // Cache the set *before* looking the kid up. Doing it the other way round
+    // meant an unknown kid never populated the cache at all, so every
+    // legitimate miss that followed paid for another fetch.
+    let cache = cached.insert(CachedGatewayJwks {
         set,
-        fetched_at: Instant::now(),
+        fetched_at: now,
+        last_attempt: now,
     });
-    Ok(key)
+    cache.key(kid).cloned().ok_or_else(|| {
+        state
+            .metrics
+            .jwks_unknown_kid
+            .fetch_add(1, Ordering::Relaxed);
+        ResolveError::Invalid
+    })
 }
 
 async fn validate_gateway_token(
@@ -1213,26 +1271,36 @@ fn extract_inference_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn admitted(state: &AppState, cache_key: &str) -> bool {
+fn token_digest(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Token bucket over `state.rates`. Callers prefix the key with the keyspace
+/// they own (`t:` unverified token digest, `s:` verified session, `p:` peer
+/// address) so the three limiters cannot collide in the shared map.
+fn admitted_at(state: &AppState, key: &str, rps: u64, burst: u64) -> bool {
     let mut rates = state.rates.lock().expect("rate limiter poisoned");
     if rates.len() > 200_000 {
         rates.retain(|_, window| window.updated.elapsed() < Duration::from_secs(120));
     }
-    let burst = state.per_token_burst.max(1) as f64;
-    let window = rates.entry(cache_key.to_owned()).or_insert(RateWindow {
+    let burst = burst.max(1) as f64;
+    let window = rates.entry(key.to_owned()).or_insert(RateWindow {
         updated: Instant::now(),
         tokens: burst,
     });
     let now = Instant::now();
-    window.tokens = (window.tokens
-        + now.duration_since(window.updated).as_secs_f64() * state.per_token_rps as f64)
-        .min(burst);
+    window.tokens =
+        (window.tokens + now.duration_since(window.updated).as_secs_f64() * rps as f64).min(burst);
     window.updated = now;
     if window.tokens < 1.0 {
         return false;
     }
     window.tokens -= 1.0;
     true
+}
+
+fn admitted(state: &AppState, cache_key: &str) -> bool {
+    admitted_at(state, cache_key, state.per_token_rps, state.per_token_burst)
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
@@ -1577,6 +1645,14 @@ fn cached_mapping(state: &AppState, cache_key: &str) -> Option<Mapping> {
     }
 }
 
+fn too_many_requests(message: &'static str) -> Response {
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, message).into_response();
+    response
+        .headers_mut()
+        .insert("retry-after", "1".parse().unwrap());
+    response
+}
+
 async fn proxy_auth_guard(
     State(state): State<Arc<AppState>>,
     mut request: Request<Body>,
@@ -1599,11 +1675,42 @@ async fn proxy_auth_guard(
     let Some(inference_token) = extract_inference_token(request.headers()) else {
         return (StatusCode::UNAUTHORIZED, "missing inference token").into_response();
     };
+    // Meter *before* verification. Signature checks are the expensive part, so
+    // a limiter that only runs after them leaves unverifiable tokens entirely
+    // unmetered.
+    if !admitted(&state, &format!("t:{}", token_digest(&inference_token))) {
+        state
+            .metrics
+            .rate_limited_unverified
+            .fetch_add(1, Ordering::Relaxed);
+        return too_many_requests("token rate limit exceeded");
+    }
+    let peer_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| peer.ip());
     let identity = if state.resolver_url.is_some() {
         match validate_gateway_token(&state, &inference_token).await {
             Ok(identity) => Some(identity),
             Err(ResolveError::Invalid) => {
-                return (StatusCode::UNAUTHORIZED, "invalid inference token").into_response()
+                // Digest keying alone cannot see a flood of freshly random
+                // tokens — each one gets its own bucket. Charge the peer for
+                // failures only, so legitimate traffic never touches this.
+                if let Some(peer_ip) = peer_ip {
+                    if !admitted_at(
+                        &state,
+                        &format!("p:{peer_ip}"),
+                        state.unverified_rps,
+                        state.unverified_rps,
+                    ) {
+                        state
+                            .metrics
+                            .rate_limited_unverified
+                            .fetch_add(1, Ordering::Relaxed);
+                        return too_many_requests("unverified token rate limit exceeded");
+                    }
+                }
+                return (StatusCode::UNAUTHORIZED, "invalid inference token").into_response();
             }
             Err(ResolveError::Unavailable) => {
                 return (
@@ -1620,14 +1727,12 @@ async fn proxy_auth_guard(
         .as_ref()
         .map(GatewayIdentity::cache_key)
         .unwrap_or_else(|| "local-development".into());
-    if !admitted(&state, &cache_key) {
-        state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
-        let mut response =
-            (StatusCode::TOO_MANY_REQUESTS, "session rate limit exceeded").into_response();
-        response
-            .headers_mut()
-            .insert("retry-after", "1".parse().unwrap());
-        return response;
+    if !admitted(&state, &format!("s:{cache_key}")) {
+        state
+            .metrics
+            .rate_limited_session
+            .fetch_add(1, Ordering::Relaxed);
+        return too_many_requests("session rate limit exceeded");
     }
 
     let cached = cached_mapping(&state, &cache_key);
@@ -2138,6 +2243,8 @@ mod tests {
             rates: Mutex::new(HashMap::new()),
             per_token_rps: 100,
             per_token_burst: 100,
+            unverified_rps: 20,
+            jwks_refetch_cooldown: Duration::from_secs(30),
             resolver_permits: Arc::new(Semaphore::new(8)),
             request_permits: Arc::new(Semaphore::new(8)),
             max_body_bytes: 1024,
@@ -2188,6 +2295,91 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}/jwks")
+    }
+
+    /// Same fixture as `spawn_gateway_jwks_server`, but counts every fetch.
+    async fn spawn_counting_jwks_server(counter: Arc<AtomicUsize>) -> String {
+        async fn handler(State(counter): State<Arc<AtomicUsize>>) -> axum::Json<serde_json::Value> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            axum::Json(
+                serde_json::from_str(include_str!(
+                    "../../../tests/e2e-slim/fixtures/jwks/jwks.json"
+                ))
+                .unwrap(),
+            )
+        }
+        let app = Router::new()
+            .route("/jwks", get(handler))
+            .with_state(counter);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/jwks")
+    }
+
+    #[tokio::test]
+    async fn a_repeated_unknown_kid_costs_exactly_one_jwks_fetch() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut state = test_state(None);
+        let jwks_url = spawn_counting_jwks_server(counter.clone()).await;
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.gateway_jwks_url = Some(jwks_url);
+
+        for _ in 0..5 {
+            assert!(matches!(
+                gateway_jwk_for(&state, "no-such-kid").await,
+                Err(ResolveError::Invalid)
+            ));
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(state.metrics.jwks_unknown_kid.load(Ordering::Relaxed), 5);
+
+        // The unknown kid still populated the cache, so a legitimate kid that
+        // arrives afterwards is served without another fetch.
+        assert!(gateway_jwk_for(&state, "e2e-slim-rsa-1").await.is_ok());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(state.metrics.jwks_fetches.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn an_expired_cooldown_lets_key_rotation_converge() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut state = test_state(None);
+        let jwks_url = spawn_counting_jwks_server(counter.clone()).await;
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.gateway_jwks_url = Some(jwks_url);
+        mutable.jwks_refetch_cooldown = Duration::ZERO;
+
+        for _ in 0..3 {
+            assert!(gateway_jwk_for(&state, "rotated-in-kid").await.is_err());
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn unverified_and_session_limiters_do_not_share_a_keyspace() {
+        let state = test_state(None);
+        // Same string, different keyspaces: exhausting one must not affect the
+        // other.
+        for _ in 0..state.per_token_burst {
+            assert!(admitted(&state, "t:collide"));
+        }
+        assert!(!admitted(&state, "t:collide"));
+        assert!(admitted(&state, "s:collide"));
+    }
+
+    #[test]
+    fn a_repeated_malformed_token_is_rejected_before_verification() {
+        let mut state = test_state(None);
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.per_token_rps = 0;
+        mutable.per_token_burst = 2;
+        let key = format!("t:{}", token_digest("not-a-jwt"));
+        assert!(admitted(&state, &key));
+        assert!(admitted(&state, &key));
+        assert!(!admitted(&state, &key));
     }
 
     fn sign_gateway_claims(claims: &GatewayInferenceClaims, kid: &str) -> String {

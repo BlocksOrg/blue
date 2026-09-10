@@ -21,6 +21,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
 futures-util = { workspace = true }
 gh-gateway = { workspace = true }
 jsonwebtoken = { workspace = true }
