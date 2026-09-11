@@ -26,7 +26,7 @@ mkdir -p "$artifact_dir"
 state_dir="/tmp/blue-e2e"
 mkdir -p "$state_dir/component-markers"
 cp "$slim_dir/fixtures/mcp-server.mjs" "$state_dir/mcp-server.mjs"
-base64 -d "$repo_root/tests/e2e/fixtures/package/e2e-package.tar.gz.b64" \
+base64 -d < "$repo_root/tests/e2e/fixtures/package/e2e-package.tar.gz.b64" \
   > "$state_dir/e2e-package.tar.gz"
 
 gateway=0

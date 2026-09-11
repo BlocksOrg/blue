@@ -65,10 +65,7 @@ import { useUnsavedChangesWarning } from "@/hooks/use-unsaved-changes-warning";
 import type { HarnessMetadata } from "@/lib/harness-metadata";
 import {
   adapterSupportsHarness,
-  compareSemver,
-  describeMappingIssue,
-  harnessMappingIssue,
-  semverTuple,
+  packageAdapterValidationError,
   type PackageAdapter,
 } from "@/lib/mapping-compatibility";
 
@@ -192,10 +189,11 @@ function DetailSheet({
   harnesses,
   dirty,
   publishing,
-  publishDisabled,
+  publishBlockedReason,
   onClose,
   onAudienceChange,
   onAdaptersChange,
+  onAvailabilityChange,
   onOverrideChange,
   onSettingsChange,
 }: {
@@ -206,10 +204,11 @@ function DetailSheet({
   harnesses: HarnessMetadata[];
   dirty: boolean;
   publishing: boolean;
-  publishDisabled: boolean;
+  publishBlockedReason?: string;
   onClose: () => void;
   onAudienceChange: (audience: PackageAudience) => void;
   onAdaptersChange: (adapters: Record<string, PackageAdapter>) => void;
+  onAvailabilityChange: (harness: string, field: "introduced" | "before", value: string) => void;
   onOverrideChange: (harness: string, packageId: string, value: string) => void;
   onSettingsChange: (harness: string, packageId: string, settings: Record<string, unknown>) => void;
 }) {
@@ -259,6 +258,21 @@ function DetailSheet({
   const executable = kinds.some((kind) => ["hooks", "plugins", "helpers"].includes(kind));
   const selectedUsers = new Set(audience.user_ids);
   const visibleUsers = memberResults.slice(0, 10);
+  const adapterErrors = Object.fromEntries(
+    Object.entries(item.adapters ?? {}).map(([harness, adapter]) => {
+      const metadata = harnesses.find((candidate) => candidate.key === harness);
+      return [
+        harness,
+        metadata
+          ? packageAdapterValidationError(
+              adapter,
+              metadata,
+              overrides[harness]?.[item.id]?.enabled !== false,
+            )
+          : `${harness} is not supported by the current client registry.`,
+      ];
+    }),
+  );
 
   function toggleUser(userId: string, checked: boolean) {
     const next = new Set(audience.user_ids);
@@ -280,6 +294,14 @@ function DetailSheet({
       adapters[harness.key] = structuredClone(template);
       onAdaptersChange(adapters);
     }
+  }
+
+  function updateAvailability(
+    harness: string,
+    field: "introduced" | "before",
+    value: string,
+  ) {
+    onAvailabilityChange(harness, field, value.trim());
   }
 
   function updateSettings(harness: string, value: string) {
@@ -355,6 +377,50 @@ function DetailSheet({
                 );
               })}
             </div>
+          </section>}
+
+          {custom && <section className="grid gap-3">
+            <div>
+              <h3 className="font-medium">Harness version availability</h3>
+              <p className="text-sm text-muted-foreground">Limit this extension to the harness versions that support its mapped capabilities.</p>
+            </div>
+            {Object.entries(item.adapters ?? {}).map(([harness, adapter]) => {
+              const metadata = harnesses.find((candidate) => candidate.key === harness);
+              const label = metadata?.label ?? harness;
+              const error = adapterErrors[harness];
+              return (
+                <div className="grid gap-3 rounded-lg border p-3" key={harness}>
+                  <p className="text-sm font-medium">{label}</p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-2">
+                      <Label htmlFor={`${item.id}-${harness}-introduced`}>Harness available from</Label>
+                      <Input
+                        id={`${item.id}-${harness}-introduced`}
+                        className="font-mono"
+                        value={adapter.introduced ?? ""}
+                        placeholder="0.0.0 (default)"
+                        spellCheck={false}
+                        aria-invalid={Boolean(error)}
+                        onChange={(event) => updateAvailability(harness, "introduced", event.target.value)}
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label htmlFor={`${item.id}-${harness}-before`}>Harness available before</Label>
+                      <Input
+                        id={`${item.id}-${harness}-before`}
+                        className="font-mono"
+                        value={adapter.before ?? ""}
+                        placeholder="Open ended"
+                        spellCheck={false}
+                        aria-invalid={Boolean(error)}
+                        onChange={(event) => updateAvailability(harness, "before", event.target.value)}
+                      />
+                    </div>
+                  </div>
+                  {error && <p className="text-xs text-destructive" role="alert">{error}</p>}
+                </div>
+              );
+            })}
           </section>}
 
           <section className="grid gap-3">
@@ -454,8 +520,9 @@ function DetailSheet({
             </details>
           </section>
         </div>
-        <DialogFooter>
-          <Button className="sm:ml-auto" type="submit" form="extensions-form" disabled={!dirty || publishing || publishDisabled}>{publishing ? "Publishing extension changes…" : "Publish extension changes"}</Button>
+        <DialogFooter className="items-center">
+          {publishBlockedReason && <p className="text-xs text-destructive" role="alert">{publishBlockedReason}</p>}
+          <Button className="sm:ml-auto" type="submit" form="extensions-form" disabled={!dirty || publishing || Boolean(publishBlockedReason)}>{publishing ? "Publishing extension changes…" : "Publish extension changes"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -577,33 +644,8 @@ function AddDialog({
     for (const [harness, adapter] of Object.entries(draft.adapters)) {
       const metadata = harnesses.find((item) => item.key === harness);
       if (!metadata) return setError(`${harness} is not supported by the current client registry.`);
-      const availabilityStart = semverTuple(adapter.introduced ?? "0.0.0");
-      const availabilityEnd = adapter.before ? semverTuple(adapter.before) : undefined;
-      if (!availabilityStart || (adapter.before && !availabilityEnd) || (availabilityEnd && compareSemver(availabilityStart, availabilityEnd) >= 0))
-        return setError(`${harness} has an invalid availability range.`);
-      const intervals = (adapter.variants ?? []).map((variant) => ({ variant, start: semverTuple(variant.introduced), end: variant.before ? semverTuple(variant.before) : undefined }));
-      if (intervals.some(({ variant, start, end }) => !start || (variant.before && !end) || (end && compareSemver(start!, end) >= 0)))
-        return setError(`${harness} has an invalid adapter interval boundary.`);
-      if (intervals.some((interval, index) => index > 0 && compareSemver(intervals[index - 1].start!, interval.start!) >= 0))
-        return setError(`${harness} adapter intervals must be ordered by introduced version.`);
-      intervals.sort((left, right) => compareSemver(left.start!, right.start!));
-      for (let index = 1; index < intervals.length; index += 1) {
-        const previous = intervals[index - 1];
-        if (!previous.end || compareSemver(previous.end, intervals[index].start!) > 0)
-          return setError(`${harness} adapter intervals overlap at ${intervals[index].variant.introduced}.`);
-      }
-      if (intervals.some(({ start, end }) => compareSemver(start!, availabilityStart) < 0 || (availabilityEnd && (!end || compareSemver(end, availabilityEnd) > 0))))
-        return setError(`${harness} has a layout interval outside its availability range.`);
-      const hasFallback = Boolean(adapter.plugin_dir || adapter.skills_dir || adapter.agents_dir || adapter.hooks_file || adapter.plugins?.length || Object.keys(adapter.helpers ?? {}).length);
-      if (!hasFallback && intervals.length) {
-        if (compareSemver(intervals[0].start!, availabilityStart) !== 0 || (availabilityEnd ? !intervals.at(-1)?.end || compareSemver(intervals.at(-1)!.end!, availabilityEnd) !== 0 : Boolean(intervals.at(-1)?.end)))
-          return setError(`${harness} layout intervals must cover its complete availability range when no fallback is defined.`);
-        for (let index = 1; index < intervals.length; index += 1)
-          if (!intervals[index - 1].end || compareSemver(intervals[index - 1].end!, intervals[index].start!) !== 0)
-            return setError(`${harness} adapter intervals contain a gap before ${intervals[index].variant.introduced}.`);
-      }
-      const issue = harnessMappingIssue(adapter, metadata);
-      if (issue) return setError(describeMappingIssue(issue, adapter, metadata));
+      const validationError = packageAdapterValidationError(adapter, metadata);
+      if (validationError) return setError(validationError);
     }
     if (catalogIds.has(id) || customPackages.some((item) => item.id === id)) return setError(`Extension ${id} is already configured.`);
     onAdd({ ...draft, id, name: draft.name?.trim() || undefined }); close();
@@ -911,7 +953,28 @@ export function PackageManager({ revision, catalog, selected, audiences, overrid
   const directory = [...catalog, ...customPackages];
   const currentSignature = JSON.stringify({ packages, audiences: currentAudiences, overrides: parsed.value, mcp: mcpByHarness });
   const dirty = publishedSignature !== currentSignature;
-  const invalidAudience = Object.values(currentAudiences).some((audience) => audience.scope === "users" && !audience.user_ids.length);
+  const invalidAudiencePackage = packages.find((item) => {
+    const audience = currentAudiences[item.id];
+    return audience?.scope === "users" && !audience.user_ids.length;
+  });
+  const customPackageError = customPackages.flatMap((item) =>
+    Object.entries(item.adapters ?? {}).map(([harness, adapter]) => {
+      const metadata = harnesses.find((candidate) => candidate.key === harness);
+      const error = metadata
+        ? packageAdapterValidationError(
+            adapter,
+            metadata,
+            parsed.value[harness]?.[item.id]?.enabled !== false,
+          )
+        : `${harness} is not supported by the current client registry.`;
+      return error ? `${item.name ?? item.id}: ${error}` : undefined;
+    }),
+  ).find((error): error is string => Boolean(error));
+  const publishBlockedReason = customPackageError
+    ?? parsed.error
+    ?? (invalidAudiencePackage
+      ? `${invalidAudiencePackage.name ?? invalidAudiencePackage.id}: select at least one deployment audience member.`
+      : undefined);
   const detailItem = directory.find((item) => item.id === detailId);
   function selectTab(value: ExtensionTab) {
     setActiveTab(value);
@@ -954,6 +1017,22 @@ export function PackageManager({ revision, catalog, selected, audiences, overrid
       if (!Object.keys(next[harness]).length) delete next[harness];
     });
     setOverrideText(JSON.stringify(next));
+  }
+  function updateCustomAvailability(
+    id: string,
+    harness: string,
+    field: "introduced" | "before",
+    value: string,
+  ) {
+    setCustomPackages((current) => current.map((item) => {
+      if (item.id !== id) return item;
+      const adapters = structuredClone(item.adapters ?? {});
+      const adapter = adapters[harness];
+      if (!adapter) return item;
+      if (value) adapter[field] = value;
+      else delete adapter[field];
+      return { ...item, adapters };
+    }));
   }
   function customEnabled(item: ManagedPackage) {
     const adapters = Object.keys(item.adapters ?? {});
@@ -1051,6 +1130,7 @@ export function PackageManager({ revision, catalog, selected, audiences, overrid
     <form id="package-inspector" action={inspectAction} />
     <form id="extensions-form" action={action} className={dirty ? "grid gap-5 pb-28" : "grid gap-5"}>
       <input type="hidden" name="revision" value={publishedRevision} /><input type="hidden" name="packages" value={JSON.stringify(packages)} /><input type="hidden" name="package_audiences" value={JSON.stringify(currentAudiences)} /><input type="hidden" name="package_overrides" value={overrideText} /><input type="hidden" name="mcp" value={JSON.stringify(mcpByHarness)} />
+      {(state.error || customPackageError) && <Alert variant="destructive"><AlertTitle>Extension configuration not saved</AlertTitle><AlertDescription>{customPackageError ?? state.error}</AlertDescription></Alert>}
       <div className="flex justify-end"><Button type="button" onClick={() => activeTab === "mcp" ? openMcpEditor() : setAddOpen(true)}><Plus />{activeTab === "mcp" ? "Add MCP server" : "Add extension"}</Button></div>
       <Tabs value={activeTab} onValueChange={(value) => selectTab(value as ExtensionTab)}>
         <div className="overflow-x-auto border-b"><TabsList variant="line" className="min-w-max px-1">{tabs.map((tab) => <TabsTrigger value={tab.value} key={tab.value} className="gap-2 px-3 py-2">{tab.label}<Badge variant="secondary" className="min-w-5 justify-center px-1.5">{counts[tab.value]}</Badge></TabsTrigger>)}</TabsList></div>
@@ -1106,17 +1186,17 @@ export function PackageManager({ revision, catalog, selected, audiences, overrid
       {dirty && (
         <FloatingSaveBar
           title="Unpublished extension changes"
-          description={`Revision ${publishedRevision} · ${activePackageCount} packages · ${enabledMcpCount} MCP servers`}
+          description={publishBlockedReason ?? `Revision ${publishedRevision} · ${activePackageCount} packages · ${enabledMcpCount} MCP servers`}
           saveLabel="Publish extension changes"
           pendingLabel="Publishing extension changes…"
           onDiscard={discardChanges}
-          disabled={Boolean(parsed.error) || invalidAudience}
+          disabled={Boolean(publishBlockedReason)}
         />
       )}
     </form>
     <AddDialog open={addOpen} defaultKind={activeTab} catalogIds={catalogIds} customPackages={customPackages} inspection={inspection} inspecting={inspecting} connections={connections} harnesses={harnesses} onOpenChange={setAddOpen} onAdd={(item) => { setCustomPackages((current) => [...current, item]); setPackageAudiences((current) => ({ ...current, [item.id]: { scope: "organization", user_ids: [] } })); }} />
     <McpEditorDialog open={mcpEditorOpen} definition={editingMcpIndex === undefined ? undefined : mcpDefinitions[editingMcpIndex]} definitions={mcpDefinitions} editingIndex={editingMcpIndex} supportedHarnesses={harnessKeys} onOpenChange={(open) => { setMcpEditorOpen(open); if (!open) setEditingMcpIndex(undefined); }} onSave={saveMcp} />
-    {detailItem && <DetailSheet item={detailItem} custom={!catalogIds.has(detailItem.id)} overrideText={overrideText} audience={packageAudiences[detailItem.id] ?? { scope: "organization", user_ids: [] }} harnesses={harnesses} dirty={dirty} publishing={publishing} publishDisabled={Boolean(parsed.error) || invalidAudience} onClose={() => setDetailId(undefined)} onAudienceChange={(audience) => setPackageAudiences((current) => ({ ...current, [detailItem.id]: audience }))} onAdaptersChange={(adapters) => updateCustomAdapters(detailItem.id, adapters)} onOverrideChange={updateOverride} onSettingsChange={updateSettings} />}
+    {detailItem && <DetailSheet item={detailItem} custom={!catalogIds.has(detailItem.id)} overrideText={overrideText} audience={packageAudiences[detailItem.id] ?? { scope: "organization", user_ids: [] }} harnesses={harnesses} dirty={dirty} publishing={publishing} publishBlockedReason={publishBlockedReason} onClose={() => setDetailId(undefined)} onAudienceChange={(audience) => setPackageAudiences((current) => ({ ...current, [detailItem.id]: audience }))} onAdaptersChange={(adapters) => updateCustomAdapters(detailItem.id, adapters)} onAvailabilityChange={(harness, field, value) => updateCustomAvailability(detailItem.id, harness, field, value)} onOverrideChange={updateOverride} onSettingsChange={updateSettings} />}
     <ConfirmationDialog confirmation={confirmation} open={Boolean(confirmation)} onOpenChange={(open) => { if (!open) setConfirmation(undefined); }} />
   </>;
 }
