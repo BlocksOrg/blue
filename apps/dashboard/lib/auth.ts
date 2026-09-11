@@ -7,9 +7,12 @@ import {
   oauthDeviceAuthorization,
   oauthProvider,
 } from "@better-auth/oauth-provider";
-import { APIError } from "better-auth/api";
 import { Pool } from "pg";
 import { createHash, randomBytes, randomUUID } from "crypto";
+import {
+  bindDeviceExchangeToBrowserSession,
+  type DeviceExchangeInput,
+} from "./device-authorization-binding";
 import { bootstrapEmail, identityConfig } from "./identity-config";
 import {
   isProductionBuild,
@@ -117,23 +120,6 @@ function sessionBoundOAuthDeviceAuthorization() {
     blueOAuthSessionId: sessionField,
   });
 
-  type DeviceExchangeInput = {
-    ctx: {
-      body?: Record<string, unknown>;
-      context: {
-        adapter: {
-          findOne(query: unknown): Promise<Record<string, unknown> | null>;
-        };
-      };
-    };
-    provider: {
-      issueTokens(
-        params: Record<string, unknown>,
-      ): Promise<Record<string, unknown>>;
-      [key: string]: unknown;
-    };
-    [key: string]: unknown;
-  };
   const grant = plugin.options.grant as typeof plugin.options.grant & {
     grants: Record<
       string,
@@ -141,51 +127,8 @@ function sessionBoundOAuthDeviceAuthorization() {
     >;
   };
   const exchange = grant.grants[DEVICE_CODE_GRANT_TYPE];
-  grant.grants[DEVICE_CODE_GRANT_TYPE] = async (input) => {
-    const deviceCode = String(input.ctx.body?.device_code ?? "");
-    const record = deviceCode
-      ? await input.ctx.context.adapter.findOne({
-          model: "deviceCode",
-          where: [{ field: "deviceCode", value: deviceCode }],
-        })
-      : null;
-    const sessionId =
-      typeof record?.blueOAuthSessionId === "string"
-        ? record.blueOAuthSessionId
-        : undefined;
-    if (!sessionId)
-      throw new APIError("BAD_REQUEST", {
-        error: "invalid_grant",
-        error_description: "Device authorization is not bound to a session",
-      });
-    const session = await input.ctx.context.adapter.findOne({
-      model: "session",
-      where: [{ field: "id", value: sessionId }],
-    });
-    const sessionExpiresAt =
-      session?.expiresAt instanceof Date
-        ? session.expiresAt
-        : new Date(String(session?.expiresAt ?? ""));
-    if (
-      !session ||
-      session.userId !== record?.userId ||
-      !Number.isFinite(sessionExpiresAt.getTime()) ||
-      sessionExpiresAt <= new Date()
-    )
-      throw new APIError("BAD_REQUEST", {
-        error: "invalid_grant",
-        error_description: "Device authorization session is inactive",
-      });
-
-    return exchange({
-      ...input,
-      provider: {
-        ...input.provider,
-        issueTokens: (params) =>
-          input.provider.issueTokens({ ...params, sessionId }),
-      },
-    });
-  };
+  grant.grants[DEVICE_CODE_GRANT_TYPE] =
+    bindDeviceExchangeToBrowserSession(exchange);
   return plugin;
 }
 
