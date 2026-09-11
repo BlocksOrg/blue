@@ -64,6 +64,14 @@ tests/e2e/run.sh smoke   # PR-gating deploy + CLI journey
 tests/e2e/run.sh full    # full API / dashboard / gateway / SCIM / harness matrix
 ```
 
+In CI, both end-to-end workflows (**End-to-end** and **End-to-end (slim)**) skip
+while a PR is a draft — they build the production image and boot a full hermetic
+stack, so drafts don't pay for that on every push. Marking the PR ready for
+review triggers them. To get a run without leaving draft, dispatch the workflow
+against your branch from the Actions tab (`gh workflow run e2e.yml --ref
+<branch>`). The `CI` workflow — fmt, Clippy, tests, builds — runs on drafts as
+usual. See [AGENTS.md](AGENTS.md) for the per-job breakdown.
+
 Repo map, conventions, and how to add a harness or gateway live in
 [AGENTS.md](AGENTS.md).
 
