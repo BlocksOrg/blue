@@ -3,8 +3,10 @@
 This chart deploys the Blue image as independently scalable Control API,
 dashboard, inference-proxy, and singleton worker workloads. The image's
 all-in-one entrypoint is retained for local development only.
-The image must contain `/etc/blue/blue.yaml`, or `blue.config.existingConfigMap`
-must name a ConfigMap containing the configured key. Runtime secrets are loaded
+The Control API and worker read `/etc/blue/blue.yaml` and exit at startup when
+it is missing. The published image does not bake one in — `deploy/Dockerfile`
+creates an empty `/etc/blue` — so `blue.config.existingConfigMap` is required
+unless you build an image that supplies the file itself. Runtime secrets are loaded
 from `blue.existingSecret`; required keys also use non-optional `secretKeyRef`
 entries so Kubernetes reports missing keys before a workload starts.
 Offline `helm template` cannot inspect keys inside that externally managed
