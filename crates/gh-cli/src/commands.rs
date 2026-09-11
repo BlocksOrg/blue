@@ -451,7 +451,43 @@ fn retire_superseded_session_with(
     }
 }
 
+/// Retire the gateway session bound to a session being replaced.
+///
+/// Revoking the refresh grant does not reach the inference JWTs already minted
+/// from it: the resolver gates on `gateway_auth_sessions.revoked_at`, and the
+/// proxy enforces `reactivated_at` as a not-before against the JWT's signed
+/// `iat`. Without this, a JWT issued before the re-login keeps buying inference
+/// until it expires — up to 12 hours — which is exactly what `--force` is
+/// documented to prevent.
+///
+/// Ordered before the browser step deliberately. `revoke_gateway_session`
+/// authenticates with the access token, so the session must still be the one on
+/// disk: `refresh_if_needed` persists, and after `gh_service::login` that file
+/// belongs to the replacement.
+fn retire_gateway_session_with(
+    cfg: &BlueToml,
+    previous: &Session,
+    revoke: impl FnOnce(&Session) -> std::result::Result<(), gh_common::GhError>,
+) {
+    // Only an OAuth session has a gateway binding; a `token`-mode credential
+    // would just collect a 401 here.
+    if !is_oidc(cfg) {
+        return;
+    }
+    let mut previous = previous.clone();
+    previous.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
+    // Best-effort: a stale access token cannot revoke, but the refresh grant
+    // below must still be retired.
+    let _ = previous.refresh_if_needed(now_unix());
+    if let Err(error) = revoke(&previous) {
+        tracing::warn!(%error, "revoking the superseded gateway session failed");
+    }
+}
+
 fn reauthenticate_replacing(cfg: &BlueToml, previous: &Session) -> Result<Session> {
+    retire_gateway_session_with(cfg, previous, |session| {
+        session.revoke_gateway_session(&cfg.service.url)
+    });
     // Persist the replacement before retiring the old grant. If the user
     // cancels device authorization, their existing local session remains
     // untouched; revocation failure must not discard a valid replacement.
@@ -719,14 +755,12 @@ pub fn login(force: bool) -> Result<()> {
 
     let mut replacement_previous = None;
     if force {
-        // Otherwise every forced re-login orphans a refresh token that stays
-        // live server-side for its full lifetime. Best-effort: a user forcing
-        // a re-login is already past caring whether the old grant answers.
-        if let Some(session) = stored.as_ref() {
-            if let Err(error) = session.revoke() {
-                tracing::debug!(%error, "revoking the previous refresh token failed");
-            }
-        }
+        // Retiring the old session is `reauthenticate_replacing`'s job now: it
+        // revokes the gateway session too, which revoking the refresh grant
+        // here never did. The grant is still retired, just once a replacement
+        // exists — doing it up front meant a Ctrl-C at the browser left a
+        // session that could no longer refresh.
+        replacement_previous = stored;
     } else if let Some(mut session) = stored {
         session.adopt_refresh_context(&cfg.service.url, identity_scopes(&cfg));
         if session.refresh_if_needed(now_unix()).is_ok() {
@@ -5412,6 +5446,62 @@ mod tests {
             Ok(())
         });
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn oidc_cfg() -> BlueToml {
+        let mut cfg = BlueToml::default();
+        cfg.service.url = "https://control.example.com".into();
+        cfg.identity = IdentityConfig::Oidc {
+            issuer: "https://control.example.com".into(),
+            client_id: "blue-cli".into(),
+            scopes: vec!["governance:read".into()],
+        };
+        cfg
+    }
+
+    /// The refresh grant and the gateway session are retired on different
+    /// conditions: an inference JWT outlives the grant it was minted from, so
+    /// the gateway revocation must not inherit `refresh_grant_was_superseded`.
+    ///
+    /// Every session here is `Session::bearer`, whose `expires_at` is `None` —
+    /// `refresh_if_needed` short-circuits before `save()`, so the test never
+    /// touches `session.json`.
+    #[test]
+    fn gateway_sessions_are_retired_whatever_the_refresh_grant_looks_like() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cfg = oidc_cfg();
+        let calls = AtomicUsize::new(0);
+
+        // No refresh token to supersede, and the gateway session still dies.
+        retire_gateway_session_with(&cfg, &session_with_refresh_token(None), |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(gh_common::GhError::service("revocation unavailable"))
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // A failure above is warn-only; it must not be retried or propagated.
+        retire_gateway_session_with(&cfg, &session_with_refresh_token(Some("old")), |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // `token` mode has no OAuth session behind a gateway binding, so there
+        // is nothing to revoke and no 401 worth collecting.
+        let mut token_mode = oidc_cfg();
+        token_mode.identity = IdentityConfig::Token {
+            token: "static".into(),
+        };
+        retire_gateway_session_with(
+            &token_mode,
+            &session_with_refresh_token(Some("old")),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
