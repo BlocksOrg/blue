@@ -1,0 +1,111 @@
+name: Changed paths
+
+# Answers one question for the expensive jobs: did this change touch anything
+# outside the docs site, the website, and the root-level Markdown?
+#
+# Why a reusable workflow feeding a job-level `if:` instead of the obvious
+# workflow-level `paths-ignore`: `image` (ci.yml) is a REQUIRED status check in the
+# `Protect main` ruleset. A workflow that path filtering skips never creates its
+# check run at all, so the required check sits pending forever and a docs-only PR
+# can never be merged. A job skipped by an `if:` does create a check run, with
+# conclusion `skipped`, which GitHub counts as success for a required check.
+#
+# That same property is why this filter FAILS OPEN in every ambiguous case: a
+# skipped required check is a *passing* one, so guessing wrong in the skip
+# direction silently waves a change through unbuilt. Guessing wrong the other way
+# only costs runner time.
+#
+# e2e.yml / e2e-slim.yml are not required checks, but they call this too so the
+# ignore list lives in exactly one place.
+
+on:
+  workflow_call:
+    outputs:
+      code:
+        description: >-
+          "true" if anything outside docs/website changed, or if the range could
+          not be determined (fail open). "false" only when every changed path is
+          provably docs or website.
+        value: ${{ jobs.filter.outputs.code }}
+
+permissions:
+  contents: read
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      # Git-based rather than an API-based path filter, so `contents: read` is the
+      # whole permission surface. `fetch-depth: 0` costs nothing here — the repo's
+      # full history is a couple of megabytes.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+          # Anchored alternation; a changed path matching NONE of these is code.
+          #   apps/docs/**      Mintlify docs site, validated by its own docs.yml
+          #   apps/website/**   marketing site, built by ci.yml's `website` job
+          #                     and deployed by website-deploy.yml
+          #   <root>/*.md       README / CONTRIBUTING / AGENTS / RELEASING / ...
+          # Deliberately NOT ignored: deploy/contract/governance.openapi.yaml
+          # (docs-adjacent but contract-bearing), Markdown below the root (crate
+          # READMEs can be `include_str!`-ed), and .github/workflows/**.
+          DOCS_ONLY_RE: '^(apps/docs/|apps/website/|[^/]+\.md$)'
+        run: |
+          decide() { # $1 = true|false, $2 = why
+            echo "$2"
+            echo "code=$1" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          case "$EVENT_NAME" in
+            pull_request)
+              base="$PR_BASE_SHA"
+              head="$PR_HEAD_SHA"
+              ;;
+            push)
+              base="$PUSH_BEFORE_SHA"
+              head="$PUSH_HEAD_SHA"
+              ;;
+            *)
+              # schedule / workflow_dispatch and friends have no diff range.
+              decide true "event '$EVENT_NAME' has no diff range; assuming code changed"
+              ;;
+          esac
+
+          # Branch creation reports an all-zero `before`; there is nothing to diff.
+          if [ -z "$base" ] || [ -z "$head" ] || [ "${base//0/}" = "" ]; then
+            decide true "no usable diff range (base='$base' head='$head'); assuming code changed"
+          fi
+
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            decide true "base commit $base is not in this clone; assuming code changed"
+          fi
+
+          # Three-dot: diff against the merge base, which is what a PR actually
+          # proposes. Identical to two-dot for a linear push.
+          if ! files="$(git diff --name-only "${base}...${head}")"; then
+            decide true "git diff ${base}...${head} failed; assuming code changed"
+          fi
+
+          echo "Changed files (${base}...${head}):"
+          echo "$files" | sed 's/^/  /'
+
+          if [ -z "$files" ]; then
+            decide true "empty diff; assuming code changed"
+          fi
+
+          if echo "$files" | grep -qvE "$DOCS_ONLY_RE"; then
+            decide true "at least one changed path is outside docs/website"
+          fi
+
+          decide false "every changed path is docs or website"
