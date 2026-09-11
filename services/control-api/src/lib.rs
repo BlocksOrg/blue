@@ -6543,6 +6543,19 @@ fn validate_complete_governance(config: &gh_service::GovernanceConfig) -> Result
                     "harness `{harness}` has invalid version requirement `{requirement}`: {error}"
                 )
             })?;
+            let parsed_harness = harness
+                .parse()
+                .map_err(|error| format!("unsupported harness policy `{harness}`: {error}"))?;
+            if gh_config::supported_install(parsed_harness, policy).is_err() {
+                let action = if policy.allow_unverified_versions {
+                    "adjust the allowed range so it includes a supported harness release"
+                } else {
+                    "widen the allowed range or enable `Allow unverified versions` to accept releases beyond Blue's certified ceiling"
+                };
+                return Err(format!(
+                    "harness `{harness}` version requirement `{requirement}` includes no Blue-certified release; {action}"
+                ));
+            }
         }
     }
     let uses_version_aware_features = config
@@ -10633,7 +10646,7 @@ mod tests {
             "revision": "r1",
             "allowed_harnesses": ["codex"],
             "harnesses": {
-                "codex": { "version_requirement": ">=1.0.0, <3.0.0" }
+                "codex": { "version_requirement": ">=0.145.0, <0.151.1-0" }
             }
         }))
         .unwrap();
@@ -10648,6 +10661,31 @@ mod tests {
         let disjoint = gh_service::legacy_requirement_interval(">=3.0.0").unwrap();
         assert!(left.overlaps(&overlapping));
         assert!(!left.overlaps(&disjoint));
+    }
+
+    #[test]
+    fn harness_policy_rejects_a_range_above_the_certified_ceiling() {
+        let mut config: gh_service::GovernanceConfig = serde_json::from_value(json!({
+            "revision": "r1",
+            "allowed_harnesses": ["codex"],
+            "harnesses": {
+                "codex": { "version_requirement": ">0.151.0" }
+            }
+        }))
+        .unwrap();
+        stamp_version_aware_client_floor(&mut config);
+
+        let error = validate_complete_governance(&config).unwrap_err();
+        assert!(error.contains("includes no Blue-certified release"));
+        assert!(error.contains("enable `Allow unverified versions`"));
+
+        config
+            .harnesses
+            .get_mut("codex")
+            .unwrap()
+            .allow_unverified_versions = true;
+        stamp_version_aware_client_floor(&mut config);
+        assert!(validate_complete_governance(&config).is_ok());
     }
 
     #[test]
