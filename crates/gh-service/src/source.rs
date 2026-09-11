@@ -21,14 +21,26 @@ pub trait ConfigSource: Send + Sync {
 /// the Control API can answer a 401 with a full HTML error page.
 const MAX_DETAIL_CHARS: usize = 200;
 
-/// Trim, reject blank, and cap a server-supplied string before it reaches the
-/// user's terminal.
+/// Normalize terminal whitespace, remove control characters, reject blank,
+/// and cap a server-supplied string before it reaches the user's terminal.
 pub fn bounded_detail(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let mut detail = String::new();
+    for character in raw.trim().chars() {
+        let character = match character {
+            '\n' | '\r' | '\t' => ' ',
+            character if character.is_control() => continue,
+            character => character,
+        };
+        if detail.chars().count() == MAX_DETAIL_CHARS {
+            break;
+        }
+        detail.push(character);
+    }
+    let detail = detail.trim();
+    if detail.is_empty() {
         return None;
     }
-    Some(trimmed.chars().take(MAX_DETAIL_CHARS).collect())
+    Some(detail.to_owned())
 }
 
 /// Pull the `error` string out of the Control API's `{"error": …}` body.
@@ -47,8 +59,20 @@ pub fn session_rejected_message(forbidden: bool, detail: Option<&str>) -> String
         "your session is no longer valid"
     };
     match detail {
+        Some(detail) if forbidden => format!("{headline}: {detail}"),
         Some(detail) => format!("{headline}: {detail} (run `blue login`)"),
+        None if forbidden => headline.to_owned(),
         None => format!("{headline} (run `blue login`)"),
+    }
+}
+
+fn session_rejection(status: reqwest::StatusCode, detail: Option<&str>) -> GhError {
+    let forbidden = status == reqwest::StatusCode::FORBIDDEN;
+    let message = session_rejected_message(forbidden, detail);
+    if forbidden {
+        GhError::forbidden(message)
+    } else {
+        GhError::unauthorized(message)
     }
 }
 
@@ -101,13 +125,11 @@ impl ConfigSource for HttpConfigSource {
             // server already writes a specific message for each. Collapsing
             // them into one fixed string threw all of it away.
             let detail = server_error_detail(&resp.text().unwrap_or_default());
-            return Err(GhError::unauthorized(session_rejected_message(
-                status == reqwest::StatusCode::FORBIDDEN,
-                detail.as_deref(),
-            )));
+            return Err(session_rejection(status, detail.as_deref()));
         }
         if status == reqwest::StatusCode::UPGRADE_REQUIRED {
-            let body = resp.text().unwrap_or_default();
+            let body = bounded_detail(&resp.text().unwrap_or_default())
+                .unwrap_or_else(|| "no error detail".to_owned());
             return Err(GhError::config(format!(
                 "control service rejected this client version: {body}"
             )));
@@ -115,10 +137,13 @@ impl ConfigSource for HttpConfigSource {
         if status == reqwest::StatusCode::CONFLICT {
             // The server's 409 message names the command to run and is already
             // written for a human, so pass it through verbatim.
-            return Err(GhError::action_required(resp.text().unwrap_or_default()));
+            let detail = bounded_detail(&resp.text().unwrap_or_default())
+                .unwrap_or_else(|| "the control service requires another action".to_owned());
+            return Err(GhError::action_required(detail));
         }
         if !status.is_success() {
-            let body = resp.text().unwrap_or_default();
+            let body = bounded_detail(&resp.text().unwrap_or_default())
+                .unwrap_or_else(|| "no error detail".to_owned());
             return Err(GhError::service(format!(
                 "service returned {status} for governance-config: {body}"
             )));
@@ -201,8 +226,16 @@ mod tests {
         // A 403 is a different problem and must not claim the session expired.
         assert_eq!(
             session_rejected_message(true, Some("missing OAuth scope governance:read")),
-            "the control service refused this session: missing OAuth scope governance:read (run `blue login`)"
+            "the control service refused this session: missing OAuth scope governance:read"
         );
+        assert!(matches!(
+            session_rejection(reqwest::StatusCode::UNAUTHORIZED, None),
+            GhError::Unauthorized(_)
+        ));
+        assert!(matches!(
+            session_rejection(reqwest::StatusCode::FORBIDDEN, None),
+            GhError::Forbidden(_)
+        ));
     }
 
     #[test]
@@ -226,6 +259,15 @@ mod tests {
         let body = serde_json::json!({ "error": "x".repeat(5_000) }).to_string();
         let detail = server_error_detail(&body).unwrap();
         assert_eq!(detail.chars().count(), MAX_DETAIL_CHARS);
+    }
+
+    #[test]
+    fn terminal_controls_are_removed_from_server_details() {
+        assert_eq!(
+            bounded_detail(" first\nsecond\r\u{1b}]52;clipboard\u{7}\tlast ").as_deref(),
+            Some("first second ]52;clipboard last")
+        );
+        assert_eq!(bounded_detail("\u{1b}\u{7}"), None);
     }
 
     #[test]

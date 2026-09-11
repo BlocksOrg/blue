@@ -34,7 +34,7 @@ fn load_client() -> Result<(BlueToml, ServiceClient)> {
 /// local `file` config source (dev has no auth). HTTP sources require login.
 fn session_for(cfg: &BlueToml) -> Result<Session> {
     if let Some(mut s) = Session::load()? {
-        s.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
+        s.adopt_refresh_context(&cfg.service.url);
         match s.refresh_if_needed(now_unix()) {
             Ok(()) => return Ok(s),
             Err(error) if cfg.has_http_service() => return Err(error.into()),
@@ -45,16 +45,6 @@ fn session_for(cfg: &BlueToml) -> Result<Session> {
         bail!("not logged in — run `blue login` first");
     }
     Ok(Session::bearer(""))
-}
-
-/// The scopes `blue.toml` configures for the device flow. A `token`-mode
-/// deployment has none; `adopt_refresh_context` falls back to the defaults
-/// `device_login` would have requested.
-fn identity_scopes(cfg: &BlueToml) -> &[String] {
-    match &cfg.identity {
-        IdentityConfig::Oidc { scopes, .. } => scopes,
-        _ => &[],
-    }
 }
 
 /// Whether this deployment has a device flow at all. In `token` mode a
@@ -320,22 +310,37 @@ pub fn setup() -> Result<()> {
 }
 
 fn detach_tenant(cfg: &BlueToml) -> Result<()> {
-    let mut session = Session::load()?;
+    let session = Session::load()?;
     archive_active_tenant(cfg).context("archiving tenant state")?;
     gh_config::remove_all_managed_configuration()
         .context("removing Blue-managed agent configuration")?;
     clear_active_tenant_state().context("clearing active tenant state")?;
-    Session::remove()?;
-    if let Some(session) = session.as_mut() {
-        session.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
-        let _ = session.refresh_if_needed(now_unix());
-        if let Err(error) = session.revoke_gateway_session(&cfg.service.url) {
+    if let Some(mut session) = session {
+        session.adopt_refresh_context(&cfg.service.url);
+        let cleanup = if session
+            .expires_at
+            .is_some_and(|expires| expires <= now_unix() + 30)
+        {
+            match session.refreshed(now_unix()) {
+                Ok(refreshed) => refreshed,
+                Err(error) => {
+                    tracing::warn!(%error, "refresh failed during reset; continuing remote cleanup with the stored access token");
+                    session
+                }
+            }
+        } else {
+            session
+        };
+        if let Err(error) = cleanup.revoke_gateway_session(&cfg.service.url) {
             tracing::warn!(%error, "gateway session revocation failed during detach");
         }
-        if let Err(error) = session.revoke() {
+        if let Err(error) = cleanup.revoke() {
             tracing::warn!(%error, "remote token revocation failed; local tokens were removed");
         }
     }
+    // Always the final credential operation. In particular, a successful
+    // refresh above is never persisted and therefore cannot recreate this.
+    Session::remove()?;
     Ok(())
 }
 
@@ -372,9 +377,24 @@ fn ensure_session_for_start(cfg: &BlueToml) -> Result<Session> {
     match session_for(cfg) {
         Ok(session) => Ok(session),
         Err(error) if cfg.has_http_service() && interactive_terminal() => {
-            tracing::info!(%error, "login is missing or expired; starting device authorization");
-            Session::remove()?;
-            let session = gh_service::login(cfg).context("login")?;
+            let stored = Session::load()?;
+            let session = match stored {
+                Some(previous)
+                    if error
+                        .downcast_ref::<gh_common::GhError>()
+                        .is_some_and(|error| {
+                            matches!(error, gh_common::GhError::Unauthorized(_))
+                        }) =>
+                {
+                    tracing::info!(%error, "login is permanently expired; starting replacement authorization");
+                    reauthenticate_replacing(cfg, &previous)?
+                }
+                Some(_) => return Err(error),
+                None => {
+                    tracing::info!(%error, "login is missing; starting device authorization");
+                    gh_service::login(cfg).context("login")?
+                }
+            };
             println!("{}", describe_session(&session, "Logged in"));
             Ok(session)
         }
@@ -427,73 +447,53 @@ fn can_reauthenticate(cfg: &BlueToml) -> bool {
 fn gateway_rejected_session(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<GatewayHttpError>()
-        .is_some_and(|error| {
-            matches!(
-                error.status,
-                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-            )
-        })
+        .is_some_and(|error| matches!(error.status, reqwest::StatusCode::UNAUTHORIZED))
 }
 
-fn refresh_grant_was_superseded(previous: &Session, replacement: &Session) -> bool {
-    previous.refresh_token.is_some() && previous.refresh_token != replacement.refresh_token
-}
-
-fn retire_superseded_session_with(
-    previous: &Session,
-    replacement: &Session,
-    revoke: impl FnOnce(&Session) -> std::result::Result<(), gh_common::GhError>,
-) {
-    if refresh_grant_was_superseded(previous, replacement) {
-        if let Err(error) = revoke(previous) {
-            tracing::warn!(%error, "revoking the superseded refresh token failed");
-        }
-    }
-}
-
-/// Retire the gateway session bound to a session being replaced.
-///
-/// Revoking the refresh grant does not reach the inference JWTs already minted
-/// from it: the resolver gates on `gateway_auth_sessions.revoked_at`, and the
-/// proxy enforces `reactivated_at` as a not-before against the JWT's signed
-/// `iat`. Without this, a JWT issued before the re-login keeps buying inference
-/// until it expires — up to 12 hours — which is exactly what `--force` is
-/// documented to prevent.
-///
-/// Ordered before the browser step deliberately. `revoke_gateway_session`
-/// authenticates with the access token, so the session must still be the one on
-/// disk: `refresh_if_needed` persists, and after `gh_service::login` that file
-/// belongs to the replacement.
-fn retire_gateway_session_with(
-    cfg: &BlueToml,
-    previous: &Session,
-    revoke: impl FnOnce(&Session) -> std::result::Result<(), gh_common::GhError>,
-) {
-    // Only an OAuth session has a gateway binding; a `token`-mode credential
-    // would just collect a 401 here.
-    if !is_oidc(cfg) {
-        return;
-    }
-    let mut previous = previous.clone();
-    previous.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
-    // Best-effort: a stale access token cannot revoke, but the refresh grant
-    // below must still be retired.
-    let _ = previous.refresh_if_needed(now_unix());
-    if let Err(error) = revoke(&previous) {
-        tracing::warn!(%error, "revoking the superseded gateway session failed");
-    }
+fn retire_accessible_session_with(
+    latest: &Session,
+    revoke_gateway: impl FnOnce(&Session) -> std::result::Result<(), gh_common::GhError>,
+    revoke_refresh: impl FnOnce(&Session) -> std::result::Result<(), gh_common::GhError>,
+) -> Result<()> {
+    revoke_gateway(latest).context("revoking the previous gateway session")?;
+    revoke_refresh(latest).context("revoking the previous login")?;
+    Ok(())
 }
 
 fn reauthenticate_replacing(cfg: &BlueToml, previous: &Session) -> Result<Session> {
-    retire_gateway_session_with(cfg, previous, |session| {
-        session.revoke_gateway_session(&cfg.service.url)
-    });
-    // Persist the replacement before retiring the old grant. If the user
-    // cancels device authorization, their existing local session remains
-    // untouched; revocation failure must not discard a valid replacement.
-    let replacement = gh_service::login(cfg).context("login")?;
-    retire_superseded_session_with(previous, &replacement, Session::revoke);
-    Ok(replacement)
+    if !is_oidc(cfg) {
+        return gh_service::login(cfg).context("login");
+    }
+    let mut previous = previous.clone();
+    previous.adopt_refresh_context(&cfg.service.url);
+    match previous.refreshed(now_unix()) {
+        Ok(latest) => {
+            // Rotation spends the predecessor. Save the latest generation so
+            // a transient cleanup failure still leaves a retryable session.
+            latest.save().context("saving rotated login")?;
+            retire_accessible_session_with(
+                &latest,
+                |session| session.revoke_gateway_session(&cfg.service.url),
+                Session::revoke,
+            )?;
+            Session::remove()?;
+            let replacement = gh_service::authenticate(cfg).context("login")?;
+            replacement.save()?;
+            Ok(replacement)
+        }
+        Err(gh_service::RefreshFailure::InvalidGrant) => {
+            // The old refresh family cannot authorize its own cleanup. Try the
+            // still-cached access token against this one gateway binding, but
+            // never broaden replacement login into account-wide revocation.
+            if let Err(error) = previous.revoke_gateway_session(&cfg.service.url) {
+                eprintln!(
+                    "Warning: the previous remote gateway session could not be confirmed revoked ({error}). It will expire automatically; if the session may be compromised, ask an administrator to revoke all sessions for the account."
+                );
+            }
+            gh_service::login(cfg).context("replacement login")
+        }
+        Err(gh_service::RefreshFailure::Temporary(error)) => Err(error.into()),
+    }
 }
 
 fn prepare_launch(
@@ -521,7 +521,7 @@ fn prepare_launch(
     let config = match client.fetch_or_cached(&session, now_unix()) {
         Ok(config) => config,
         Err(error) => {
-            // The recovery `ensure_session_for_start` performs, moved to where
+            // The reauthentication `ensure_session_for_start` performs, moved to where
             // the error actually surfaces. Without it bare `blue` loops: the
             // OAuth refresh succeeds, so `session_for` returns `Ok` and the
             // rejection lands here, past the recovery point.
@@ -728,6 +728,7 @@ fn login_decision(
     match probe {
         Ok(_) => LoginDecision::Valid,
         Err(gh_common::GhError::ActionRequired(_)) => LoginDecision::ActionRequired,
+        Err(gh_common::GhError::Forbidden(_)) => LoginDecision::Rejected,
         Err(gh_common::GhError::Unauthorized(_)) if is_oidc => LoginDecision::Reauthenticate,
         Err(gh_common::GhError::Unauthorized(_)) => LoginDecision::Rejected,
         // Transport, 5xx, decode. `identity.rs` and `source.rs` both keep
@@ -762,7 +763,7 @@ pub fn login(force: bool) -> Result<()> {
         // session that could no longer refresh.
         replacement_previous = stored;
     } else if let Some(mut session) = stored {
-        session.adopt_refresh_context(&cfg.service.url, identity_scopes(&cfg));
+        session.adopt_refresh_context(&cfg.service.url);
         if session.refresh_if_needed(now_unix()).is_ok() {
             // A local clock check is exactly the check that lies here: the
             // access token refreshes for 30 days, while the browser session
@@ -835,7 +836,7 @@ pub fn logout() -> Result<()> {
     let mut session = Session::load()?;
     let gateway_revocation = session.as_mut().map(|session| {
         if let Some(cfg) = cfg.as_ref() {
-            session.adopt_refresh_context(&cfg.service.url, identity_scopes(cfg));
+            session.adopt_refresh_context(&cfg.service.url);
         }
         let _ = session.refresh_if_needed(now_unix());
         cfg.as_ref()
@@ -960,7 +961,10 @@ fn gateway_api<T: serde::de::DeserializeOwned>(
     let text = response.text().context("reading gateway access response")?;
     if !status.is_success() {
         let detail = gh_service::server_error_detail(&text);
-        let message = detail.clone().unwrap_or(text);
+        let message = detail
+            .clone()
+            .or_else(|| gh_service::bounded_detail(&text))
+            .unwrap_or_else(|| "no error detail".to_owned());
         return Err(GatewayHttpError {
             status,
             message,
@@ -1198,6 +1202,10 @@ pub(crate) fn doctor_text() -> Result<String> {
             lines.push("  session       : present".into());
             lines.push(format!("  gateway       : {message}"));
         }
+        (Some(_), _, Ok(Err(gh_common::GhError::Forbidden(message)))) => {
+            lines.push("  session       : present".into());
+            lines.push(format!("  authorization : {message}"));
+        }
         (Some(_), _, Ok(Err(_)) | Err(_)) => {
             lines.push("  session       : present".into());
             lines.push("  service       : unreachable".into());
@@ -1209,9 +1217,11 @@ pub(crate) fn doctor_text() -> Result<String> {
         Ok(Ok(config)) => Some(config),
         // Only fall back to cache for a genuine outage; an auth failure must
         // not be papered over with stale policy.
-        Ok(Err(gh_common::GhError::Unauthorized(_) | gh_common::GhError::ActionRequired(_))) => {
-            None
-        }
+        Ok(Err(
+            gh_common::GhError::Unauthorized(_)
+            | gh_common::GhError::Forbidden(_)
+            | gh_common::GhError::ActionRequired(_),
+        )) => None,
         _ => gh_service::cache::load()
             .ok()
             .flatten()
@@ -2749,7 +2759,7 @@ fn start_revision_watcher(
     // The watcher thread refreshes on its own for hours and `poll_for_revisions`
     // never sees a `BlueToml`, so the deployment context has to be attached
     // here, before the session is moved in.
-    session.adopt_refresh_context(&cfg.service.url, identity_scopes(&cfg));
+    session.adopt_refresh_context(&cfg.service.url);
     let notices = WatcherNotices::default();
     let pending_for_thread = notices.revision.clone();
     let auth_for_thread = notices.auth.clone();
@@ -2850,9 +2860,9 @@ fn poll_for_revisions(
 /// service starts answering again.
 fn record_auth_notice(error: &gh_common::GhError, auth: &Arc<Mutex<Option<String>>>) {
     let message = match error {
-        gh_common::GhError::Unauthorized(message) | gh_common::GhError::ActionRequired(message) => {
-            message.clone()
-        }
+        gh_common::GhError::Unauthorized(message)
+        | gh_common::GhError::Forbidden(message)
+        | gh_common::GhError::ActionRequired(message) => message.clone(),
         _ => return,
     };
     if let Ok(mut auth) = auth.lock() {
@@ -5374,6 +5384,13 @@ mod tests {
             ),
             LoginDecision::ActionRequired
         );
+        assert_eq!(
+            login_decision(
+                true,
+                &Err(gh_common::GhError::forbidden("account is not provisioned"))
+            ),
+            LoginDecision::Rejected
+        );
         // Transport failure, a 5xx, and an undecodable body all mean "we do
         // not know", never "log in again".
         for error in [
@@ -5385,27 +5402,17 @@ mod tests {
         }
     }
 
-    fn session_with_refresh_token(token: Option<&str>) -> Session {
-        let mut session = Session::bearer("access");
-        session.refresh_token = token.map(str::to_owned);
-        session
-    }
-
     #[test]
     fn gateway_auth_rejections_are_distinct_from_other_gateway_failures() {
-        for status in [
-            reqwest::StatusCode::UNAUTHORIZED,
-            reqwest::StatusCode::FORBIDDEN,
-        ] {
-            let error = anyhow::Error::new(GatewayHttpError {
-                status,
-                message: "rejected".into(),
-                detail: None,
-            });
-            assert!(gateway_rejected_session(&error));
-        }
+        let error = anyhow::Error::new(GatewayHttpError {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            message: "rejected".into(),
+            detail: None,
+        });
+        assert!(gateway_rejected_session(&error));
 
         for status in [
+            reqwest::StatusCode::FORBIDDEN,
             reqwest::StatusCode::BAD_REQUEST,
             reqwest::StatusCode::BAD_GATEWAY,
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
@@ -5421,87 +5428,33 @@ mod tests {
     }
 
     #[test]
-    fn superseded_refresh_grants_are_retired_best_effort() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let previous = session_with_refresh_token(Some("old-refresh"));
-        let replacement = session_with_refresh_token(Some("new-refresh"));
-        let calls = AtomicUsize::new(0);
-        retire_superseded_session_with(&previous, &replacement, |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Err(gh_common::GhError::service("revocation unavailable"))
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let unchanged = session_with_refresh_token(Some("old-refresh"));
-        retire_superseded_session_with(&previous, &unchanged, |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let without_refresh = session_with_refresh_token(None);
-        retire_superseded_session_with(&without_refresh, &replacement, |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    fn oidc_cfg() -> BlueToml {
-        let mut cfg = BlueToml::default();
-        cfg.service.url = "https://control.example.com".into();
-        cfg.identity = IdentityConfig::Oidc {
-            issuer: "https://control.example.com".into(),
-            client_id: "blue-cli".into(),
-            scopes: vec!["governance:read".into()],
-        };
-        cfg
-    }
-
-    /// The refresh grant and the gateway session are retired on different
-    /// conditions: an inference JWT outlives the grant it was minted from, so
-    /// the gateway revocation must not inherit `refresh_grant_was_superseded`.
-    ///
-    /// Every session here is `Session::bearer`, whose `expires_at` is `None` —
-    /// `refresh_if_needed` short-circuits before `save()`, so the test never
-    /// touches `session.json`.
-    #[test]
-    fn gateway_sessions_are_retired_whatever_the_refresh_grant_looks_like() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let cfg = oidc_cfg();
-        let calls = AtomicUsize::new(0);
-
-        // No refresh token to supersede, and the gateway session still dies.
-        retire_gateway_session_with(&cfg, &session_with_refresh_token(None), |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Err(gh_common::GhError::service("revocation unavailable"))
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        // A failure above is warn-only; it must not be retried or propagated.
-        retire_gateway_session_with(&cfg, &session_with_refresh_token(Some("old")), |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-
-        // `token` mode has no OAuth session behind a gateway binding, so there
-        // is nothing to revoke and no 401 worth collecting.
-        let mut token_mode = oidc_cfg();
-        token_mode.identity = IdentityConfig::Token {
-            token: "static".into(),
-        };
-        retire_gateway_session_with(
-            &token_mode,
-            &session_with_refresh_token(Some("old")),
-            |_| {
-                calls.fetch_add(1, Ordering::SeqCst);
+    fn ordinary_replacement_retires_the_rotated_generation() {
+        let mut latest = Session::bearer("access-b");
+        latest.refresh_token = Some("refresh-b".into());
+        let observed = std::cell::RefCell::new(Vec::new());
+        retire_accessible_session_with(
+            &latest,
+            |session| {
+                observed
+                    .borrow_mut()
+                    .push(("gateway", session.refresh_token.clone()));
                 Ok(())
             },
+            |session| {
+                observed
+                    .borrow_mut()
+                    .push(("refresh", session.refresh_token.clone()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            observed.into_inner(),
+            vec![
+                ("gateway", Some("refresh-b".into())),
+                ("refresh", Some("refresh-b".into()))
+            ]
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -5523,13 +5476,12 @@ mod tests {
     fn a_rejected_session_names_the_command_that_fixes_it() {
         // `blue run` hits /gateway/key/ensure before it fetches policy, so this
         // is the first place an expired session becomes visible.
-        for status in [
-            reqwest::StatusCode::UNAUTHORIZED,
-            reqwest::StatusCode::FORBIDDEN,
-        ] {
-            let message = gateway_api_error_message(status, "unauthorized", None);
-            assert!(message.contains("blue login"), "{message}");
-        }
+        let unauthorized =
+            gateway_api_error_message(reqwest::StatusCode::UNAUTHORIZED, "unauthorized", None);
+        assert!(unauthorized.contains("blue login"), "{unauthorized}");
+        let forbidden =
+            gateway_api_error_message(reqwest::StatusCode::FORBIDDEN, "forbidden", None);
+        assert!(!forbidden.contains("blue login"), "{forbidden}");
         assert!(gateway_api_error_message(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             "boom",
@@ -5891,6 +5843,15 @@ mod tests {
 
         record_auth_notice(&gh_common::GhError::unauthorized("expired"), &notice);
         assert_eq!(notice.lock().unwrap().as_deref(), Some("expired"));
+
+        record_auth_notice(
+            &gh_common::GhError::forbidden("account is not provisioned"),
+            &notice,
+        );
+        assert_eq!(
+            notice.lock().unwrap().as_deref(),
+            Some("account is not provisioned")
+        );
 
         record_auth_notice(
             &gh_common::GhError::action_required("run `blue gateway`"),

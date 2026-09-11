@@ -1204,6 +1204,41 @@ test.describe.serial("Blue deployment journey", () => {
     await expect(readFile(path.join(home, ".config", "blue", "session.json"), "utf8")).rejects.toThrow();
   });
 
+  test("declining replacement authorization leaves an ordinarily retired session signed out", async ({ page }) => {
+    const cancelledHome = await prepareClient("cancelled-session-replacement");
+    await loginAsAdmin(page);
+    const initial = await approveDeviceFlow(page, spawnCli(cancelledHome, ["login"]));
+    expect(initial.code, `${initial.stdout}\n${initial.stderr}`).toBe(0);
+
+    const replacement = spawnCli(cancelledHome, ["login", "--force"]);
+    const completion = collect(replacement);
+    const deviceUrl = await waitForOutput(replacement, deviceUrlPattern);
+    await page.goto(deviceUrl);
+    await page.getByRole("button", { name: "Deny" }).click();
+    await expect(page.getByText("Authorization denied")).toBeVisible();
+    const declined = await completion;
+    expect(declined.code).not.toBe(0);
+    await expect(
+      readFile(path.join(cancelledHome, ".config", "blue", "session.json"), "utf8"),
+    ).rejects.toThrow();
+  });
+
+  test("reset never recreates an expired local session while cleaning up", async ({ page }) => {
+    const resetHome = await prepareClient("reset-expired-session");
+    await loginAsAdmin(page);
+    const initial = await approveDeviceFlow(page, spawnCli(resetHome, ["login"]));
+    expect(initial.code, `${initial.stdout}\n${initial.stderr}`).toBe(0);
+
+    const sessionPath = path.join(resetHome, ".config", "blue", "session.json");
+    const expired = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
+    expired.expires_at = Math.floor(Date.now() / 1000) - 60;
+    await writeFile(sessionPath, JSON.stringify(expired), { mode: 0o600 });
+
+    const reset = await runCli(resetHome, ["reset", "--yes"]);
+    expect(reset.code, `${reset.stdout}\n${reset.stderr}`).toBe(0);
+    await expect(readFile(sessionPath, "utf8")).rejects.toThrow();
+  });
+
   // These tests deliberately replay a revoked token to prove the old grant is
   // dead. Better Auth treats that as theft and invalidates every refresh grant
   // for the same user/client, so keep them after all shared-session journeys.
@@ -1231,7 +1266,7 @@ test.describe.serial("Blue deployment journey", () => {
     await expectRefreshGrantRejected(page, previous);
   });
 
-  test("bare blue recovers from a gateway preflight rejection once", async ({ page }) => {
+  test("@smoke bare blue replaces a permanently invalid refresh grant after a delayed approval", async ({ page }) => {
     const recoveryHome = await prepareClient("gateway-preflight-recovery");
     await loginAsAdmin(page);
 
@@ -1243,21 +1278,48 @@ test.describe.serial("Blue deployment journey", () => {
     const sessionPath = path.join(recoveryHome, ".config", "blue", "session.json");
     const previous = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
     expect(previous.refresh_token).toBeTruthy();
-    previous.token = "locally-fresh-but-invalid-access-token";
-    previous.expires_at = Math.floor(Date.now() / 1000) + 900;
+    const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
+    const revoked = await page.request.post(`${dashboard}/api/auth/oauth2/revoke`, {
+      headers: { origin: dashboard },
+      form: {
+        token: previous.refresh_token,
+        token_type_hint: "refresh_token",
+        client_id: previous.client_id,
+      },
+    });
+    expect(revoked.status(), await revoked.text()).toBeLessThan(300);
+    previous.token = "expired-access-token-cannot-clean-up-gateway-binding";
+    previous.expires_at = Math.floor(Date.now() / 1000) - 60;
     await writeFile(sessionPath, JSON.stringify(previous), { mode: 0o600 });
 
-    const recovered = await approveDeviceFlow(page, spawnCliInPty(recoveryHome, "blue"));
+    const recovery = spawnCliInPty(recoveryHome, "blue");
+    const completion = collect(recovery);
+    const deviceUrl = await waitForOutput(recovery, deviceUrlPattern);
+    await page.goto(deviceUrl);
+    await expect(page.getByText("Confirmation code")).toBeVisible();
+    // Wait through a full five-second polling interval. The pending poll must
+    // not require a browser-session binding that only approval can create.
+    await page.waitForTimeout(6_000);
+    expect(recovery.exitCode).toBeNull();
+    await page.getByRole("button", { name: "Authorize" }).click();
+    await expect(page.getByText("CLI authorized")).toBeVisible();
+    const recovered = await completion;
     expect(recovered.code, `${recovered.stdout}\n${recovered.stderr}`).toBe(0);
     expect(recovered.stdout).toContain("fake-codex-ok");
+    const recoveryOutput = `${recovered.stdout}\n${recovered.stderr}`;
+    expect(recoveryOutput).not.toContain(
+      "Device authorization is not bound to a session",
+    );
+    expect(recoveryOutput).not.toContain(
+      "previous remote gateway session could not be confirmed revoked",
+    );
     const authorizationUrls = new Set(
-      `${recovered.stdout}\n${recovered.stderr}`.match(new RegExp(deviceUrlPattern, "g")) ?? [],
+      recoveryOutput.match(new RegExp(deviceUrlPattern, "g")) ?? [],
     );
     expect(authorizationUrls.size).toBe(1);
 
     const replacement = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
     expect(replacement.refresh_token).toBeTruthy();
     expect(replacement.refresh_token).not.toBe(previous.refresh_token);
-    await expectRefreshGrantRejected(page, previous);
   });
 });

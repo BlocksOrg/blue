@@ -201,13 +201,14 @@ impl ServiceClient {
     ) -> Result<GovernanceConfig, GhError> {
         match self.fetch(session, now) {
             Ok(cfg) => Ok(cfg),
-            // Unauthorized and ActionRequired describe something only the user
-            // can fix. Falling back to cache here is what makes an expired
-            // session look like a working one.
+            // Authentication, authorization, and action-required failures
+            // describe something only the user or administrator can fix.
+            // Falling back to cache here would hide the rejection.
             Err(
                 error @ (GhError::Config(_)
                 | GhError::Serde(_)
                 | GhError::Unauthorized(_)
+                | GhError::Forbidden(_)
                 | GhError::ActionRequired(_)),
             ) => Err(error),
             Err(fetch_err) => match cache::load() {
@@ -300,8 +301,9 @@ fn parse_revision_stream(
     Ok(())
 }
 
-/// Log in using the configured identity provider and persist the session.
-pub fn login(cfg: &BlueToml) -> Result<Session, GhError> {
+/// Complete authentication and resolve the service identity without writing
+/// `session.json`.
+pub fn authenticate(cfg: &BlueToml) -> Result<Session, GhError> {
     let mut session = match &cfg.identity {
         gh_common::client_config::IdentityConfig::Oidc {
             issuer,
@@ -327,7 +329,10 @@ pub fn login(cfg: &BlueToml) -> Result<Session, GhError> {
             role: String,
             expires_at: i64,
         }
-        let response = reqwest::blocking::Client::new()
+        let response = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|error| GhError::service(format!("building identity client: {error}")))?
             .get(endpoint)
             .bearer_auth(&session.token)
             .send()
@@ -351,6 +356,12 @@ pub fn login(cfg: &BlueToml) -> Result<Session, GhError> {
         };
         session.expires_at = Some(me.expires_at);
     }
+    Ok(session)
+}
+
+/// Log in using the configured identity provider and persist the session.
+pub fn login(cfg: &BlueToml) -> Result<Session, GhError> {
+    let session = authenticate(cfg)?;
     session.save()?;
     Ok(session)
 }
@@ -414,6 +425,16 @@ mod tests {
             .fetch_or_cached(&Session::bearer("t"), 101)
             .unwrap_err();
         assert!(matches!(error, GhError::ActionRequired(_)), "{error:?}");
+    }
+
+    #[test]
+    fn forbidden_is_never_served_from_cache() {
+        let _guard = with_cache_home("client-forbidden");
+        cache::save(&governance_only(), 100).unwrap();
+        let error = client(|| GhError::forbidden("account is not provisioned"))
+            .fetch_or_cached(&Session::bearer("t"), 101)
+            .unwrap_err();
+        assert!(matches!(error, GhError::Forbidden(_)), "{error:?}");
     }
 
     #[test]

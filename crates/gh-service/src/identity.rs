@@ -11,6 +11,18 @@ use serde::{Deserialize, Serialize};
 use gh_common::client_config::IdentityConfig;
 use gh_common::{paths, write_atomic, GhError};
 
+use crate::source::bounded_detail;
+
+/// A refresh attempt distinguishes a permanently spent credential from a
+/// failure that may succeed unchanged on retry.
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshFailure {
+    #[error("the stored refresh credential is no longer valid")]
+    InvalidGrant,
+    #[error(transparent)]
+    Temporary(#[from] GhError),
+}
+
 /// A persisted login session. The `token` is a bearer credential presented to
 /// the service; the claims drive authorization decisions server-side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,28 +144,48 @@ impl Session {
         }
     }
 
-    /// Exchange the refresh token unconditionally. Does not touch the disk.
-    pub(crate) fn refresh_now(&mut self, now: i64) -> Result<(), GhError> {
+    /// Exchange the refresh token unconditionally and return the rotated
+    /// session without touching disk.
+    pub fn refreshed(&self, now: i64) -> Result<Session, RefreshFailure> {
         let token_endpoint = self.token_endpoint.clone().ok_or_else(|| {
-            GhError::unauthorized("login cannot be refreshed — run `blue login` again")
+            RefreshFailure::Temporary(GhError::unauthorized(
+                "login cannot be refreshed — run `blue login` again",
+            ))
         })?;
-        let form = self.refresh_form()?;
+        let form = self.refresh_form().map_err(RefreshFailure::Temporary)?;
         // Every `blue` invocation reaches this through `session_for`. Without a
         // timeout a hung identity provider hangs the CLI forever.
         let response = oauth_client()?
             .post(&token_endpoint)
             .form(&form)
             .send()
-            .map_err(|error| GhError::service(format!("refresh request failed: {error}")))?;
+            .map_err(|error| {
+                RefreshFailure::Temporary(GhError::service(format!(
+                    "refresh request failed: {error}"
+                )))
+            })?;
         if !response.status().is_success() {
-            return Err(GhError::unauthorized(
-                "login expired and refresh was rejected — run `blue login` again",
-            ));
+            let status = response.status();
+            let body = response.text().map_err(|error| {
+                RefreshFailure::Temporary(GhError::service(format!(
+                    "reading refresh rejection ({status}): {error}"
+                )))
+            })?;
+            return Err(classify_refresh_rejection(status, &body));
         }
-        let tokens: TokenResponse = response
-            .json()
-            .map_err(|error| GhError::service(format!("invalid refresh response: {error}")))?;
-        self.apply_token_response(tokens, now);
+        let tokens: TokenResponse = response.json().map_err(|error| {
+            RefreshFailure::Temporary(GhError::service(format!(
+                "invalid refresh response: {error}"
+            )))
+        })?;
+        let mut refreshed = self.clone();
+        refreshed.apply_token_response(tokens, now);
+        Ok(refreshed)
+    }
+
+    /// Exchange the refresh token unconditionally. Does not touch the disk.
+    pub(crate) fn refresh_now(&mut self, now: i64) -> Result<(), GhError> {
+        *self = self.refreshed(now).map_err(refresh_failure_error)?;
         Ok(())
     }
 
@@ -169,27 +201,17 @@ impl Session {
         self.save()
     }
 
-    /// Record the resource indicator and scope a pre-0.1 `session.json`
-    /// predates, so its next refresh carries them. Never overwrites what the
-    /// grant was actually issued against.
+    /// Record the resource indicator a pre-0.1 `session.json` predates, so its
+    /// next refresh carries it. Never invent a legacy session's scope: omitting
+    /// it asks the authorization server to retain the originally granted set.
     ///
     /// The caller supplies them because only it knows the active deployment;
     /// reading `blue.toml` in here would make refreshing depend on ambient
     /// filesystem state and could send a resource this grant never named.
-    pub fn adopt_refresh_context(&mut self, resource: &str, scopes: &[String]) {
+    pub fn adopt_refresh_context(&mut self, resource: &str) {
         if self.resource.is_none() {
             if let Some(resource) = non_empty(Some(resource)) {
                 self.resource = Some(resource.to_owned());
-            }
-        }
-        if self.scope.is_none() {
-            let scopes = if scopes.is_empty() {
-                default_cli_scopes()
-            } else {
-                scopes.to_vec()
-            };
-            if !scopes.is_empty() {
-                self.scope = Some(scopes.join(" "));
             }
         }
     }
@@ -227,8 +249,9 @@ impl Session {
     }
 
     /// Revoke the gateway session bound to this OAuth access token before the
-    /// refresh grant is revoked. Failure is surfaced so callers can warn while
-    /// still removing local credentials.
+    /// refresh grant is revoked. An unauthorized response is idempotent
+    /// success: dashboard-wide revocation invalidates the bearer before a
+    /// client can confirm the gateway cleanup it already performed.
     pub fn revoke_gateway_session(&self, service_url: &str) -> Result<(), GhError> {
         if service_url.trim().is_empty() {
             return Ok(());
@@ -236,14 +259,15 @@ impl Session {
         let endpoint = reqwest::Url::parse(&format!("{}/", service_url.trim_end_matches('/')))
             .and_then(|url| url.join("gateway/session/revoke"))
             .map_err(|error| GhError::config(format!("invalid Control API URL: {error}")))?;
-        let response = reqwest::blocking::Client::new()
+        let response = oauth_client()?
             .post(endpoint)
             .bearer_auth(&self.token)
             .send()
             .map_err(|error| {
                 GhError::service(format!("gateway session revocation failed: {error}"))
             })?;
-        if response.status().is_success() {
+        if response.status().is_success() || response.status() == reqwest::StatusCode::UNAUTHORIZED
+        {
             Ok(())
         } else {
             Err(GhError::service(format!(
@@ -252,6 +276,33 @@ impl Session {
             )))
         }
     }
+}
+
+fn refresh_failure_error(error: RefreshFailure) -> GhError {
+    match error {
+        RefreshFailure::InvalidGrant => GhError::unauthorized(
+            "login expired and the refresh credential is no longer valid — run `blue login` again",
+        ),
+        RefreshFailure::Temporary(error) => error,
+    }
+}
+
+fn classify_refresh_rejection(status: reqwest::StatusCode, body: &str) -> RefreshFailure {
+    let oauth_error = serde_json::from_str::<OAuthError>(body).ok();
+    if oauth_error
+        .as_ref()
+        .is_some_and(|error| error.error == "invalid_grant")
+    {
+        return RefreshFailure::InvalidGrant;
+    }
+    let detail = oauth_error
+        .and_then(|error| error.error_description)
+        .and_then(|detail| bounded_detail(&detail))
+        .or_else(|| bounded_detail(body))
+        .unwrap_or_else(|| "no error detail".to_owned());
+    RefreshFailure::Temporary(GhError::service(format!(
+        "refresh was rejected ({status}): {detail}"
+    )))
 }
 
 #[derive(Deserialize)]
@@ -360,9 +411,10 @@ pub fn device_login(
         .send()
         .map_err(|error| GhError::service(format!("device authorization failed: {error}")))?;
     if !response.status().is_success() {
+        let detail = bounded_detail(&response.text().unwrap_or_default())
+            .unwrap_or_else(|| "no error detail".to_owned());
         return Err(GhError::service(format!(
-            "device authorization rejected: {}",
-            response.text().unwrap_or_default()
+            "device authorization rejected: {detail}"
         )));
     }
     let device: DeviceCodeResponse = response.json().map_err(|error| {
@@ -420,7 +472,7 @@ pub fn device_login(
             GhError::service(format!("reading OAuth error response ({status}): {error}"))
         })?;
         let error: OAuthError = serde_json::from_str(&body).map_err(|decode_error| {
-            let summary = body.chars().take(500).collect::<String>();
+            let summary = bounded_detail(&body).unwrap_or_else(|| "no error detail".to_owned());
             GhError::service(format!(
                 "OAuth token endpoint returned {status} with an invalid error response: {summary} ({decode_error})"
             ))
@@ -429,9 +481,12 @@ pub fn device_login(
             "authorization_pending" => {}
             "slow_down" => interval += 5,
             _ => {
-                return Err(GhError::service(
-                    error.error_description.unwrap_or(error.error),
-                ))
+                let detail = error
+                    .error_description
+                    .and_then(|detail| bounded_detail(&detail))
+                    .or_else(|| bounded_detail(&error.error))
+                    .unwrap_or_else(|| "OAuth request rejected".to_owned());
+                return Err(GhError::service(detail));
             }
         }
     }
@@ -570,7 +625,7 @@ mod tests {
     #[test]
     fn adopt_refresh_context_never_overwrites_the_issued_grant() {
         let mut session = refreshable();
-        session.adopt_refresh_context("https://other.example.com", &["openid".to_owned()]);
+        session.adopt_refresh_context("https://other.example.com");
         assert_eq!(
             session.resource.as_deref(),
             Some("https://control.example.com")
@@ -579,23 +634,28 @@ mod tests {
     }
 
     #[test]
-    fn adopt_refresh_context_backfills_a_pre_release_session() {
+    fn adopt_refresh_context_only_backfills_a_legacy_resource() {
         let mut session = refreshable();
         session.resource = None;
         session.scope = None;
-        session.adopt_refresh_context("https://control.example.com", &[]);
+        session.adopt_refresh_context("https://control.example.com");
         assert_eq!(
             session.resource.as_deref(),
             Some("https://control.example.com")
         );
-        assert_eq!(
-            session.scope.as_deref(),
-            Some(default_cli_scopes().join(" ").as_str())
+        assert_eq!(session.scope, None);
+        assert!(
+            !session
+                .refresh_form()
+                .unwrap()
+                .iter()
+                .any(|(key, _)| *key == "scope"),
+            "a legacy refresh must let the authorization server retain its original scope"
         );
 
         // A file-source deployment has no service URL to adopt.
         let mut local = Session::bearer("t");
-        local.adopt_refresh_context("", &[]);
+        local.adopt_refresh_context("");
         assert_eq!(local.resource, None);
     }
 
@@ -705,6 +765,60 @@ mod tests {
         assert_eq!(session.token, "new-access");
         assert_eq!(session.expires_at, Some(1_900));
         assert_eq!(session.scope.as_deref(), Some("openid"));
+    }
+
+    #[test]
+    fn invalid_grant_is_distinct_from_temporary_refresh_failures() {
+        let invalid = classify_refresh_rejection(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_grant","error_description":"spent"}"#,
+        );
+        assert!(
+            matches!(invalid, RefreshFailure::InvalidGrant),
+            "{invalid:?}"
+        );
+        assert!(matches!(
+            classify_refresh_rejection(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"server_error","error_description":"later"}"#
+            ),
+            RefreshFailure::Temporary(GhError::Service(_))
+        ));
+    }
+
+    #[test]
+    fn gateway_revocation_accepts_an_already_unauthorized_session() {
+        use std::io::{Read, Write};
+
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("binding mock gateway endpoint: {error}"),
+        };
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            String::from_utf8_lossy(&request[..size]).into_owned()
+        });
+
+        let session = Session::bearer("already-revoked-access-token");
+        session
+            .revoke_gateway_session(&format!("http://{address}"))
+            .unwrap();
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /gateway/session/revoke "));
+        assert!(
+            request.contains("Authorization: Bearer already-revoked-access-token")
+                || request.contains("authorization: Bearer already-revoked-access-token"),
+            "{request}"
+        );
     }
 
     #[test]

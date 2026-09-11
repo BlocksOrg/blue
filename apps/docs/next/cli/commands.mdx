@@ -12,7 +12,7 @@ The binary is named `blue`. Run `blue --help` for the arguments supported by you
 | `blue version` / `blue --version` | Print the installed Blue metaharness version. |
 | `blue setup` | Clear the stored session, reconfigure the Control API connection through deployment discovery, and complete login. |
 | `blue reset [--yes]` | Disconnect the active deployment, remove Blue-managed agent overlays, and retain non-secret tenant state for a later reconnect. |
-| `blue login [--force]` | Verify the stored session with the service and, when it is missing or rejected, complete OAuth device authorization. `--force` re-authorizes even when the session is still valid, revoking both the gateway session and the stored refresh token. |
+| `blue login [--force]` | Verify the stored session with the service and, when it is missing or rejected, complete OAuth device authorization. `--force` safely retires an accessible session before re-authorizing. An inaccessible refresh token is replaced without signing out the user's other Blue sessions. |
 | `blue logout` | Revoke the refresh family when reachable and remove local tokens. |
 | `blue doctor` | Show detected harness paths, versions, and policy allow or deny state. |
 | `blue agent [NAME]` | Choose the preferred eligible agent used by bare `blue`. |
@@ -80,7 +80,7 @@ When you confirm, Blue:
 1. Identifies the tenant by its canonical Control API URL and saves its non-secret local state in a tenant-specific archive.
 2. Retains your preferred agent, local mode preferences, governance cache, applied-state fingerprints, managed package data, merge approvals, MCP staging data, and queued session uploads.
 3. Removes Blue-owned agent overlays, managed hooks, and package projections. Personal native agent configuration and backup files remain in place.
-4. Attempts to revoke the OAuth refresh credential, always deletes the local session, and never puts credentials in the archive.
+4. Attempts bounded remote gateway and OAuth cleanup without persisting any rotated credential, then always deletes the local session even when remote cleanup reports an error. Credentials are never put in the archive.
 5. Removes the active `blue.toml` and governance cache so policy from the previous tenant cannot be used by a different tenant.
 
 Blue keeps a separate installation ID for each tenant under `~/.config/blue/identities`. Those identities, reconciliation locks, transaction data, and installed PATH shims remain in place. Reconnecting to the same tenant reuses its ID; connecting to another tenant creates a different one.

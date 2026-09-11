@@ -11,9 +11,9 @@ pub mod schema;
 pub mod source;
 
 pub use cache::CachedConfig;
-pub use client::{login, require_session, RevisionStreamEnd, ServiceClient};
+pub use client::{authenticate, login, require_session, RevisionStreamEnd, ServiceClient};
 pub use discovery::{discover, validate_deployment_url, DiscoveryDocument, DiscoveryOAuth};
-pub use identity::{default_cli_scopes, IdentityProvider, Session};
+pub use identity::{default_cli_scopes, IdentityProvider, RefreshFailure, Session};
 pub use schema::{
     legacy_requirement_interval, GatewayConfig, GovernanceConfig, HarnessPolicy, ManagedConfig,
     ManagedPackage, McpServer, PackageAdapter, PackageAdapterInterval, PackageAdapterVariant,
