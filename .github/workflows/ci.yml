@@ -9,6 +9,12 @@ permissions:
   contents: read
 
 jobs:
+  # Does this change touch anything outside docs/website? Gates `image` below.
+  changes:
+    uses: ./.github/workflows/changes.yml
+    permissions:
+      contents: read
+
   # Nothing used to lint the workflow files, which is how both e2e workflows sat
   # at a 100% `startup_failure` rate — invisible, because a startup failure posts
   # no check-run. actionlint catches the class (unknown runner labels, bad
@@ -214,6 +220,12 @@ jobs:
       - run: tar -tzf "/tmp/blue-dist/blue-deployment-v${{ steps.version.outputs.version }}.tar.gz"
 
   image:
+    needs: changes
+    # `!cancelled()` so an infra failure inside `changes` still builds the image.
+    # A failed `needs` would otherwise skip this job, and because `image` is a
+    # required check, a skipped `image` counts as a *passing* one. Fail open;
+    # never silently green.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
