@@ -207,7 +207,7 @@ impl Session {
             .map_err(|error| {
                 GhError::config(format!("invalid OAuth revocation endpoint: {error}"))
             })?;
-        let response = reqwest::blocking::Client::new()
+        let response = oauth_client()?
             .post(revoke_endpoint)
             .form(&[
                 ("token", refresh_token),

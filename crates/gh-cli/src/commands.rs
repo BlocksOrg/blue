@@ -424,16 +424,64 @@ fn can_reauthenticate(cfg: &BlueToml) -> bool {
     cfg.has_http_service() && is_oidc(cfg) && interactive_terminal()
 }
 
+fn gateway_rejected_session(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<GatewayHttpError>()
+        .is_some_and(|error| {
+            matches!(
+                error.status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            )
+        })
+}
+
+fn refresh_grant_was_superseded(previous: &Session, replacement: &Session) -> bool {
+    previous.refresh_token.is_some() && previous.refresh_token != replacement.refresh_token
+}
+
+fn retire_superseded_session_with(
+    previous: &Session,
+    replacement: &Session,
+    revoke: impl FnOnce(&Session) -> std::result::Result<(), gh_common::GhError>,
+) {
+    if refresh_grant_was_superseded(previous, replacement) {
+        if let Err(error) = revoke(previous) {
+            tracing::warn!(%error, "revoking the superseded refresh token failed");
+        }
+    }
+}
+
+fn reauthenticate_replacing(cfg: &BlueToml, previous: &Session) -> Result<Session> {
+    // Persist the replacement before retiring the old grant. If the user
+    // cancels device authorization, their existing local session remains
+    // untouched; revocation failure must not discard a valid replacement.
+    let replacement = gh_service::login(cfg).context("login")?;
+    retire_superseded_session_with(previous, &replacement, Session::revoke);
+    Ok(replacement)
+}
+
 fn prepare_launch(
     cfg: BlueToml,
     client: ServiceClient,
     mut session: Session,
 ) -> Result<PreparedLaunch> {
     let applied = load_applied_state()?;
+    let mut reauthenticated = false;
     // Gateway ensure can invalidate or replace the credential used while
     // personalizing governance config. Keep these operations ordered so the
     // config request never observes an intermediate lifecycle state.
-    ensure_gateway_access(&cfg, &session)?;
+    if let Err(error) = ensure_gateway_access(&cfg, &session) {
+        if !can_reauthenticate(&cfg) || !gateway_rejected_session(&error) {
+            return Err(error);
+        }
+        println!("{error}");
+        session = reauthenticate_replacing(&cfg, &session)?;
+        reauthenticated = true;
+        println!("{}", describe_session(&session, "Logged in"));
+        // A replacement grant that is also rejected is not repaired by
+        // opening another browser flow. Retry exactly once and surface it.
+        ensure_gateway_access(&cfg, &session)?;
+    }
     let config = match client.fetch_or_cached(&session, now_unix()) {
         Ok(config) => config,
         Err(error) => {
@@ -447,7 +495,8 @@ fn prepare_launch(
             // gateway config that cannot carry an inference token. The second
             // is an outage. Confirm against the live source — which answers
             // `Service` when it is unreachable — before opening a browser.
-            let rejected = matches!(error, gh_common::GhError::Unauthorized(_))
+            let rejected = !reauthenticated
+                && matches!(error, gh_common::GhError::Unauthorized(_))
                 && can_reauthenticate(&cfg)
                 && matches!(
                     client.fetch(&session, now_unix()),
@@ -457,7 +506,7 @@ fn prepare_launch(
                 return Err(anyhow!(error).context("fetching governance config"));
             }
             println!("{error}");
-            session = gh_service::login(&cfg).context("login")?;
+            session = reauthenticate_replacing(&cfg, &session)?;
             println!("{}", describe_session(&session, "Logged in"));
             ensure_gateway_access(&cfg, &session)?;
             client
@@ -668,6 +717,7 @@ pub fn login(force: bool) -> Result<()> {
         None
     });
 
+    let mut replacement_previous = None;
     if force {
         // Otherwise every forced re-login orphans a refresh token that stays
         // live server-side for its full lifetime. Best-effort: a user forcing
@@ -727,15 +777,21 @@ pub fn login(force: bool) -> Result<()> {
                     if let Some(Err(error)) = &probe {
                         println!("{error}");
                     }
+                    replacement_previous = Some(session);
                 }
             }
+        } else {
+            replacement_previous = Some(session);
         }
     }
 
     // Deliberately not `Session::remove()` first: a Ctrl-C during the browser
     // step would then have destroyed a session that still worked.
     // `gh_service::login` overwrites the file only once it has succeeded.
-    let session = gh_service::login(&cfg).context("login")?;
+    let session = match replacement_previous.as_ref() {
+        Some(previous) => reauthenticate_replacing(&cfg, previous)?,
+        None => gh_service::login(&cfg).context("login")?,
+    };
     println!("{}", describe_session(&session, "Logged in"));
     Ok(())
 }
@@ -5293,6 +5349,69 @@ mod tests {
         ] {
             assert_eq!(login_decision(true, &Err(error)), LoginDecision::Unverified);
         }
+    }
+
+    fn session_with_refresh_token(token: Option<&str>) -> Session {
+        let mut session = Session::bearer("access");
+        session.refresh_token = token.map(str::to_owned);
+        session
+    }
+
+    #[test]
+    fn gateway_auth_rejections_are_distinct_from_other_gateway_failures() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            let error = anyhow::Error::new(GatewayHttpError {
+                status,
+                message: "rejected".into(),
+                detail: None,
+            });
+            assert!(gateway_rejected_session(&error));
+        }
+
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let error = anyhow::Error::new(GatewayHttpError {
+                status,
+                message: "not an authentication rejection".into(),
+                detail: None,
+            });
+            assert!(!gateway_rejected_session(&error));
+        }
+        assert!(!gateway_rejected_session(&anyhow!("transport failure")));
+    }
+
+    #[test]
+    fn superseded_refresh_grants_are_retired_best_effort() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let previous = session_with_refresh_token(Some("old-refresh"));
+        let replacement = session_with_refresh_token(Some("new-refresh"));
+        let calls = AtomicUsize::new(0);
+        retire_superseded_session_with(&previous, &replacement, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(gh_common::GhError::service("revocation unavailable"))
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let unchanged = session_with_refresh_token(Some("old-refresh"));
+        retire_superseded_session_with(&previous, &unchanged, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let without_refresh = session_with_refresh_token(None);
+        retire_superseded_session_with(&without_refresh, &replacement, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
