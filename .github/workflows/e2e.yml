@@ -23,14 +23,28 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Does this change touch anything outside docs/website? Gates `build` below,
+  # and with it every suite that needs its artifact.
+  changes:
+    uses: ./.github/workflows/changes.yml
+    permissions:
+      contents: read
+
   # Authoritative one-shot build of the production image + compiled binaries.
   # Every suite below consumes its artifact instead of recompiling the workspace.
   build:
-    # Draft PRs skip every suite below, so don't pay for the image build either.
-    # The `github.event_name != 'pull_request'` half keeps the push, schedule and
-    # workflow_dispatch paths working, where `github.event.pull_request` does not
-    # exist.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: changes
+    # Two independent reasons not to build: the PR is still a draft (every suite
+    # below skips too), or nothing outside docs/website changed.
+    # The `github.event_name != 'pull_request'` half keeps the push, schedule
+    # and workflow_dispatch paths working, where `github.event.pull_request`
+    # does not exist.
+    # `!cancelled()` so an infra failure inside `changes` still builds: a failed
+    # `needs` would otherwise skip this job and, with it, every suite below.
+    if: >-
+      ${{ !cancelled()
+      && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+      && needs.changes.outputs.code != 'false' }}
     uses: ./.github/workflows/images.yml
     # Must cover every job declared in the called workflow, including the
     # registry-mode `merge` job artifact mode never reaches: GitHub validates the
