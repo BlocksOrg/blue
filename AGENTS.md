@@ -67,6 +67,32 @@ own words — no AI-generated walls of text.
 
 All PRs must be created in draft mode.
 
+### E2E while in draft
+
+Both end-to-end workflows skip while the PR is a draft — they build the
+production image and boot a full hermetic stack, so drafts don't pay for that on
+every push:
+
+| Workflow | Draft-gated job | Runs on |
+|---|---|---|
+| `e2e.yml` | `build`, `smoke` | non-draft PRs |
+| `e2e.yml` | `full` | main, nightly cron, dispatch (never on PRs) |
+| `e2e-slim.yml` | `build`, `e2e-slim-governance` | non-draft PRs |
+| `e2e-slim.yml` | `e2e-slim-gateway` | main, dispatch (never on PRs — real inference costs money) |
+
+Marking the PR ready for review triggers them (`ready_for_review` is in both
+workflows' `pull_request` type list). To get a run without leaving draft,
+dispatch the workflow against the branch from the Actions tab — `workflow_dispatch`
+bypasses the draft gate:
+
+```bash
+gh workflow run e2e.yml      --ref <branch>
+gh workflow run e2e-slim.yml --ref <branch>
+```
+
+`ci.yml` (fmt, Clippy, tests, builds, packaging) is unaffected and still runs on
+drafts.
+
 ## Conventions that bite
 
 - **`gh-config` is the only writer of agent config files.** Never write agent
