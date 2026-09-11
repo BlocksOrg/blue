@@ -2,10 +2,17 @@ name: End-to-end
 
 on:
   pull_request:
+    # `ready_for_review` is NOT in the default type set, and the jobs below skip
+    # while the PR is a draft -- without it, marking a PR ready would never
+    # trigger e2e until the next push. Every PR here starts as a draft
+    # (AGENTS.md), so this is the normal path into the suite, not an edge case.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   schedule:
     - cron: "23 8 * * *"
+  # Escape hatch: dispatch against a branch to run e2e on demand without taking
+  # the PR out of draft.
   workflow_dispatch:
 
 permissions:
@@ -19,6 +26,11 @@ jobs:
   # Authoritative one-shot build of the production image + compiled binaries.
   # Every suite below consumes its artifact instead of recompiling the workspace.
   build:
+    # Draft PRs skip every suite below, so don't pay for the image build either.
+    # The `github.event_name != 'pull_request'` half keeps the push, schedule and
+    # workflow_dispatch paths working, where `github.event.pull_request` does not
+    # exist.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     uses: ./.github/workflows/images.yml
     # Must cover every job declared in the called workflow, including the
     # registry-mode `merge` job artifact mode never reaches: GitHub validates the
@@ -33,7 +45,11 @@ jobs:
       id-token: write
 
   smoke:
-    if: github.event_name == 'pull_request'
+    # Draft PRs skip the smoke tier -- it builds the production image and boots
+    # the whole hermetic deploy stack, too expensive to pay for on every push to
+    # work in progress. Marking the PR ready for review fires `ready_for_review`
+    # (see the trigger above) and runs it.
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
