@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmod, copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import path from "node:path";
-import { collect, prepareClient, prepareEmptyClient, readClientFile, runBareCliInPty, runCli, runCliWithInput, spawnCli, spawnCliInPty, waitForOutput } from "../support/cli.js";
+import { collect, prepareClient, prepareEmptyClient, prepareRelocatedClient, readClientFile, relocatedEnv, runBareCliInPty, runCli, runCliWithInput, runCliWithoutHome, spawnCli, spawnCliInPty, stateRoot, waitForOutput } from "../support/cli.js";
 import { loginAsAdmin } from "../support/dashboard.js";
 import YAML from "yaml";
 
@@ -102,6 +102,11 @@ test.describe.serial("Blue deployment journey", () => {
   });
 
   test("@smoke dashboard login approves a real CLI device flow", async ({ page }) => {
+    // An attempt that fails *after* the CLI login succeeds leaves a valid
+    // session behind, and `blue login` then short-circuits with "Already logged
+    // in" — so every retry fails for a different reason than the first one did,
+    // and the test can never recover. Start each attempt logged out.
+    await rm(path.join(home, ".config", "blue", "session.json"), { force: true });
     await loginAsAdmin(page);
     const child = spawnCli(home, ["login"]);
     const deviceUrl = await waitForOutput(child, /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/);
@@ -709,6 +714,116 @@ test.describe.serial("Blue deployment journey", () => {
     }
     await page.goto(`/sessions/${codex.id}`);
     await expect(page.getByRole("heading", { name: "e2e-codex" })).toBeVisible();
+  });
+
+  // Kimi keeps its transcripts in Blue's managed runtime rather than a
+  // harness-native directory, so it is the one harness whose session artifacts
+  // move when the runtime does. Every other test here runs with
+  // XDG_CONFIG_HOME = $HOME/.config, where the runtime's portable wire root and
+  // its physical location coincide and the distinction cannot fail.
+  test("Kimi sessions stay portable when the managed runtime is outside $HOME", async ({ page }) => {
+    await loginAsAdmin(page);
+    const uploader = await prepareRelocatedClient("kimi-xdg-uploader");
+    for (const file of ["blue.toml", "session.json"]) {
+      await copyFile(path.join(home, ".config", "blue", file), path.join(uploader.configHome, "blue", file));
+    }
+
+    // The session lives under the *relocated* runtime, which is not under $HOME.
+    const sessionId = "e2e-kimi-xdg";
+    const sessionRoot = path.join(uploader.configHome, "blue", "runtime", "kimi", "sessions", "e2e", sessionId);
+    const transcript = path.join(sessionRoot, "agents", "main", "wire.jsonl");
+    const content = `${JSON.stringify({ role: "user", content: sessionId })}\n`;
+    await mkdir(path.dirname(transcript), { recursive: true });
+    await writeFile(transcript, content);
+    await writeFile(path.join(sessionRoot, "state.json"), JSON.stringify({ conversation: { ready: true } }));
+
+    // Capture alone is the regression: deriving the wire path by stripping $HOME
+    // yields nothing here, and the manifest contract rejects an artifact with no
+    // native destination, so this exits non-zero if the root is not portable.
+    const uploaded = await runCliWithInput(
+      uploader.home,
+      ["session-upload", "kimi"],
+      JSON.stringify({
+        session_id: sessionId,
+        transcript_path: transcript,
+        cwd: "/workspace/e2e",
+        profile: canonicalProfiles.kimi,
+      }),
+      relocatedEnv(uploader),
+    );
+    expect(uploaded.code, uploaded.stderr).toBe(0);
+
+    const listUrl = `${process.env.E2E_CONTROL_API_URL}/session-uploads?per_page=50`;
+    await expect.poll(async () => {
+      const items = (await (await page.request.get(listUrl)).json()).items as Array<{ native_session_id: string }>;
+      return items.some((item) => item.native_session_id === sessionId);
+    }, { timeout: 30_000 }).toBe(true);
+    const items = (await (await page.request.get(listUrl)).json()).items as Array<{ id: string; native_session_id: string }>;
+    const id = items.find((item) => item.native_session_id === sessionId)!.id;
+    const download = await page.request.post(`${process.env.E2E_CONTROL_API_URL}/session-uploads/${id}/download`);
+    expect(download.status()).toBe(200);
+    const stored = await page.request.get((await download.json()).download_url);
+    expect(stored.status(), await stored.text()).toBe(200);
+    const bundlePath = path.join(home, "downloads", "kimi-xdg.bundle.tgz");
+    await mkdir(path.dirname(bundlePath), { recursive: true });
+    await writeFile(bundlePath, await stored.body());
+
+    // A bundle captured from a relocated runtime restores into the default
+    // layout: the recorded root is portable, not this machine's.
+    const defaultHome = await prepareEmptyClient("kimi-xdg-restore-default");
+    const intoDefault = await runCli(defaultHome, ["session-restore", "--bundle", bundlePath]);
+    expect(intoDefault.code, intoDefault.stderr).toBe(0);
+    expect(await readClientFile(defaultHome, `.config/blue/runtime/kimi/sessions/e2e/${sessionId}/agents/main/wire.jsonl`)).toBe(content);
+
+    // And into another relocated layout, where it must follow XDG rather than
+    // the home directory the wire path nominally names.
+    const restorer = await prepareRelocatedClient("kimi-xdg-restore-relocated");
+    const intoRelocated = await runCli(restorer.home, ["session-restore", "--bundle", bundlePath], relocatedEnv(restorer));
+    expect(intoRelocated.code, intoRelocated.stderr).toBe(0);
+    expect(await readFile(path.join(restorer.configHome, "blue", "runtime", "kimi", "sessions", "e2e", sessionId, "agents", "main", "wire.jsonl"), "utf8")).toBe(content);
+    expect(await readFile(path.join(restorer.configHome, "blue", "runtime", "kimi", "session_index.jsonl"), "utf8")).toContain(sessionId);
+    await expect(stat(path.join(restorer.home, ".config", "blue", "runtime"))).rejects.toThrow();
+  });
+
+  // Restore walks a destination component by component and refuses to traverse a
+  // symlink. The walk starts at the root that authorises the path, so a
+  // dotfile-managed ~/.config no longer blocks Blue's own managed runtime — but
+  // a symlinked *native* harness root, which is how a bundle escapes the home
+  // directory, must still be refused.
+  test("session restore tolerates a symlinked managed root but not a symlinked native one", async () => {
+    const managed = await prepareEmptyClient("restore-symlinked-managed");
+    const elsewhere = path.join(stateRoot(), "restore-symlinked-managed-target");
+    await mkdir(path.join(elsewhere, "blue"), { recursive: true });
+    await rm(path.join(managed, ".config"), { recursive: true, force: true });
+    await symlink(elsewhere, path.join(managed, ".config"));
+    const kimi = await runCli(managed, ["session-restore", "--bundle", path.join(home, "downloads", "kimi.bundle.tgz"), "--preflight"]);
+    expect(kimi.code, kimi.stderr).toBe(0);
+
+    const native = await prepareEmptyClient("restore-symlinked-native");
+    await mkdir(path.join(stateRoot(), "restore-symlinked-native-target"), { recursive: true });
+    await symlink(path.join(stateRoot(), "restore-symlinked-native-target"), path.join(native, ".codex"));
+    const codex = await runCli(native, ["session-restore", "--bundle", path.join(home, "downloads", "codex.bundle.tgz"), "--preflight"]);
+    expect(codex.code).not.toBe(0);
+    expect(codex.stderr).toContain("symlink");
+  });
+
+  // `blue login` in a container that sets both XDG roots and no $HOME: the
+  // profile answers for nothing those roots do not already cover, so demanding
+  // it up front only broke the paths that were fully specified.
+  test("client paths resolve from XDG when $HOME is unset", async () => {
+    const client = await prepareRelocatedClient("homeless-client");
+    for (const file of ["blue.toml", "session.json"]) {
+      await copyFile(path.join(home, ".config", "blue", file), path.join(client.configHome, "blue", file));
+    }
+    const config = await runCliWithoutHome(client.home, ["config"], relocatedEnv(client));
+    expect(config.code, config.stderr).toBe(0);
+    expect(config.stdout).toContain("revision");
+
+    // The shim directory has no XDG override, so it still needs a profile —
+    // and says so rather than failing somewhere less obvious.
+    const doctor = await runCliWithoutHome(client.home, ["doctor"], relocatedEnv(client));
+    expect(doctor.code).not.toBe(0);
+    expect(doctor.stderr).toContain("HOME");
   });
 
   test("gateway swaps the inference JWT and records request metadata", async ({ page }) => {

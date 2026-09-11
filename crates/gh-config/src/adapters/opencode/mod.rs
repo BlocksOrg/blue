@@ -48,14 +48,14 @@ pub(crate) fn session_upload_plugin(profile: &str) -> Result<String, GhError> {
 // synthesizes both. On the first event carrying a top-level `sessionID` it runs
 // `blue session-start` to record the BLUE_SESSION_ID → native-session mapping;
 // on idle it uploads. When BLUE_SESSION_ID is set the transcript is written to a
-// stable path under the Blue config dir (and NOT deleted) so `blue run`'s
+// stable path under the Blue data dir (and NOT deleted) so `blue run`'s
 // post-exit fallback can upload it even if `session.idle` never fired.
 const SESSION_PLUGIN_TEMPLATE: &str = r#"// Managed by Blue. Changes will be overwritten.
 const BLUE_SESSION_ID = process.env.BLUE_SESSION_ID
-const BLUE_CONFIG_HOME = process.env.XDG_CONFIG_HOME || `${process.env.HOME}/.config`
+const BLUE_DATA_DIR = process.env.BLUE_DATA_DIR
 const blueTranscriptPath = (sessionID) =>
-  BLUE_SESSION_ID
-    ? `${BLUE_CONFIG_HOME}/blue/sessions/${BLUE_SESSION_ID}/opencode-transcript-${sessionID}.json`
+  BLUE_SESSION_ID && BLUE_DATA_DIR
+    ? `${BLUE_DATA_DIR}/sessions/${BLUE_SESSION_ID}/opencode-transcript-${sessionID}.json`
     : `${process.env.TMPDIR || "/tmp"}/blue-opencode-${sessionID}.json`
 
 export const BlueSessionUpload = async ({ client, directory }) => {
@@ -159,7 +159,7 @@ fn plan_v1(implementation: &Implementation, input: &ReconcileInput<'_>, packages
 }
 
 fn launch(home: &Path, wiring: Option<&GatewayWiring>, mut spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
-    let runtime = home.join(".config/blue/runtime/opencode"); let config = runtime.join("opencode.json");
+    let runtime = crate::managed_runtime_dir(home).join("opencode"); let config = runtime.join("opencode.json");
     let contents = std::fs::read_to_string(&config).map_err(|source| GhError::Io { path: config, source })?;
     spec.env.insert("OPENCODE_CONFIG_CONTENT".into(), contents); spec.env.insert("OPENCODE_CONFIG_DIR".into(), runtime.display().to_string());
     if let Some(wiring) = wiring { spec.env.insert("BLUE_OPENCODE_GATEWAY_TOKEN".into(), wiring.token.clone()); }
@@ -184,7 +184,7 @@ fn disable_auto_updates(_: &Path, spec: &mut crate::HarnessLaunchSpec) -> Result
     Ok(())
 }
 fn paths(home: &Path) -> ImplementationPaths {
-    let runtime = home.join(".config/blue/runtime/opencode");
+    let runtime = crate::managed_runtime_dir(home).join("opencode");
     ImplementationPaths {
         read_only_sources: vec![home.join(".config/opencode/opencode.json"), home.join(".local/share/opencode/auth.json"), home.join(".config/opencode/plugins/blue-session-upload.js")],
         owned_outputs: vec![runtime.join("opencode.json"), runtime.join("compatibility-state.json"), runtime.join("plugins"), runtime.join("skills"), runtime.join("agents"), runtime.join("hooks")],

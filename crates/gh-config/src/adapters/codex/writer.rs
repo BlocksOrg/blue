@@ -222,7 +222,7 @@ pub fn apply_packages(
     hooks_files: &[std::path::PathBuf],
     helpers: &std::collections::BTreeMap<String, std::path::PathBuf>,
 ) -> Result<(), GhError> {
-    let runtime = home.join(".config/blue/runtime/codex");
+    let runtime = crate::managed_runtime_dir(home).join("codex");
     let legacy_standalone_plugin = runtime.join("standalone-skills-plugin");
     if legacy_standalone_plugin.exists() {
         plan.remove(&legacy_standalone_plugin)?;

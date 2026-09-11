@@ -118,7 +118,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ShimAction {
-    /// Install shims into a directory (default: ~/.local/bin).
+    /// Install shims into a directory (default: ~/.local/bin on Unix, LocalAppData\\Blue\\bin on Windows).
     Install {
         #[arg(long)]
         dir: Option<String>,

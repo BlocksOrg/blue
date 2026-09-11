@@ -20,7 +20,10 @@ pub struct Detected {
 /// Locate `harness` on `PATH`, if installed.
 pub fn detect(harness: Harness) -> Option<Detected> {
     for name in harness.binary_names() {
-        if let Some(path) = which(name) {
+        for path in which_all(name) {
+            if is_blue_or_shim(&path) {
+                continue;
+            }
             return Some(detect_at(harness, path));
         }
     }
@@ -61,14 +64,92 @@ pub fn detect_all() -> Vec<(Harness, Option<Detected>)> {
 
 /// Minimal `which`: scan `$PATH` for an executable file named `name`.
 pub fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
+    which_all(name)
+        .into_iter()
+        .find(|path| !is_blue_or_shim(path))
+}
+
+/// Locate every matching executable in PATH order.
+pub fn which_all(name: &str) -> Vec<PathBuf> {
+    let mut matches = Vec::new();
+    let Some(path) = std::env::var_os("PATH") else {
+        return matches;
+    };
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if is_executable(&candidate) {
-            return Some(candidate);
+        for candidate in executable_candidates(&dir, name) {
+            if is_executable(&candidate) {
+                matches.push(candidate);
+            }
         }
     }
-    None
+    matches
+}
+
+#[cfg(not(windows))]
+fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
+    vec![dir.join(name)]
+}
+
+#[cfg(windows)]
+fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
+    let path = std::path::Path::new(name);
+    if path.extension().is_some() {
+        return vec![dir.join(path)];
+    }
+    let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    pathext
+        .to_string_lossy()
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| dir.join(format!("{name}{extension}")))
+        .collect()
+}
+
+fn is_blue_or_shim(path: &std::path::Path) -> bool {
+    if blue_executable().is_some_and(|current| {
+        std::fs::canonicalize(path).is_ok_and(|candidate| paths_equal(current, &candidate))
+    }) {
+        return true;
+    }
+    // Every candidate in every PATH entry reaches this point, and most of them
+    // are real binaries — `codex` among them. A shim is a short text file, so
+    // rule the rest out on size instead of reading them into memory.
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.len() <= gh_common::shim::MAX_SHIM_BYTES => {}
+        _ => return false,
+    }
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    Harness::ALL
+        .iter()
+        .copied()
+        .any(|harness| gh_common::shim::managed_shim(&contents, harness))
+}
+
+/// The canonical path of the running `blue` binary, resolved once. Detection
+/// consults it for every candidate in every PATH entry.
+fn blue_executable() -> Option<&'static std::path::Path> {
+    static EXECUTABLE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    EXECUTABLE
+        .get_or_init(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|current| std::fs::canonicalize(current).ok())
+        })
+        .as_deref()
+}
+
+#[cfg(windows)]
+fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
 }
 
 #[cfg(unix)]
@@ -99,5 +180,49 @@ mod tests {
             Some(Version::parse("2.1.0-beta.2").unwrap())
         );
         assert!(parse_version(Harness::Kimi, "unknown").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shim_shadowing_skips_both_shim_formats_without_reading_binaries() {
+        let dir = std::env::temp_dir().join(format!("blue-detect-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let current = dir.join("codex-current");
+        std::fs::write(
+            &current,
+            gh_common::shim::render_shim(
+                std::path::Path::new("/usr/local/bin/blue"),
+                Harness::Codex,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(is_blue_or_shim(&current));
+
+        let legacy = dir.join("codex-legacy");
+        std::fs::write(
+            &legacy,
+            "#!/usr/bin/env bash\n# blue shim\nexec \"/usr/local/bin/blue\" run codex -- \"$@\"\n",
+        )
+        .unwrap();
+        assert!(is_blue_or_shim(&legacy));
+
+        let unrelated = dir.join("codex-unrelated");
+        std::fs::write(&unrelated, "#!/bin/sh\nexec /usr/bin/codex \"$@\"\n").unwrap();
+        assert!(!is_blue_or_shim(&unrelated));
+
+        // A candidate past the size bound is ruled out without being read,
+        // which is the case that matters: `codex` itself is a native binary.
+        let binary = dir.join("codex-binary");
+        std::fs::write(
+            &binary,
+            vec![0_u8; gh_common::shim::MAX_SHIM_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(!is_blue_or_shim(&binary));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

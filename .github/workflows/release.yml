@@ -71,6 +71,9 @@ jobs:
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
             archive: zip
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            archive: zip
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

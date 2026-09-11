@@ -38,7 +38,7 @@ fn names(value: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
 
 pub(crate) fn kimi_current(_: &HarnessPolicy, files: &[PathBuf]) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
-    let config = find(files, ".config/blue/runtime/kimi/config.toml")
+    let config = find(files, "runtime/kimi/config.toml")
         .or_else(|| find(files, ".kimi-code/config.toml"))
         .and_then(toml);
     if let Some(config) = config {
@@ -59,14 +59,14 @@ pub(crate) fn kimi_current(_: &HarnessPolicy, files: &[PathBuf]) -> BTreeMap<Str
             values.insert("gateway".into(), value.into());
         }
     }
-    if find(files, ".config/blue/runtime/kimi/config.toml")
+    if find(files, "runtime/kimi/config.toml")
         .or_else(|| find(files, ".kimi-code/config.toml"))
         .and_then(toml)
         .is_some_and(|value| format!("{value:?}").contains("session-upload kimi"))
     {
         values.insert("session_upload_hook".into(), "enabled".into());
     }
-    if let Some(root) = find(files, ".config/blue/runtime/kimi/mcp.json")
+    if let Some(root) = find(files, "runtime/kimi/mcp.json")
         .or_else(|| find(files, ".kimi-code/mcp.json"))
         .and_then(json)
     {

@@ -22,6 +22,73 @@ pub fn create_owner_only_dir(path: &Path) -> Result<(), GhError> {
     })
 }
 
+/// Exclusively create and durably write an owner-only file. This is for
+/// immutable identities where replacing an existing destination would be a
+/// correctness bug rather than an update.
+pub fn write_owner_only_new(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), GhError> {
+    if let Some(parent) = path.parent() {
+        create_owner_only_dir_all(parent)?;
+    }
+    let mut file = create_owner_only(path).map_err(|source| GhError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let Err(source) = file
+        .write_all(contents.as_ref())
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(GhError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    sync_parent(path)
+}
+
+/// Create `path` and any missing ancestors, owner-only.
+///
+/// An existing directory is accepted even when it is reached through a symlink
+/// or a junction: a relocated `~/.local/bin` or `~/.config/blue` is ordinary
+/// dotfile-manager setup, and `std::fs::create_dir_all` — which this replaced —
+/// followed those links too. Managed configuration trees are a different
+/// matter, and are still walked by the strict, reparse-rejecting validators in
+/// `gh-config`.
+pub fn create_owner_only_dir_all(path: &Path) -> Result<(), GhError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(_) => {
+            return Err(GhError::config(format!(
+                "owner-only directory path is not a directory: {}",
+                path.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(GhError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty() && *parent != path)
+    {
+        create_owner_only_dir_all(parent)?;
+    }
+    match create_owner_only_dir(path) {
+        Ok(()) => Ok(()),
+        Err(GhError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(unix)]
 fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -31,7 +98,6 @@ fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -55,14 +121,14 @@ fn create_owner_only_dir_impl(path: &Path) -> std::io::Result<()> {
     {
         return Err(std::io::Error::last_os_error());
     }
-    let mut attributes = SECURITY_ATTRIBUTES {
+    let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = crate::paths::wide_path(path)?;
     // SAFETY: the path and security attributes remain valid for the call.
-    let created = unsafe { CreateDirectoryW(wide.as_ptr(), &mut attributes) };
+    let created = unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) };
     unsafe { LocalFree(descriptor.cast()) };
     if created == 0 {
         Err(std::io::Error::last_os_error())
@@ -225,7 +291,6 @@ fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
 
 #[cfg(windows)]
 fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::{LocalFree, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::Authorization::{
@@ -252,19 +317,19 @@ fn create_owner_only(path: &Path) -> std::io::Result<fs::File> {
     {
         return Err(std::io::Error::last_os_error());
     }
-    let mut attributes = SECURITY_ATTRIBUTES {
+    let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = crate::paths::wide_path(path)?;
     // SAFETY: all pointers remain valid for the duration of CreateFileW.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
             FILE_GENERIC_WRITE,
             0,
-            &mut attributes,
+            &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),
@@ -298,17 +363,12 @@ const REPLACE_ATTEMPTS: u32 = 12;
 
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let source = crate::paths::wide_path(source)?;
+    let destination = crate::paths::wide_path(destination)?;
     // Windows refuses the replace while anything else holds the destination
     // open: a concurrent publisher, a running harness reading its own config,
     // the search indexer, or antivirus. The window is short and the caller
@@ -478,6 +538,59 @@ mod tests {
         unsafe { LocalFree(descriptor.cast()) };
         sids.sort();
         (control & SE_DACL_PROTECTED != 0, sids)
+    }
+
+    #[test]
+    fn owner_only_writes_survive_past_the_legacy_windows_path_limit() {
+        // Raw `W` calls get no `\\?\` promotion from `std`, which caps
+        // `CreateDirectoryW` at 248 characters and `CreateFileW` at 260. A
+        // managed marketplace plugin tree crosses both on an ordinary profile,
+        // so exercise a directory, a file and a republish beyond the limit.
+        let dir = std::env::temp_dir().join(format!("gh-atomic-long-{}", std::process::id()));
+        let mut deep = dir.clone();
+        while deep.as_os_str().len() < 280 {
+            deep = deep.join("nested-directory-segment");
+        }
+        create_owner_only_dir_all(&deep).unwrap();
+        assert!(deep.is_dir(), "{}", deep.display());
+        let target = deep.join("config.json");
+        write_atomic(&target, b"hello").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
+        write_atomic(&target, b"world").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "world");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn accepts_a_directory_reached_through_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("gh-atomic-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let file = dir.join("file");
+        fs::write(&file, b"not a directory").unwrap();
+
+        // A relocated `~/.local/bin` or `~/.config/blue` is a link to a real
+        // directory; refusing it would break ordinary dotfile setups.
+        let to_dir = dir.join("link-to-dir");
+        std::os::unix::fs::symlink(&real, &to_dir).unwrap();
+        create_owner_only_dir_all(&to_dir).unwrap();
+        create_owner_only_dir_all(&to_dir.join("nested")).unwrap();
+        assert!(real.join("nested").is_dir());
+
+        // Anything that is not a directory still fails.
+        let to_file = dir.join("link-to-file");
+        std::os::unix::fs::symlink(&file, &to_file).unwrap();
+        let error = create_owner_only_dir_all(&to_file).unwrap_err().to_string();
+        assert!(error.contains("is not a directory"), "{error}");
+        assert!(create_owner_only_dir_all(&file).is_err());
+
+        let dangling = dir.join("dangling");
+        std::os::unix::fs::symlink(dir.join("missing"), &dangling).unwrap();
+        assert!(create_owner_only_dir_all(&dangling).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

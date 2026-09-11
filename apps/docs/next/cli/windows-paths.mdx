@@ -1,0 +1,31 @@
+---
+title: "Windows paths and migration"
+description: "Find Blue configuration, local state, cache data, and command shims on Windows."
+icon: "folder-tree"
+---
+
+Blue uses native Windows Known Folders. Redirected profiles and organization-managed Known Folder locations are supported; Blue does not assume they are beneath `%USERPROFILE%`.
+
+| Content | Default location |
+| --- | --- |
+| Configuration, login session, and tenant identities | `%APPDATA%\Blue` |
+| Runtime overlays, packages, reconciliation state, and session capture data | `%LOCALAPPDATA%\Blue\Data` |
+| Governance cache | `%LOCALAPPDATA%\Blue\Cache` |
+| `blue.exe` and command shims | `%LOCALAPPDATA%\Blue\bin` |
+
+An explicit `XDG_CONFIG_HOME` replaces the `%APPDATA%` parent for Blue configuration. An explicit `XDG_CACHE_HOME` replaces the cache parent. Blue still keeps machine-local runtime state beneath the Local AppData Known Folder.
+
+The PowerShell installer does not change your persistent `PATH`. Add `%LOCALAPPDATA%\Blue\bin` to your user `PATH`, then open a new terminal. Run `blue doctor` to see the resolved shim directory, its `PATH` position, and the upstream harness executables Blue detects.
+
+## Relocate legacy state
+
+Windows releases using the native layout do not read or automatically migrate `%USERPROFILE%\.config\blue`. If `blue setup` or `blue doctor` reports legacy state, close every Blue and coding-agent process before relocating files.
+
+1. Move `blue.toml`, `blue.yaml`, `session.json`, `mcp.json`, and `identities` to `%APPDATA%\Blue`.
+2. Move `runtime`, `packages`, `package-state`, `package-state.json`, `.blue-transactions`, `locks`, `applied-state.json`, `merge-approvals.json`, and session capture directories to `%LOCALAPPDATA%\Blue\Data`.
+3. Move `governance-config.json` to `%LOCALAPPDATA%\Blue\Cache`.
+4. Run `blue doctor`, then `blue apply` and `blue verify`.
+
+<Warning>
+  Do not copy junctions, symbolic links, or other reparse points into Blue-managed trees. Blue rejects them during reconciliation and session restoration.
+</Warning>

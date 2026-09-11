@@ -124,9 +124,8 @@ struct TenantArchiveManifest {
 }
 
 const TENANT_ARCHIVE_SCHEMA_VERSION: u32 = 1;
-const TENANT_CONFIG_ENTRIES: &[&str] = &[
-    "blue.toml",
-    "mcp.json",
+const TENANT_CONFIG_ENTRIES: &[&str] = &["blue.toml", "mcp.json"];
+const TENANT_DATA_ENTRIES: &[&str] = &[
     "applied-state.json",
     "merge-approvals.json",
     "packages",
@@ -146,8 +145,8 @@ fn tenant_archive_dir(url: &str) -> Result<PathBuf> {
 }
 
 fn tenant_cache_archive_dir(url: &str) -> Result<PathBuf> {
-    Ok(gh_common::paths::cache_home()?
-        .join("blue")
+    Ok(gh_common::paths::ClientPaths::resolve()?
+        .cache
         .join("tenants")
         .join(tenant_id(url)))
 }
@@ -196,11 +195,15 @@ fn archive_active_tenant(cfg: &BlueToml) -> Result<()> {
     let archive = tenant_archive_dir(url)?;
     let staging = archive.with_extension(format!("staging-{}", uuid::Uuid::new_v4()));
     let state = staging.join("state");
-    let config_root = gh_common::paths::blue_config_dir()?;
-    for entry in TENANT_CONFIG_ENTRIES {
-        let source = config_root.join(entry);
-        if source.exists() {
-            copy_owned_tree(&source, &state.join(entry))?;
+    for root in [
+        (gh_common::paths::blue_config_dir()?, TENANT_CONFIG_ENTRIES),
+        (gh_common::paths::blue_data_dir()?, TENANT_DATA_ENTRIES),
+    ] {
+        for entry in root.1 {
+            let source = root.0.join(entry);
+            if source.exists() {
+                copy_owned_tree(&source, &state.join(entry))?;
+            }
         }
     }
     gh_common::write_atomic(
@@ -232,9 +235,13 @@ fn archive_active_tenant(cfg: &BlueToml) -> Result<()> {
 }
 
 fn clear_active_tenant_state() -> Result<()> {
-    let config_root = gh_common::paths::blue_config_dir()?;
-    for entry in TENANT_CONFIG_ENTRIES {
-        remove_owned_path(&config_root.join(entry))?;
+    for (root, entries) in [
+        (gh_common::paths::blue_config_dir()?, TENANT_CONFIG_ENTRIES),
+        (gh_common::paths::blue_data_dir()?, TENANT_DATA_ENTRIES),
+    ] {
+        for entry in entries {
+            remove_owned_path(&root.join(entry))?;
+        }
     }
     remove_owned_path(&gh_common::paths::governance_cache_path()?)?;
     Ok(())
@@ -254,13 +261,17 @@ fn restore_tenant_state(discovered: &mut BlueToml) -> Result<bool> {
     let saved = BlueToml::load_from(&archive.join("state/blue.toml"))?;
     discovered.mode = saved.mode;
     discovered.ui = saved.ui;
-    let config_root = gh_common::paths::blue_config_dir()?;
-    for entry in TENANT_CONFIG_ENTRIES {
-        let source = archive.join("state").join(entry);
-        if source.exists() {
-            let destination = config_root.join(entry);
-            remove_owned_path(&destination)?;
-            copy_owned_tree(&source, &destination)?;
+    for (root, entries) in [
+        (gh_common::paths::blue_config_dir()?, TENANT_CONFIG_ENTRIES),
+        (gh_common::paths::blue_data_dir()?, TENANT_DATA_ENTRIES),
+    ] {
+        for entry in entries {
+            let source = archive.join("state").join(entry);
+            if source.exists() {
+                let destination = root.join(entry);
+                remove_owned_path(&destination)?;
+                copy_owned_tree(&source, &destination)?;
+            }
         }
     }
     let cached = tenant_cache_archive_dir(url)?.join("governance-config.json");
@@ -284,6 +295,9 @@ fn activate_discovered(mut cfg: BlueToml) -> Result<BlueToml> {
 /// Explicitly replace connection metadata. Credentials from the old
 /// deployment are removed so they can never be sent to the new one.
 pub fn setup() -> Result<()> {
+    if let Some(message) = legacy_windows_state_message()? {
+        eprintln!("{message}");
+    }
     let url = prompt_control_api_url()?;
     let mut discovered = discover_configuration(&url)?;
     let active_path = gh_common::paths::blue_toml_path()?;
@@ -1175,10 +1189,22 @@ pub fn doctor() -> Result<()> {
 }
 
 pub(crate) fn doctor_text() -> Result<String> {
+    if let Some(message) = legacy_windows_state_message()? {
+        return Ok(format!("blue doctor\n  legacy state  : {message}"));
+    }
     let (cfg, client) = load_client()?;
+    let client_paths = gh_common::paths::ClientPaths::resolve()?;
+    let shims = client_paths.shims()?;
     let mut lines = vec![
         "blue doctor".to_owned(),
         format!("  config source : {}", client.describe_source()),
+        format!("  shim directory: {}", shims.display()),
+        format!(
+            "  shim PATH     : {}",
+            path_entry_index(&shims)
+                .map(|index| format!("entry {}", index + 1))
+                .unwrap_or_else(|| "MISSING".into())
+        ),
     ];
     // A file-existence check is exactly the check that lies here: the session
     // file is still present and its access token still refreshes long after
@@ -1249,6 +1275,10 @@ pub(crate) fn doctor_text() -> Result<String> {
     lines.push(String::new());
     lines.push("Harnesses:".into());
     for (harness, detected) in gh_harness::detect_all() {
+        // `detect_all` already resolved the upstream binary, skipping any Blue
+        // shim ahead of it on PATH. Re-running `detect` below would rescan every
+        // PATH entry a second time for the same answer.
+        let upstream = detected.as_ref().map(|detected| detected.path.clone());
         let status: String;
         if let Some(d) = detected {
             let ver = d
@@ -1266,8 +1296,53 @@ pub(crate) fn doctor_text() -> Result<String> {
             None => "unknown",
         };
         lines.push(format!("  {:<9} {:<8} {}", harness.key(), policy, status));
+        let first = harness
+            .binary_names()
+            .iter()
+            .find_map(|name| gh_harness::which_all(name).into_iter().next());
+        if let (Some(first), Some(upstream)) = (first, upstream) {
+            if first != upstream {
+                lines.push(format!(
+                    "    PATH shadow : {} precedes upstream {}",
+                    first.display(),
+                    upstream.display()
+                ));
+            }
+        }
     }
     Ok(lines.join("\n"))
+}
+
+fn legacy_windows_state_message() -> Result<Option<String>> {
+    #[cfg(windows)]
+    {
+        let paths = gh_common::paths::ClientPaths::resolve()?;
+        let legacy = paths.legacy_windows_dir()?;
+        if !paths.blue_toml().exists() && legacy.exists() {
+            return Ok(Some(format!(
+                "legacy state exists at {}, but this version uses native Windows directories and will not read or migrate it; relocate files manually using /next/cli/windows-paths",
+                legacy.display()
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn path_entry_index(target: &Path) -> Option<usize> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).position(|entry| {
+        #[cfg(windows)]
+        {
+            entry
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&target.as_os_str().to_string_lossy())
+        }
+        #[cfg(not(windows))]
+        {
+            entry == target
+        }
+    })
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1345,6 +1420,14 @@ fn managed_path_fingerprint(path: &Path) -> Result<ManagedPathFingerprint> {
     if file_type.is_symlink() {
         bail!("managed path {} is a symlink", path.display());
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!("managed path {} is a reparse point", path.display());
+        }
+    }
     let kind = if file_type.is_file() {
         "file"
     } else if file_type.is_dir() {
@@ -1366,7 +1449,25 @@ fn managed_path_fingerprint(path: &Path) -> Result<ManagedPathFingerprint> {
         (Some(changed), Some(metadata.dev()), Some(metadata.ino()))
     };
     #[cfg(not(unix))]
-    let (changed_nanos, device, inode) = (None, None, None);
+    let (changed_nanos, device, inode) = {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            // `MetadataExt::volume_serial_number`/`file_index` are nightly-only
+            // (`windows_by_handle`), so the identity pair comes from
+            // `GetFileInformationByHandle` instead.
+            let identity = gh_common::fs_identity::file_identity(path);
+            (
+                Some(i128::from(metadata.last_write_time()) * 100),
+                identity.map(|(volume, _)| volume),
+                identity.map(|(_, index)| index),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            (None, None, None)
+        }
+    };
     Ok(ManagedPathFingerprint {
         path: path.to_path_buf(),
         kind: kind.to_owned(),
@@ -1395,7 +1496,6 @@ fn managed_fingerprints(paths: &[PathBuf]) -> Result<Vec<ManagedPathFingerprint>
         }
         Ok(())
     }
-
     let mut entries = BTreeMap::new();
     for path in paths {
         visit(path, &mut entries)?;
@@ -1456,7 +1556,7 @@ fn applied_harness_files_match(state: &AppliedState, harness: Harness) -> bool {
 }
 
 fn applied_state_path() -> Result<PathBuf> {
-    Ok(gh_common::paths::blue_config_dir()?.join("applied-state.json"))
+    Ok(gh_common::paths::blue_data_dir()?.join("applied-state.json"))
 }
 
 fn load_applied_state() -> Result<Option<AppliedState>> {
@@ -1666,24 +1766,11 @@ fn read_instance_id(path: &Path) -> Result<Option<String>> {
 }
 
 fn create_instance_id(path: &Path, candidate: &str) -> Result<String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating tenant identity directory {}", parent.display()))?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    match options.open(path) {
-        Ok(mut file) => {
-            file.write_all(candidate.as_bytes())?;
-            file.sync_all()?;
-            Ok(candidate.to_owned())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+    match gh_common::write_owner_only_new(path, candidate.as_bytes()) {
+        Ok(()) => Ok(candidate.to_owned()),
+        Err(gh_common::GhError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
             read_instance_id(path)?.ok_or_else(|| anyhow!("tenant instance ID disappeared"))
         }
         Err(error) => {
@@ -2628,6 +2715,10 @@ fn run_prepared(name: &str, args: &[String], prepared: PreparedLaunch) -> Result
     let session_upload_enabled = config.session_upload.is_some();
     let mut launch_env = write.env.clone();
     launch_env.insert("BLUE_SESSION_ID".into(), blue_session_id.clone());
+    launch_env.insert(
+        "BLUE_DATA_DIR".into(),
+        gh_common::paths::blue_data_dir()?.display().to_string(),
+    );
     let notices = start_revision_watcher(&cfg, session.clone(), config.revision.clone(), harness);
     let pending_notice = notices.as_ref().map(|notices| notices.revision.clone());
     // Read the deadline off the token the child is actually being handed.
@@ -2688,7 +2779,7 @@ fn run_prepared(name: &str, args: &[String], prepared: PreparedLaunch) -> Result
             }
         }
     } else {
-        gh_harness::launch(&detected_path, &launch_args, &launch_env)
+        gh_harness::launch_inherited(&detected_path, &launch_args, &launch_env)
             .context("launching harness")?
     };
     if let Some(message) =
@@ -2996,7 +3087,7 @@ struct MergeApprovals {
 }
 
 fn merge_approvals_path() -> Result<PathBuf> {
-    Ok(gh_common::paths::blue_config_dir()?.join("merge-approvals.json"))
+    Ok(gh_common::paths::blue_data_dir()?.join("merge-approvals.json"))
 }
 
 fn load_merge_approvals() -> Result<MergeApprovals> {
@@ -3536,7 +3627,7 @@ enum UploadOutcome {
 }
 
 fn session_upload_state_dir() -> Result<PathBuf> {
-    Ok(gh_common::paths::blue_config_dir()?.join("session-upload-state"))
+    Ok(gh_common::paths::blue_data_dir()?.join("session-upload-state"))
 }
 
 /// Stamp durable upload state after a successful upload. Read-merges so every
@@ -3575,7 +3666,7 @@ fn stamp_upload_state_in(dir: &Path, spool_key: &str, record: &SessionSpoolRecor
 }
 
 fn session_spool_dir() -> Result<PathBuf> {
-    Ok(gh_common::paths::blue_config_dir()?.join("session-upload-spool"))
+    Ok(gh_common::paths::blue_data_dir()?.join("session-upload-spool"))
 }
 
 /// Stable spool identity for a native session. Shared by `spool_session` and
@@ -3753,6 +3844,13 @@ fn spawn_session_upload_worker() -> Result<()> {
             });
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
     command
         .spawn()
         .context("starting detached session upload worker")?;
@@ -3782,7 +3880,7 @@ struct BlueSessionMetadata {
 }
 
 fn blue_sessions_dir() -> Result<PathBuf> {
-    Ok(gh_common::paths::blue_config_dir()?.join("sessions"))
+    Ok(gh_common::paths::blue_data_dir()?.join("sessions"))
 }
 
 fn session_metadata_path(dir: &Path, blue_session_id: &str) -> PathBuf {
@@ -4254,8 +4352,13 @@ fn prepare_kimi_session_index(
             })
             .unwrap_or(native.parent().unwrap_or(&native))
     };
-    let index = if native.starts_with(".config/blue/runtime/kimi") {
-        home.join(".config/blue/runtime/kimi/session_index.jsonl")
+    let index = if native.starts_with(gh_config::session_bundle::MANAGED_RUNTIME_ROOT) {
+        gh_config::session_bundle::native_destination(
+            home,
+            Path::new(gh_config::session_bundle::MANAGED_RUNTIME_ROOT)
+                .join("kimi/session_index.jsonl")
+                .as_path(),
+        )
     } else {
         home.join(".kimi-code/session_index.jsonl")
     };
@@ -4619,7 +4722,7 @@ fn session_bundle_sources(
     home: &Path,
 ) -> Result<Vec<gh_config::session_bundle::SessionSource>> {
     use gh_config::session_bundle::SessionSource;
-    let native = |path: &Path| path.strip_prefix(home).ok().map(Path::to_path_buf);
+    let native = |path: &Path| gh_config::session_bundle::portable_native_path(home, path);
     let mut sources = vec![SessionSource {
         role: match harness {
             Harness::Codex => "rollout",
@@ -4698,7 +4801,7 @@ fn collect_session_companions(
                 _ => "session_companion",
             }
             .into(),
-            native_path: path.strip_prefix(home).ok().map(Path::to_path_buf),
+            native_path: gh_config::session_bundle::portable_native_path(home, &path),
             source: path,
         });
     }
@@ -4880,30 +4983,47 @@ fn native_session_display(
     Ok((title.as_deref().and_then(preview_title), summary))
 }
 
-const SHIM_MARKER: &str = "# blue shim";
+use gh_common::shim::{managed_shim, render_shim, shim_path};
 
 fn shim_dir(dir: Option<&str>) -> Result<std::path::PathBuf> {
     match dir {
         Some(d) => Ok(std::path::PathBuf::from(d)),
-        None => {
-            let home = gh_common::paths::home_dir()?;
-            Ok(home.join(".local").join("bin"))
-        }
+        None => Ok(gh_common::paths::shim_dir()?),
     }
 }
 
 pub fn shim_install(dir: Option<&str>) -> Result<()> {
     let dir = shim_dir(dir)?;
-    std::fs::create_dir_all(&dir)?;
     let exe = std::env::current_exe().context("resolving blue binary path")?;
-    for harness in Harness::ALL {
-        let script = format!(
-            "#!/usr/bin/env bash\n{SHIM_MARKER}\nexec \"{}\" run {} -- \"$@\"\n",
-            exe.display(),
-            harness.key()
-        );
-        let path = dir.join(harness.key());
-        std::fs::write(&path, script)?;
+    let proposed = Harness::ALL
+        .iter()
+        .copied()
+        .map(|harness| {
+            Ok((
+                harness,
+                shim_path(&dir, harness),
+                render_shim(&exe, harness)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // This preflight is intentionally complete: a collision at the fourth
+    // destination must not leave the first three shims installed.
+    for (harness, path, _) in &proposed {
+        match std::fs::read_to_string(path) {
+            // Shims written before the format was versioned are still ours, and
+            // get overwritten in place with the current form.
+            Ok(contents) if managed_shim(&contents, *harness) => {}
+            Ok(_) => bail!(
+                "refusing to replace unrelated or malformed shim {}",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+    gh_common::create_owner_only_dir_all(&dir)?;
+    for (_, path, script) in proposed {
+        gh_common::write_atomic(&path, script.as_bytes())?;
         set_executable(&path);
         println!("  installed shim: {}", path.display());
     }
@@ -4917,9 +5037,9 @@ pub fn shim_install(dir: Option<&str>) -> Result<()> {
 pub fn shim_uninstall(dir: Option<&str>) -> Result<()> {
     let dir = shim_dir(dir)?;
     for harness in Harness::ALL {
-        let path = dir.join(harness.key());
+        let path = shim_path(&dir, harness);
         if let Ok(contents) = std::fs::read_to_string(&path) {
-            if contents.contains(SHIM_MARKER) {
+            if managed_shim(&contents, harness) {
                 std::fs::remove_file(&path)?;
                 println!("  removed shim: {}", path.display());
             } else {
@@ -4942,6 +5062,69 @@ fn set_executable(_path: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every install before the shim format was versioned wrote the legacy
+    /// form; refusing to touch it would strand those users on both `install`
+    /// and `uninstall`.
+    #[test]
+    #[cfg(unix)]
+    fn shim_install_replaces_a_legacy_shim_in_place() {
+        let root = std::env::temp_dir().join(format!("blue-shim-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = shim_path(&root, Harness::Codex);
+        std::fs::write(
+            &path,
+            "#!/usr/bin/env bash\n# blue shim\nexec \"/usr/local/bin/blue\" run codex -- \"$@\"\n",
+        )
+        .unwrap();
+
+        shim_install(root.to_str()).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            gh_common::shim::valid_managed_shim(&contents, Harness::Codex),
+            "{contents}"
+        );
+        assert!(!gh_common::shim::legacy_managed_shim(
+            &contents,
+            Harness::Codex
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shim_uninstall_removes_a_legacy_shim_but_not_a_stranger() {
+        let root =
+            std::env::temp_dir().join(format!("blue-shim-legacy-rm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = shim_path(&root, Harness::Codex);
+        std::fs::write(
+            &legacy,
+            "#!/usr/bin/env bash\n# blue shim\nexec \"/usr/local/bin/blue\" run codex -- \"$@\"\n",
+        )
+        .unwrap();
+        let stranger = shim_path(&root, Harness::Claude);
+        std::fs::write(&stranger, "#!/bin/sh\nexec /usr/bin/claude \"$@\"\n").unwrap();
+
+        shim_uninstall(root.to_str()).unwrap();
+
+        assert!(!legacy.exists());
+        assert!(stranger.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shim_install_preflights_every_destination_before_writing() {
+        let root =
+            std::env::temp_dir().join(format!("blue-shim-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let collision = shim_path(&root, Harness::Opencode);
+        std::fs::write(&collision, "unrelated").unwrap();
+        assert!(shim_install(root.to_str()).is_err());
+        assert!(!shim_path(&root, Harness::Codex).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn verified_bundle(
         harness: Harness,

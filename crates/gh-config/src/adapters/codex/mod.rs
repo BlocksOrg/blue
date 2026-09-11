@@ -160,7 +160,7 @@ fn paths(home: &Path) -> ImplementationPaths {
     }
     ImplementationPaths {
         read_only_sources: sources,
-        owned_outputs: vec![home.join(".codex/blue.config.toml"), home.join(".config/blue/runtime/codex"), home.join(".codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills")],
+        owned_outputs: vec![home.join(".codex/blue.config.toml"), crate::managed_runtime_dir(home).join("codex"), home.join(".codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills")],
         native_migrations: vec![home.join(".codex/config.toml")],
     }
 }

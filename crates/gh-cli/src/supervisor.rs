@@ -63,9 +63,9 @@ const BLUE_ASCII: [&str; 5] = [
 
 struct InputReader {
     receiver: mpsc::Receiver<Vec<u8>>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     stop: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -75,7 +75,40 @@ impl InputReader {
         {
             Self::spawn_from(std::io::stdin(), libc::STDIN_FILENO)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let stdin = std::io::stdin();
+            let input_handle = stdin.as_raw_handle() as usize;
+            let (sender, receiver) = mpsc::channel();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread_stop = stop.clone();
+            let handle = std::thread::spawn(move || {
+                use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+                use windows_sys::Win32::System::Threading::WaitForSingleObject;
+                let mut input = stdin;
+                let mut bytes = [0u8; 4096];
+                while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    if unsafe { WaitForSingleObject(input_handle as _, 20) } != WAIT_OBJECT_0 {
+                        continue;
+                    }
+                    if !console_read_would_yield(input_handle as _) {
+                        continue;
+                    }
+                    match input.read(&mut bytes) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) if sender.send(bytes[..count].to_vec()).is_err() => break,
+                        Ok(_) => {}
+                    }
+                }
+            });
+            Self {
+                receiver,
+                stop,
+                handle: Some(handle),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let (sender, receiver) = mpsc::channel();
             std::thread::spawn(move || {
@@ -142,14 +175,91 @@ impl InputReader {
     }
 
     fn stop(&mut self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             self.stop.store(true, std::sync::atomic::Ordering::Release);
+            #[cfg(unix)]
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
             }
+            // Windows deliberately detaches instead of joining. `stop` runs at
+            // every control-key interaction, not only on exit, so a reader that
+            // does end up parked in the console must never be able to freeze
+            // the UI. The thread sees the flag within one wait timeout and
+            // exits on its own.
+            #[cfg(windows)]
+            drop(self.handle.take());
         }
     }
+}
+
+/// Whether a blocking read of `handle` will return promptly.
+///
+/// A console input handle signals for *any* input record — focus changes, mouse
+/// movement, buffer resizes, key releases — but the read only returns once a
+/// record translates into bytes, so waiting alone is not a readiness signal and
+/// a naive read parks indefinitely. Discard the records that produce nothing
+/// and let the caller wait again.
+///
+/// A handle that is not a console (a pipe or a file) reports ready, because
+/// there the wait *is* the readiness signal.
+#[cfg(windows)]
+fn console_read_would_yield(handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
+    use windows_sys::Win32::System::Console::{
+        GetNumberOfConsoleInputEvents, PeekConsoleInputW, ReadConsoleInputW, INPUT_RECORD,
+    };
+    loop {
+        let mut pending = 0_u32;
+        if unsafe { GetNumberOfConsoleInputEvents(handle, &mut pending) } == 0 {
+            return true;
+        }
+        if pending == 0 {
+            return false;
+        }
+        let mut record: INPUT_RECORD = unsafe { std::mem::zeroed() };
+        let mut peeked = 0_u32;
+        if unsafe { PeekConsoleInputW(handle, &mut record, 1, &mut peeked) } == 0 || peeked == 0 {
+            return false;
+        }
+        if produces_input_bytes(&record) {
+            return true;
+        }
+        let mut discarded = 0_u32;
+        if unsafe { ReadConsoleInputW(handle, &mut record, 1, &mut discarded) } == 0
+            || discarded == 0
+        {
+            return false;
+        }
+    }
+}
+
+/// Whether the console will translate `record` into bytes on the input handle.
+#[cfg(windows)]
+fn produces_input_bytes(record: &windows_sys::Win32::System::Console::INPUT_RECORD) -> bool {
+    use windows_sys::Win32::System::Console::KEY_EVENT;
+    if u32::from(record.EventType) != KEY_EVENT {
+        return false;
+    }
+    let key = unsafe { record.Event.KeyEvent };
+    if key.bKeyDown == 0 {
+        return false;
+    }
+    // Modifier keys pressed on their own. Everything else does produce bytes,
+    // including arrows and function keys: they carry `UnicodeChar == 0` but
+    // arrive as escape sequences under `ENABLE_VIRTUAL_TERMINAL_INPUT`, so
+    // testing the character would swallow them.
+    const VK_SHIFT: u16 = 0x10;
+    const VK_CONTROL: u16 = 0x11;
+    const VK_MENU: u16 = 0x12;
+    const VK_CAPITAL: u16 = 0x14;
+    const VK_LWIN: u16 = 0x5B;
+    const VK_RWIN: u16 = 0x5C;
+    const VK_NUMLOCK: u16 = 0x90;
+    const VK_SCROLL: u16 = 0x91;
+    !matches!(
+        key.wVirtualKeyCode,
+        VK_SHIFT | VK_CONTROL | VK_MENU | VK_CAPITAL | VK_LWIN | VK_RWIN | VK_NUMLOCK | VK_SCROLL
+    )
 }
 
 impl Drop for InputReader {

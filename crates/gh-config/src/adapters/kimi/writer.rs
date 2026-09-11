@@ -24,7 +24,7 @@ pub fn write(
 ) -> Result<HarnessWrite, GhError> {
     let source_path = home.join(".kimi-code").join("config.toml");
     migrate_legacy_hook(plan, &source_path)?;
-    let runtime = home.join(".config/blue/runtime/kimi");
+    let runtime = crate::managed_runtime_dir(home).join("kimi");
     let path = runtime.join("config.toml");
     let mut table = plan.read_toml_table(&source_path)?;
 
@@ -159,7 +159,7 @@ pub fn apply_packages(
     hooks_files: &[std::path::PathBuf],
     helpers: &std::collections::BTreeMap<String, std::path::PathBuf>,
 ) -> Result<(), GhError> {
-    let runtime = home.join(".config/blue/runtime/kimi");
+    let runtime = crate::managed_runtime_dir(home).join("kimi");
     if !skills_dirs.is_empty() {
         let target = runtime.join("skills");
         plan_skills(plan, skills_dirs, &target, &mut report.files)?;

@@ -4,8 +4,11 @@ $Repository = if ($env:BLUE_REPOSITORY) { $env:BLUE_REPOSITORY } else { "BlocksO
 $InstallDir = if ($env:BLUE_INSTALL_DIR) { $env:BLUE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Blue\bin" }
 $Version = $env:BLUE_VERSION
 
-if (-not [Environment]::Is64BitOperatingSystem) {
-    throw "blue installer: only 64-bit Windows is supported"
+$Architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$Target = switch ($Architecture) {
+    "X64" { "x86_64-pc-windows-msvc" }
+    "Arm64" { "aarch64-pc-windows-msvc" }
+    default { throw "blue installer: unsupported Windows architecture $Architecture (x64 and ARM64 are supported)" }
 }
 if (-not $Version) {
     $release = Invoke-RestMethod -Headers @{ "User-Agent" = "blue-cli-installer" } `
@@ -14,7 +17,7 @@ if (-not $Version) {
 }
 if (-not $Version.StartsWith("v")) { $Version = "v$Version" }
 
-$Asset = "blue-$Version-x86_64-pc-windows-msvc.zip"
+$Asset = "blue-$Version-$Target.zip"
 $BaseUrl = "https://github.com/$Repository/releases/download/$Version"
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("blue-cli-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $TempDir | Out-Null
@@ -37,15 +40,11 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Move-Item -Force $Binary (Join-Path $InstallDir "blue.exe")
 
-    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $PathEntries = @($UserPath -split ";" | Where-Object { $_ })
-    if ($PathEntries -notcontains $InstallDir -and $env:BLUE_UPDATE_PATH -ne "0") {
-        $NewPath = (($PathEntries + $InstallDir) -join ";")
-        [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
-        $env:Path = "$env:Path;$InstallDir"
-        Write-Host "Added $InstallDir to your user PATH. Open a new terminal to use it everywhere."
-    }
     Write-Host "Installed Blue $Version to $InstallDir\blue.exe"
+    Write-Host "The installer does not modify PATH. Add this directory to your user PATH:"
+    Write-Host "  $InstallDir"
+    Write-Host "For this PowerShell session only, run:"
+    Write-Host ('  $env:Path += ";{0}"' -f $InstallDir)
 }
 finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $TempDir

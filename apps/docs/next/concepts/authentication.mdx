@@ -30,7 +30,7 @@ sequenceDiagram
 
 The browser URL contains an opaque, short-lived token rather than the user code. The page displays the code read-only for comparison with the terminal and offers explicit authorize and deny actions. If the default browser cannot be launched, the CLI prints the link and continues polling.
 
-Access tokens expire after 15 minutes. Refresh tokens rotate and are stored with the session in `~/.config/blue/session.json` using owner-only permissions. Each refresh replays the resource indicator the grant was issued against, so the renewed token keeps the same Control API audience. `blue logout` attempts remote revocation and always removes the local token file.
+Access tokens expire after 15 minutes. Refresh tokens rotate and are stored with the session in `~/.config/blue/session.json` on Unix or `%APPDATA%\Blue\session.json` on Windows using owner-only permissions. Each refresh replays the resource indicator the grant was issued against, so the renewed token keeps the same Control API audience. `blue logout` attempts remote revocation and always removes the local token file.
 
 ### Session binding and re-authorization
 

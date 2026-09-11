@@ -25,6 +25,20 @@ use serde::{Deserialize, Serialize};
 
 use transaction::FileTransaction;
 
+/// Resolve Blue's mutable data root while preserving hermetic `_at(home)` test
+/// APIs. Production callers use the native `ClientPaths` roots.
+pub(crate) fn managed_data_dir(home: &std::path::Path) -> PathBuf {
+    if paths::home_dir().is_ok_and(|current| current == home) {
+        paths::blue_data_dir().unwrap_or_else(|_| home.join(".config/blue"))
+    } else {
+        home.join(".config/blue")
+    }
+}
+
+pub(crate) fn managed_runtime_dir(home: &std::path::Path) -> PathBuf {
+    managed_data_dir(home).join("runtime")
+}
+
 pub use compat::{
     resolve as resolve_compatibility, supported_install, validate_package_adapter_for_policy,
     validate_package_adapters_for_policy, CompatibilityFailure, HarnessContext, ProfileStatus,
@@ -335,16 +349,43 @@ fn remove_all_managed_configuration_at(home: &std::path::Path) -> Result<(), GhE
     Ok(())
 }
 
+/// A managed path that passed validation, resolved against the client root that
+/// actually authorised it.
+///
+/// `home` is only one of the roots a managed path may legitimately live under:
+/// with `XDG_CONFIG_HOME` pointed outside `$HOME`, or with redirected Windows
+/// Known Folders, the config and data roots are elsewhere entirely. Callers that
+/// need to walk the path component by component must walk from `authority`,
+/// never from `home` — and must use `relative` rather than `strip_prefix`, since
+/// the Windows prefix match is case-insensitive.
+pub(crate) struct ValidatedManagedPath {
+    pub(crate) authority: PathBuf,
+    pub(crate) relative: PathBuf,
+}
+
 /// Validate each component without following links beneath the canonical home.
 pub(crate) fn validate_home_path(
     home: &std::path::Path,
     path: &std::path::Path,
     allow_final_symlink: bool,
-) -> Result<(), GhError> {
+) -> Result<ValidatedManagedPath, GhError> {
     use std::path::Component;
-    let relative = path
-        .strip_prefix(home)
-        .map_err(|_| GhError::config(format!("path escaped user home: {}", path.display())))?;
+    let mut authorities = vec![home.to_path_buf()];
+    if paths::home_dir().is_ok_and(|current| current == home) {
+        if let Ok(client) = paths::ClientPaths::resolve() {
+            authorities.extend([client.config, client.data]);
+        }
+    }
+    authorities.sort_by_key(|root| std::cmp::Reverse(root.components().count()));
+    let (authority, relative) = authorities
+        .iter()
+        .find_map(|root| relative_under(path, root).map(|relative| (root, relative)))
+        .ok_or_else(|| {
+            GhError::config(format!(
+                "path escaped declared client roots: {}",
+                path.display()
+            ))
+        })?;
     if relative.as_os_str().is_empty()
         || relative
             .components()
@@ -355,12 +396,12 @@ pub(crate) fn validate_home_path(
             path.display()
         )));
     }
-    let mut current = home.to_path_buf();
+    let mut current = authority.to_path_buf();
     let components = relative.components().collect::<Vec<_>>();
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
         match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if is_link_or_reparse(&metadata) => {
                 if !(allow_final_symlink && index + 1 == components.len()) {
                     return Err(GhError::config(format!(
                         "managed path traverses symlink: {}",
@@ -378,7 +419,50 @@ pub(crate) fn validate_home_path(
             }
         }
     }
-    Ok(())
+    Ok(ValidatedManagedPath {
+        authority: authority.clone(),
+        relative,
+    })
+}
+
+#[cfg(windows)]
+fn relative_under(path: &std::path::Path, root: &std::path::Path) -> Option<PathBuf> {
+    let path_components = path.components().collect::<Vec<_>>();
+    let root_components = root.components().collect::<Vec<_>>();
+    if root_components.len() > path_components.len()
+        || !root_components
+            .iter()
+            .zip(&path_components)
+            .all(|(left, right)| {
+                left.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+            })
+    {
+        return None;
+    }
+    Some(path_components[root_components.len()..].iter().collect())
+}
+
+#[cfg(not(windows))]
+fn relative_under(path: &std::path::Path, root: &std::path::Path) -> Option<PathBuf> {
+    path.strip_prefix(root)
+        .ok()
+        .map(std::path::Path::to_path_buf)
+}
+
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn validate_plan(
@@ -427,7 +511,7 @@ fn validate_plan(
                 path.display()
             )));
         }
-        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| is_link_or_reparse(&metadata))
             && !declared.owned_outputs.contains(path)
             && !declared.native_migrations.contains(path)
             && !previous.owned_paths.contains(path)
@@ -467,8 +551,8 @@ impl ReconcileLock {
                 harness,
             });
         }
-        let path = home
-            .join(".config/blue/locks")
+        let path = managed_data_dir(home)
+            .join("locks")
             .join(format!("{}.lock", harness.key()));
         validate_home_path(home, &path, false)?;
         if let Some(parent) = path.parent() {
@@ -638,8 +722,8 @@ impl RevisionLocks {
             locks,
         } = self;
         let mut affected = vec![
-            home.join(".config/blue/package-state.json"),
-            home.join(".config/blue/package-state"),
+            managed_data_dir(&home).join("package-state.json"),
+            managed_data_dir(&home).join("package-state"),
         ];
         let shared_state_paths = affected.len();
         for context in &contexts {
@@ -716,11 +800,27 @@ const fn compatibility_state_schema_version() -> u32 {
 fn compatibility_state_path(home: &std::path::Path, harness: Harness) -> PathBuf {
     definition_state_path(home, adapters::definition(harness))
 }
+
+/// Assert that a rendered path — an env-var value, say — names `expected`.
+///
+/// Production builds these by joining components, so on Windows they render
+/// with `\` while a test literal like `".config/blue/runtime/kimi"` keeps `/`.
+/// The two name the same file; only the strings differ. Comparing as `Path`
+/// compares components and so is separator-agnostic.
+#[cfg(test)]
+fn assert_same_path(actual: Option<&str>, expected: &std::path::Path) {
+    assert_eq!(
+        actual.map(std::path::Path::new),
+        Some(expected),
+        "expected a path naming {}",
+        expected.display()
+    );
+}
 fn definition_state_path(
     home: &std::path::Path,
     definition: &adapters::HarnessDefinition,
 ) -> PathBuf {
-    home.join(".config/blue/runtime")
+    managed_runtime_dir(home)
         .join(definition.metadata.key)
         .join("compatibility-state.json")
 }
@@ -1473,10 +1573,7 @@ mod transaction_tests {
             resolve_launch_spec_at(&home, &context, &policy, &[], None, WriteOptions::default())
                 .unwrap();
 
-        assert_eq!(
-            spec.env.get("KIMI_CODE_HOME"),
-            Some(&runtime.display().to_string())
-        );
+        assert_same_path(spec.env.get("KIMI_CODE_HOME").map(String::as_str), &runtime);
         let _ = std::fs::remove_dir_all(home);
     }
 
@@ -1619,6 +1716,85 @@ mod transaction_tests {
         assert!(!overlay.exists());
         assert!(!runtime.exists());
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Runs inside the child spawned by
+    /// `transaction_applies_to_a_data_root_outside_home`, which pins `HOME` and
+    /// `XDG_CONFIG_HOME` for the whole process.
+    #[test]
+    #[cfg(unix)]
+    fn data_root_outside_home_child_helper() {
+        let Some(root) = std::env::var_os("BLUE_DATA_ROOT_TEST_ROOT") else {
+            return;
+        };
+        let home = std::path::PathBuf::from(root).join("home");
+        let data = gh_common::paths::ClientPaths::resolve().unwrap().data;
+        assert!(
+            !data.starts_with(&home),
+            "data root {} should sit outside {}",
+            data.display(),
+            home.display()
+        );
+        let target = data.join("runtime/overlay/config.json");
+        let plan = adapters::ReconcilePlan {
+            writes: vec![adapters::PlannedFile {
+                path: target.clone(),
+                body: b"{}".to_vec(),
+                mode: Some(0o600),
+            }],
+            ..Default::default()
+        };
+        let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
+        transaction.apply(&plan).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+    }
+
+    /// `XDG_CONFIG_HOME` outside `$HOME` puts the managed data root outside the
+    /// home directory, which used to abort the ancestor walk.
+    #[test]
+    #[cfg(unix)]
+    fn transaction_applies_to_a_data_root_outside_home() {
+        let root = test_directory("blue-xdg-data-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transaction_tests::data_root_outside_home_child_helper",
+            ])
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("xdg"))
+            .env("BLUE_DATA_ROOT_TEST_ROOT", &root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(root.join("xdg/blue/runtime/overlay/config.json")).unwrap(),
+            "{}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows path comparison is case-insensitive, so a managed path spelled
+    /// differently to its authority is the same location — but `strip_prefix`
+    /// does not know that, which is why validation reports the relative path.
+    #[test]
+    #[cfg(windows)]
+    fn validate_home_path_reports_a_case_insensitive_relative_path() {
+        let home = test_directory("blue-case-home");
+        let recased = std::path::PathBuf::from(home.to_string_lossy().to_uppercase());
+        let path = recased.join("managed").join("config.json");
+        assert!(
+            path.strip_prefix(&home).is_err(),
+            "the recased path should not be a literal prefix match"
+        );
+        let validated = validate_home_path(&home, &path, false).unwrap();
+        assert_eq!(validated.authority, home);
+        assert_eq!(
+            validated.relative,
+            std::path::Path::new("managed").join("config.json")
+        );
     }
 }
 

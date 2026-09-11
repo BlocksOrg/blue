@@ -9,14 +9,21 @@
 pub mod atomic;
 pub mod client_config;
 pub mod error;
+#[cfg(windows)]
+pub mod fs_identity;
 pub mod harness;
 pub mod network;
 pub mod paths;
+pub mod shim;
 
 pub use atomic::{
-    create_owner_only_dir, prepare_atomic, prepare_atomic_in, write_atomic, write_config_atomic,
-    PreparedAtomicWrite,
+    create_owner_only_dir, create_owner_only_dir_all, prepare_atomic, prepare_atomic_in,
+    write_atomic, write_config_atomic, write_owner_only_new, PreparedAtomicWrite,
 };
 pub use client_config::{BlueToml, IdentityConfig, ModeConfig, ServiceConfig};
 pub use error::{GhError, Result};
 pub use harness::{harness_registry, ComponentRules, Harness, HarnessMetadata, InstallInvocation};
+pub use shim::{
+    legacy_managed_shim, managed_shim, render_shim, shim_path, valid_managed_shim, MAX_SHIM_BYTES,
+    SHIM_MARKER,
+};
