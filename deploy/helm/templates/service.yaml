@@ -29,7 +29,7 @@ spec:
   selector:
     {{- include "blue.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: control-api
-  ports: [{ name: gateway-internal, port: 8082, targetPort: gateway-internal }]
+  ports: [{ name: gw-internal, port: 8082, targetPort: gw-internal }]
 {{- if .Values.blue.enableInferenceProxy }}
 ---
 apiVersion: v1

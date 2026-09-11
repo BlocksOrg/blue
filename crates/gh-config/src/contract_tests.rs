@@ -185,35 +185,29 @@ fn assert_wrapped_update_controls(
     home: &Path,
     env: &BTreeMap<String, String>,
     args: &[String],
+    expected: bool,
 ) {
     match harness {
-        Harness::Codex => assert!(args
-            .windows(2)
-            .any(|pair| { pair == ["--config", "check_for_update_on_startup=false"] })),
-        Harness::Claude => assert_eq!(
-            env.get("DISABLE_AUTOUPDATER").map(String::as_str),
-            Some("1")
+        Harness::Codex => assert_eq!(
+            args.windows(2)
+                .any(|pair| { pair == ["--config", "check_for_update_on_startup=false"] }),
+            expected
         ),
+        Harness::Claude => assert_eq!(env.get("DISABLE_AUTOUPDATER").is_some(), expected),
         Harness::Kimi => {
             assert_same_path(
                 env.get("KIMI_CODE_HOME").map(String::as_str),
                 &home.join(".config/blue/runtime/kimi"),
             );
-            assert_eq!(
-                env.get("KIMI_CODE_NO_AUTO_UPDATE").map(String::as_str),
-                Some("1")
-            );
+            assert_eq!(env.get("KIMI_CODE_NO_AUTO_UPDATE").is_some(), expected);
         }
         Harness::Opencode => {
             let config: serde_json::Value =
                 serde_json::from_str(env.get("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
-            assert_eq!(config["autoupdate"], false);
+            assert_eq!(config.get("autoupdate").is_some(), expected);
             // The config key alone does not reach OpenCode's updater; only the
             // env var does.
-            assert_eq!(
-                env.get("OPENCODE_DISABLE_AUTOUPDATE").map(String::as_str),
-                Some("1")
-            );
+            assert_eq!(env.get("OPENCODE_DISABLE_AUTOUPDATE").is_some(), expected);
         }
     }
 }
@@ -399,6 +393,68 @@ fn every_production_interval_has_a_pure_golden_plan() {
                     &home,
                     &plan.env,
                     &plan.launch_args,
+                    true,
+                );
+                let capped_policy = HarnessPolicy {
+                    version_requirement: Some(format!(
+                        ">={}, <999999.0.0",
+                        registration.interval.introduced
+                    )),
+                    allow_unverified_versions: true,
+                    ..policy.clone()
+                };
+                let capped_plan = registration
+                    .implementation
+                    .plan(
+                        &ReconcileInput {
+                            home: &home,
+                            policy: &capped_policy,
+                            gateway: wiring.as_ref(),
+                            options: WriteOptions {
+                                gateway_enabled,
+                                session_upload_enabled: true,
+                                ..Default::default()
+                            },
+                            interval: &registration.interval,
+                        },
+                        &packages,
+                    )
+                    .unwrap();
+                assert_wrapped_update_controls(
+                    definition.harness,
+                    &home,
+                    &capped_plan.env,
+                    &capped_plan.launch_args,
+                    true,
+                );
+                let uncapped_policy = HarnessPolicy {
+                    version_requirement: Some(format!(">={}", registration.interval.introduced)),
+                    allow_unverified_versions: true,
+                    ..policy.clone()
+                };
+                let uncapped_plan = registration
+                    .implementation
+                    .plan(
+                        &ReconcileInput {
+                            home: &home,
+                            policy: &uncapped_policy,
+                            gateway: wiring.as_ref(),
+                            options: WriteOptions {
+                                gateway_enabled,
+                                session_upload_enabled: true,
+                                ..Default::default()
+                            },
+                            interval: &registration.interval,
+                        },
+                        &packages,
+                    )
+                    .unwrap();
+                assert_wrapped_update_controls(
+                    definition.harness,
+                    &home,
+                    &uncapped_plan.env,
+                    &uncapped_plan.launch_args,
+                    false,
                 );
                 // One fixture per interval, compared on every platform: the
                 // rendering is normalised before it is serialized, so the only
@@ -430,13 +486,51 @@ fn every_production_interval_has_a_pure_golden_plan() {
                 transaction.commit().unwrap();
                 let launch = registration
                     .implementation
-                    .launch(&home, wiring.as_ref(), HarnessLaunchSpec::default())
+                    .launch(
+                        &home,
+                        wiring.as_ref(),
+                        &policy,
+                        HarnessLaunchSpec::default(),
+                    )
                     .unwrap();
                 assert_wrapped_update_controls(
                     definition.harness,
                     &home,
                     &launch.env,
                     &launch.launch_args,
+                    true,
+                );
+                let capped_launch = registration
+                    .implementation
+                    .launch(
+                        &home,
+                        wiring.as_ref(),
+                        &capped_policy,
+                        HarnessLaunchSpec::default(),
+                    )
+                    .unwrap();
+                assert_wrapped_update_controls(
+                    definition.harness,
+                    &home,
+                    &capped_launch.env,
+                    &capped_launch.launch_args,
+                    true,
+                );
+                let uncapped_launch = registration
+                    .implementation
+                    .launch(
+                        &home,
+                        wiring.as_ref(),
+                        &uncapped_policy,
+                        HarnessLaunchSpec::default(),
+                    )
+                    .unwrap();
+                assert_wrapped_update_controls(
+                    definition.harness,
+                    &home,
+                    &uncapped_launch.env,
+                    &uncapped_launch.launch_args,
+                    false,
                 );
                 assert!(launch
                     .launch_args
@@ -751,6 +845,7 @@ impl adapters::HarnessImplementation for SyntheticImplementation {
         &self,
         home: &Path,
         _: Option<&gh_gateway::GatewayWiring>,
+        _: &HarnessPolicy,
         mut spec: HarnessLaunchSpec,
     ) -> Result<HarnessLaunchSpec, GhError> {
         if !home.join(self.directory).join("config").is_file() {

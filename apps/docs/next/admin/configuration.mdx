@@ -34,6 +34,12 @@ Do not store the deployed inference proxy URL or an inference JWT. The Control A
 
 Open **Harnesses** in the administrator sidebar. Its metadata-driven table lists the available harnesses; each row's **Edit** dialog provides an optional semantic-version range and a YAML editor scoped to that agent's `managed_config`. The server validates both before publishing them and records the minimum compatible Blue client when version pinning is enabled.
 
+Blue suppresses native harness updates when the policy has an explicit maximum
+or relies on Blue's certified release ceiling. To leave native updates enabled,
+select **Allow unverified versions** and provide an explicit range without an
+upper bound. This accepts releases beyond Blue's certification and may require
+a newer compatibility profile after a vendor change.
+
 Saving replaces only the selected agent's `managed_config` and preserves packages, MCP servers, and every other policy block. Each save uses the current base revision, so a concurrent policy change must be reloaded instead of being overwritten.
 
 ## Extensions

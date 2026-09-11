@@ -173,7 +173,9 @@ function HarnessEditDialog({
                 Optional semver range. Incompatible or unparseable installed
                 versions are blocked before Blue changes managed files. The
                 range must include a Blue-certified release unless unverified
-                versions are explicitly allowed below.
+                versions are explicitly allowed below. Native updates remain
+                enabled only when unverified versions are allowed with a range
+                that has no maximum.
               </p>
             </div>
 

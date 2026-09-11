@@ -12,7 +12,7 @@ type PluginRenderer = fn(&str) -> Result<String, GhError>;
 pub struct Operations {
     plan: fn(&Implementation, &ReconcileInput<'_>, &ResolvedPackages) -> Result<ReconcilePlan, GhError>,
     launch: fn(&Path, Option<&GatewayWiring>, crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError>,
-    launch_controls: fn(&Path, &mut crate::HarnessLaunchSpec) -> Result<(), GhError>,
+    launch_controls: fn(&Path, &HarnessPolicy, &mut crate::HarnessLaunchSpec) -> Result<(), GhError>,
     paths: fn(&Path) -> ImplementationPaths,
     native_migration_needs_review: fn(&Path, &HarnessPolicy) -> bool,
     gateway_wiring: fn(&GatewayConfig) -> Result<GatewayWiring, GhError>,
@@ -121,9 +121,9 @@ export const BlueSessionUpload = async ({ client, directory }) => {
 
 impl HarnessImplementation for Implementation {
     fn support(&self) -> &'static GenerationSupport { self.spec.support }
-    fn launch(&self, home: &Path, wiring: Option<&GatewayWiring>, spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
+    fn launch(&self, home: &Path, wiring: Option<&GatewayWiring>, policy: &HarnessPolicy, spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
         let mut spec = (self.spec.operations.launch)(home, wiring, spec)?;
-        (self.spec.operations.launch_controls)(home, &mut spec)?;
+        (self.spec.operations.launch_controls)(home, policy, &mut spec)?;
         Ok(spec)
     }
     fn session_upload_disposition(&self, input: &ReconcileInput<'_>) -> SessionUploadDisposition {
@@ -153,7 +153,7 @@ fn plan_v1(implementation: &Implementation, input: &ReconcileInput<'_>, packages
         let components = implementation.package_components(packages);
         let mut report = execute(implementation, &mut plan, input, &components)?;
         let mut launch = crate::HarnessLaunchSpec { env: report.env, launch_args: report.launch_args };
-        (implementation.spec.operations.launch_controls)(input.home, &mut launch)?;
+        (implementation.spec.operations.launch_controls)(input.home, input.policy, &mut launch)?;
         report.env = launch.env; report.launch_args = launch.launch_args;
         plan.files = report.files; plan.env = report.env; plan.launch_args = report.launch_args; plan.warnings = report.warnings; plan.normalize(); Ok(plan)
 }
@@ -173,7 +173,10 @@ fn launch(home: &Path, wiring: Option<&GatewayWiring>, mut spec: crate::HarnessL
 // off the process environment, so it is the only reliable suppression for a
 // launch Blue does not own the global config of. Keep the config key too: it
 // still governs the in-session update notice.
-fn disable_auto_updates(_: &Path, spec: &mut crate::HarnessLaunchSpec) -> Result<(), GhError> {
+fn disable_auto_updates(_: &Path, policy: &HarnessPolicy, spec: &mut crate::HarnessLaunchSpec) -> Result<(), GhError> {
+    if !crate::compat::policy_requires_update_suppression(policy)? {
+        return Ok(());
+    }
     let contents = spec
         .env
         .get("OPENCODE_CONFIG_CONTENT")

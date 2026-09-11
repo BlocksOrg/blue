@@ -1023,6 +1023,26 @@ test.describe.serial("Blue deployment journey", () => {
     const launch = await runCli(home, ["codex", "--dashboard-check"]);
     expect(launch.code, launch.stderr).toBe(0);
     expect(await readClientFile(home, ".codex/blue.config.toml")).toContain(model);
+    expect(await readClientFile(home, "agent-log/codex.env")).toContain("check_for_update_on_startup=false");
+
+    await page.getByRole("button", { name: "Actions for Codex" }).click();
+    await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Allowed harness versions").fill(">=0.0.0");
+    await page.getByLabel("Allow unverified versions").click();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    const uncappedLaunch = await runCli(home, ["codex", "--dashboard-uncapped-check"]);
+    expect(uncappedLaunch.code, uncappedLaunch.stderr).toBe(0);
+    expect(await readClientFile(home, "agent-log/codex.env")).not.toContain("check_for_update_on_startup=false");
+
+    await page.getByRole("button", { name: "Actions for Codex" }).click();
+    await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Allowed harness versions").fill(">=0.0.0, <999.0.0");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    const cappedLaunch = await runCli(home, ["codex", "--dashboard-capped-check"]);
+    expect(cappedLaunch.code, cappedLaunch.stderr).toBe(0);
+    expect(await readClientFile(home, "agent-log/codex.env")).toContain("check_for_update_on_startup=false");
   });
 
   test("administrator API supports branding and invitation lifecycle", async ({ page }) => {
