@@ -5,6 +5,7 @@ mod writer;
 pub mod v0_0_0;
 
 pub const VERSION_PROBES: &[VersionProbe] = DEFAULT_VERSION_PROBES;
+const DISABLE_AUTOUPDATE_ENV: &str = "OPENCODE_DISABLE_AUTOUPDATE";
 type PluginRenderer = fn(&str) -> Result<String, GhError>;
 
 #[derive(Debug)]
@@ -164,6 +165,14 @@ fn launch(home: &Path, wiring: Option<&GatewayWiring>, mut spec: crate::HarnessL
     if let Some(wiring) = wiring { spec.env.insert("BLUE_OPENCODE_GATEWAY_TOKEN".into(), wiring.token.clone()); }
     Ok(spec)
 }
+// OpenCode's updater reads `autoupdate` from `Config.getGlobal()`, which only
+// merges `$HOME/.config/opencode/{config,opencode}.json{,c}`. Config supplied
+// through OPENCODE_CONFIG_CONTENT lands in the per-directory "local" layer and
+// OPENCODE_CONFIG_DIR in its own layer, so neither reaches that check and the
+// managed `autoupdate: false` is silently ignored. The env var is read straight
+// off the process environment, so it is the only reliable suppression for a
+// launch Blue does not own the global config of. Keep the config key too: it
+// still governs the in-session update notice.
 fn disable_auto_updates(_: &Path, spec: &mut crate::HarnessLaunchSpec) -> Result<(), GhError> {
     let contents = spec
         .env
@@ -171,6 +180,7 @@ fn disable_auto_updates(_: &Path, spec: &mut crate::HarnessLaunchSpec) -> Result
         .ok_or_else(|| GhError::config("managed OpenCode launch config is missing"))?;
     let contents = writer::disable_autoupdate(contents)?;
     spec.env.insert("OPENCODE_CONFIG_CONTENT".into(), contents);
+    spec.env.insert(DISABLE_AUTOUPDATE_ENV.into(), "1".into());
     Ok(())
 }
 fn paths(home: &Path) -> ImplementationPaths {

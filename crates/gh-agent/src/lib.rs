@@ -399,7 +399,7 @@ pub fn reconcile_loop(
 /// not be, because nothing the daemon does will fix it.
 fn failure_backoff(error: &GhError) -> (u64, bool) {
     match error {
-        GhError::Unauthorized(_) | GhError::ActionRequired(_) => {
+        GhError::Unauthorized(_) | GhError::Forbidden(_) | GhError::ActionRequired(_) => {
             (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
         }
         _ => (GovernanceConfig::DEFAULT_TTL_SECONDS, false),
@@ -696,6 +696,10 @@ mod unauthorized_tests {
         );
         assert_eq!(
             failure_backoff(&GhError::unauthorized("your session is no longer valid")),
+            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
+        );
+        assert_eq!(
+            failure_backoff(&GhError::forbidden("account is not provisioned")),
             (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
         );
         assert_eq!(

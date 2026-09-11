@@ -4,6 +4,7 @@
     "HARNESS_PACKAGE_COMPONENTS_SETTINGS": "{\"color\":\"blue\"}",
     "OPENCODE_CONFIG_CONTENT": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"autoupdate\": false,\n  \"mcp\": {\n    \"fixture\": {\n      \"command\": [\n        \"fixture-mcp\",\n        \"--stdio\"\n      ],\n      \"enabled\": true,\n      \"type\": \"local\"\n    }\n  },\n  \"model\": \"fixture-model\",\n  \"permission\": {\n    \"bash\": \"ask\",\n    \"edit\": \"ask\",\n    \"external_directory\": \"ask\",\n    \"fetch\": \"allow\",\n    \"glob\": \"allow\",\n    \"grep\": \"allow\",\n    \"list\": \"allow\",\n    \"mcp\": \"allow\",\n    \"question\": \"deny\",\n    \"read\": \"allow\",\n    \"skill\": \"allow\",\n    \"task\": \"allow\",\n    \"todoread\": \"allow\",\n    \"todowrite\": \"allow\",\n    \"write\": \"ask\"\n  }\n}\n",
     "OPENCODE_CONFIG_DIR": "$HOME/.config/blue/runtime/opencode",
+    "OPENCODE_DISABLE_AUTOUPDATE": "1",
     "PATH": "$HOME/package/bin:$PATH"
   },
   "files": [

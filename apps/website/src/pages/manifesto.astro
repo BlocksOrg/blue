@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
-import BrandMark from "../components/BrandMark.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+import SiteFooter from "../components/SiteFooter.astro";
 
 const docsBase = "https://docs.bluee.sh/next";
 const github = "https://github.com/BlocksOrg/blue";
@@ -19,13 +20,13 @@ const governanceGaps = [
   },
   {
     number: "03",
-    title: "Gateway keys spread to endpoints",
-    body: "Without an identity-aware exchange, virtual keys are copied into local agent configuration. Long-lived credentials then remain in plaintext on developer machines.",
+    title: "Gateway keys sit in plaintext on developer machines",
+    body: "Without an identity-aware exchange, virtual keys are copied into local agent configuration. Those long-lived credentials then sit unencrypted on every machine that uses them, long after the session that needed them.",
   },
   {
     number: "04",
-    title: "Usage loses its work context",
-    body: "A gateway sees the user, model, and client, but not the local repository, working directory, commit, or Jira, Linear, or GitHub work item behind a session.",
+    title: "A gateway alone cannot attribute usage to work",
+    body: "A gateway sees the user, model, and client, but not the local repository, working directory, commit, or Jira, Linear, or GitHub work item behind a session. Capturing that requires a layer closer to the developer.",
   },
 ];
 ---
@@ -34,18 +35,7 @@ const governanceGaps = [
   title="Why a metaharness? | Blue"
   description="The governance problems that appear when organizations use multiple coding agents, model providers, and inference systems."
 >
-  <header class="site-header">
-    <a class="brand" href="/" aria-label="Blue home">
-      <BrandMark size={32} />
-    </a>
-    <nav aria-label="Primary navigation">
-      <a href="/#product">Product</a>
-      <a href="/#how-it-works">How it works</a>
-      <a href="/manifesto" aria-current="page">Why Blue</a>
-      <a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a>
-      <a class="nav-github" href={github} {...externalLinkProps}>GitHub <span class="link-caret" aria-hidden="true"></span></a>
-    </nav>
-  </header>
+  <SiteHeader current="manifesto" />
 
   <main id="main-content" class="manifesto-page">
     <article>
@@ -132,7 +122,7 @@ const governanceGaps = [
           <li><strong>Attach policy to identity.</strong> Governance should follow a person across supported machines instead of depending only on device enrollment.</li>
           <li><strong>Keep long-lived credentials off clients.</strong> Short-lived session tokens should stand between developer machines and server-held gateway keys.</li>
           <li><strong>Keep gateway routing optional.</strong> Configuration governance should still work when agents connect directly to their providers.</li>
-          <li><strong>State the limit clearly.</strong> Configuration governance is not an operating-system sandbox. A user who bypasses the shared entry point also bypasses its managed launch.</li>
+          <li><strong>Deliver extensions from one control plane.</strong> Plugins, skills, hooks, MCP servers, and helper binaries should reach every client from a single catalog, instead of being installed and updated machine by machine.</li>
         </ol>
       </section>
 
@@ -140,9 +130,6 @@ const governanceGaps = [
         <h2>Blue’s approach</h2>
         <p>
           Blue is an open-source, self-hosted implementation of this metaharness pattern. It wraps supported native CLIs, authenticates the developer, fetches organization policy, checks version compatibility, prepares managed configuration for the launch, and then passes control to the selected agent.
-        </p>
-        <p>
-          Its gateway mode uses session-bound inference tokens while keeping upstream credentials on the server. Its request model includes repository, branch, commit, working-state, and run fields. Explicit Jira, Linear, and GitHub work-item binding is not implemented yet.
         </p>
         <p class="manifesto-final-line">The aim is a common administrative layer for organizations that no longer use one coding-agent ecosystem.</p>
         <div class="actions">
@@ -153,31 +140,5 @@ const governanceGaps = [
     </article>
   </main>
 
-  <footer id="footer" class="manifesto-footer">
-    <div class="footer-columns">
-      <div class="footer-links">
-        <div class="footer-column">
-          <h4>Product</h4>
-          <ul><li><a href="/manifesto">Why Blue</a></li><li><a href={`${docsBase}/introduction`} {...externalLinkProps}>Overview</a></li><li><a href={`${docsBase}/quickstart`} {...externalLinkProps}>Quickstart</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Concepts</h4>
-          <ul><li><a href={`${docsBase}/concepts/architecture`} {...externalLinkProps}>Architecture</a></li><li><a href={`${docsBase}/concepts/configuration`} {...externalLinkProps}>Configuration</a></li><li><a href={`${docsBase}/concepts/gateway-mode`} {...externalLinkProps}>Gateway mode</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Project</h4>
-          <ul><li><a href={github} {...externalLinkProps}>GitHub</a></li><li><a href={`${github}/releases`} {...externalLinkProps}>Releases</a></li><li><a href={`${github}/blob/main/CONTRIBUTING.md`} {...externalLinkProps}>Contributing</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Trust</h4>
-          <ul><li><a href={`${github}/blob/main/SECURITY.md`} {...externalLinkProps}>Security</a></li><li><a href={`${github}/blob/main/LICENSE`} {...externalLinkProps}>MIT License</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Connect</h4>
-          <ul><li><a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a></li><li><a href="https://blocks.team" {...externalLinkProps}>Blocks</a></li></ul>
-        </div>
-      </div>
-    </div>
-    <div class="footer-copyright"><span>Blue, an open-source project from Blocks.</span></div>
-  </footer>
+  <SiteFooter class="manifesto-footer" />
 </BaseLayout>

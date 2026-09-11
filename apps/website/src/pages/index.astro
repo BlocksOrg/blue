@@ -1,6 +1,7 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
-import BrandMark from "../components/BrandMark.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+import SiteFooter from "../components/SiteFooter.astro";
 import FeatureShowcase from "../components/FeatureShowcase.astro";
 import Terminal from "../components/Terminal.astro";
 
@@ -71,19 +72,7 @@ const capabilities = [
   title="Blue | One harness to rule them all"
   description="Open-source governance for Codex, Claude Code, Kimi Code, and OpenCode without changing the native developer experience."
 >
-  <header class="site-header">
-    <a class="brand" href="#top" aria-label="Blue home">
-      <BrandMark size={32} />
-    </a>
-    <nav aria-label="Primary navigation">
-      <a href="#product">Product</a>
-      <a href="#how-it-works">How it works</a>
-      <a href="#capabilities">Capabilities</a>
-      <a href="/manifesto">Why Blue</a>
-      <a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a>
-      <a class="nav-github" href={github} {...externalLinkProps}>GitHub <span class="link-caret" aria-hidden="true"></span></a>
-    </nav>
-  </header>
+  <SiteHeader />
 
   <main id="main-content">
     <section class="hero" id="top">
@@ -97,7 +86,7 @@ const capabilities = [
       </p>
       <div class="actions reveal reveal-delay-4">
         <a class="button button-primary" href={`${docsBase}/quickstart`} {...externalLinkProps}>Get started</a>
-        <a class="text-link" href="/manifesto">Why Blue <span class="link-caret" aria-hidden="true"></span></a>
+        <a class="text-link" href="/manifesto/">Why Blue <span class="link-caret" aria-hidden="true"></span></a>
       </div>
     </section>
 
@@ -209,35 +198,7 @@ const capabilities = [
     </section>
   </main>
 
-  <footer id="footer">
-    <div class="footer-columns">
-      <div class="footer-links">
-        <div class="footer-column">
-          <h4>Product</h4>
-          <ul><li><a href={`${docsBase}/introduction`} {...externalLinkProps}>Overview</a></li><li><a href={`${docsBase}/quickstart`} {...externalLinkProps}>Quickstart</a></li><li><a href={`${docsBase}/concepts/architecture`} {...externalLinkProps}>Architecture</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Operate</h4>
-          <ul><li><a href={`${docsBase}/admin/configuration`} {...externalLinkProps}>Configuration</a></li><li><a href={`${docsBase}/admin/managed-packages`} {...externalLinkProps}>Extensions</a></li><li><a href={`${docsBase}/admin/gateway-access`} {...externalLinkProps}>Bring your own gateway</a></li><li><a href={`${docsBase}/admin/session-capture`} {...externalLinkProps}>Sessions</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Deploy</h4>
-          <ul><li><a href={`${docsBase}/deployment/production`} {...externalLinkProps}>Production</a></li><li><a href={`${docsBase}/development/local-compose`} {...externalLinkProps}>Docker Compose</a></li><li><a href={`${github}/tree/main/deploy/helm`} {...externalLinkProps}>Helm</a></li><li><a href={`${github}/tree/main/deploy/tofu/aws`} {...externalLinkProps}>OpenTofu</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Project</h4>
-          <ul><li><a href="/manifesto">Why Blue</a></li><li><a href={github} {...externalLinkProps}>GitHub</a></li><li><a href={`${github}/releases`} {...externalLinkProps}>Releases</a></li><li><a href={`${github}/blob/main/CONTRIBUTING.md`} {...externalLinkProps}>Contributing</a></li></ul>
-          <h4 class="footer-subheading">Trust</h4>
-          <ul><li><a href={`${github}/blob/main/SECURITY.md`} {...externalLinkProps}>Security</a></li><li><a href={`${github}/blob/main/LICENSE`} {...externalLinkProps}>MIT License</a></li></ul>
-        </div>
-        <div class="footer-column">
-          <h4>Connect</h4>
-          <ul><li><a href={github} {...externalLinkProps}>GitHub</a></li><li><a href="https://blocks.team" {...externalLinkProps}>Blocks</a></li></ul>
-        </div>
-      </div>
-    </div>
-    <div class="footer-copyright"><span>Blue, an open-source project from Blocks.</span></div>
-  </footer>
+  <SiteFooter />
 
   <script>
     const installCommand = document.querySelector<HTMLElement>(".install-command");

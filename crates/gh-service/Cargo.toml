@@ -19,3 +19,4 @@ webbrowser = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+gh-common = { workspace = true, features = ["test-support"] }

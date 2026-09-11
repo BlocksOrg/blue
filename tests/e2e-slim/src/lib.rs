@@ -216,12 +216,61 @@ impl Stack {
         let sub = format!("e2e-slim-{unique}");
         let email = format!("e2e-slim-{unique}@blue.test");
         let jwt = self.mint_jwt(&org_id, &sub, &email);
-        let home = Home::create(self, &jwt, &org_id, &email, governance_only, path_prepend);
+        let home = Home::create(
+            self,
+            &jwt,
+            &org_id,
+            &sub,
+            &email,
+            governance_only,
+            path_prepend,
+        );
         home.ensure_user();
         self.ensure_backing_session(&sub, &email);
         home
     }
 
+    /// Revoke every bearer token issued to `email` before now, the way an
+    /// administrator's "revoke sessions" action does (`users.tokens_valid_after`).
+    /// The stored `session.json` keeps refreshing happily afterwards — which is
+    /// exactly the state in which the CLI used to insist it was logged in.
+    pub fn revoke_user_tokens(&self, email: &str) {
+        let mut client = postgres::Client::connect(&self.database_url, postgres::NoTls)
+            .expect("connecting to Postgres to revoke user tokens");
+        let updated = client
+            .execute(
+                "UPDATE users SET tokens_valid_after=now(),updated_at=now() WHERE lower(email)=lower($1)",
+                &[&email],
+            )
+            .expect("revoking user tokens");
+        assert_eq!(updated, 1, "expected exactly one user row for {email}");
+    }
+
+    /// Expire the Better Auth browser session the CLI grant is bound to,
+    /// leaving the OAuth refresh token untouched. This is the production
+    /// failure: the browser session lives 12 hours, the refresh token 30 days,
+    /// so a CLI that only checks its own token believes it is still signed in.
+    ///
+    /// Only observable in gateway mode — `personalize_gateway_config` is where
+    /// the binding is read, and a governance-only deployment never gets there.
+    pub fn expire_backing_session(&self, sub: &str) {
+        let mut client = postgres::Client::connect(&self.database_url, postgres::NoTls)
+            .expect("connecting to Postgres to expire the backing session");
+        let updated = client
+            .execute(
+                "UPDATE auth.\"session\" SET \"expiresAt\"=now() - interval '1 minute',\"updatedAt\"=now() WHERE id=$1",
+                &[&sub],
+            )
+            .expect("expiring the backing Better Auth session");
+        assert_eq!(updated, 1, "expected exactly one backing session for {sub}");
+    }
+
+    /// Seed the Better Auth user + browser session the CLI's grant is bound to.
+    ///
+    /// **Load-bearing, not scaffolding.** control-api reads
+    /// `auth."session"` (matched on the token's `sid`, which [`Stack::mint_jwt`]
+    /// sets to `sub`) before it will mint a gateway inference token. Delete this
+    /// and the gateway suite starts 401ing with no obvious cause.
     fn ensure_backing_session(&self, sub: &str, email: &str) {
         let mut client = postgres::Client::connect(&self.database_url, postgres::NoTls)
             .expect("connecting to Postgres for backing OAuth session");
@@ -250,6 +299,7 @@ pub struct Home {
     control_api_url: String,
     minio_url: String,
     bearer: String,
+    sub: String,
     email: String,
     /// When set, prepended to `PATH` for every `blue` invocation so a specific
     /// installed agent build is version-selected (matrix cells). `None` inherits
@@ -259,10 +309,12 @@ pub struct Home {
 }
 
 impl Home {
+    #[allow(clippy::too_many_arguments)]
     fn create(
         stack: &Stack,
         jwt: &str,
         org_id: &str,
+        sub: &str,
         email: &str,
         governance_only: bool,
         path_prepend: Option<PathBuf>,
@@ -314,6 +366,7 @@ impl Home {
             control_api_url: stack.control_api_url.clone(),
             minio_url: stack.minio_url.clone(),
             bearer: jwt.to_owned(),
+            sub: sub.to_owned(),
             email: email.to_owned(),
             path_prepend,
             http: stack.http.clone(),
@@ -329,6 +382,17 @@ impl Home {
     /// gateway suite uses it to pre-create the matching LiteLLM user.
     pub fn email(&self) -> &str {
         &self.email
+    }
+
+    /// The unique per-process subject. Also the id of the backing Better Auth
+    /// session, because [`Stack::mint_jwt`] sets `sid` to `sub`.
+    pub fn sub(&self) -> &str {
+        &self.sub
+    }
+
+    /// The path to this HOME's `session.json`.
+    pub fn session_path(&self) -> PathBuf {
+        self.home.join(".config/blue/session.json")
     }
 
     /// A `blue` command bound to this isolated HOME. PATH is inherited (so the
