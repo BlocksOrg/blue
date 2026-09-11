@@ -65,6 +65,12 @@ fn assert_wrapped_update_controls(
             let config: serde_json::Value =
                 serde_json::from_str(env.get("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
             assert_eq!(config["autoupdate"], false);
+            // The config key alone does not reach OpenCode's updater; only the
+            // env var does.
+            assert_eq!(
+                env.get("OPENCODE_DISABLE_AUTOUPDATE").map(String::as_str),
+                Some("1")
+            );
         }
     }
 }
