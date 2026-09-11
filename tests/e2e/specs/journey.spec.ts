@@ -58,6 +58,11 @@ test.describe.serial("Blue deployment journey", () => {
   });
 
   test("@smoke dashboard login approves a real CLI device flow", async ({ page }) => {
+    // An attempt that fails *after* the CLI login succeeds leaves a valid
+    // session behind, and `blue login` then short-circuits with "Already logged
+    // in" — so every retry fails for a different reason than the first one did,
+    // and the test can never recover. Start each attempt logged out.
+    await rm(path.join(home, ".config", "blue", "session.json"), { force: true });
     await loginAsAdmin(page);
     const child = spawnCli(home, ["login"]);
     const deviceUrl = await waitForOutput(child, /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/);
