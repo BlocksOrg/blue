@@ -1,0 +1,25 @@
+---
+import BrandMark from "./BrandMark.astro";
+
+interface Props {
+  current?: "manifesto";
+}
+
+const { current } = Astro.props;
+const github = "https://github.com/BlocksOrg/blue";
+const externalLinkProps = { target: "_blank", rel: "noopener noreferrer" };
+---
+
+<header class="site-header">
+  <a class="brand" href="/#top" aria-label="Blue home">
+    <BrandMark size={32} />
+  </a>
+  <nav aria-label="Primary navigation">
+    <a href="/#product">Product</a>
+    <a href="/#how-it-works">How it works</a>
+    <a href="/#capabilities">Capabilities</a>
+    <a href="/manifesto/" aria-current={current === "manifesto" ? "page" : undefined}>Why Blue</a>
+    <a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a>
+    <a class="nav-github" href={github} {...externalLinkProps}>GitHub <span class="link-caret" aria-hidden="true"></span></a>
+  </nav>
+</header>
