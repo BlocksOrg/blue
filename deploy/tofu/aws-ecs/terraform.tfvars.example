@@ -1,7 +1,7 @@
 aws_region            = "us-west-2"
 name                  = "blue"
 bootstrap_admin_email = "operator@example.com"
-tags                  = { Environment = "production", Application = "blue" }
+environment           = "production"
 
 # --- Minimal: new VPC, no domain (serves HTTP on the raw ALB DNS name) --------
 # Leaving vpc_id empty creates a VPC, public/private subnets, IGW, and a single
@@ -30,3 +30,11 @@ tags                  = { Environment = "production", Application = "blue" }
 
 # --- Private image (Secrets Manager registry credentials) ---------------------
 # image_pull_secret_arn = "arn:aws:secretsmanager:us-west-2:111122223333:secret:ghcr-xxxx"
+
+# --- GitHub Actions deploy role (OIDC, no access keys) ------------------------
+# Role assumable only by this repo's workflows running in the `environment`
+# set above. Requires the account-global GitHub OIDC provider (see README).
+# The OIDC subject prefix minus "repo:" — plain owner/name, or owner@ID/name@ID
+# on immutable subject claims:
+#   gh api repos/OWNER/NAME/actions/oidc/customization/sub -q .sub_claim_prefix
+# github_oidc_repository = "octo-org@123456/octo-repo@456789"
