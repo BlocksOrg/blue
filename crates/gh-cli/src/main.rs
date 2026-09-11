@@ -34,7 +34,11 @@ enum Command {
         yes: bool,
     },
     /// Authenticate to the provisioned service and store the session.
-    Login,
+    Login {
+        /// Re-run the browser authorization even when a session is stored.
+        #[arg(long)]
+        force: bool,
+    },
     /// Remove the locally stored OAuth session.
     Logout,
     /// Report installed harnesses, versions, and whether policy allows them.
@@ -142,7 +146,7 @@ fn main() {
         Some(Command::Version) => commands::version(),
         Some(Command::Setup) => commands::setup(),
         Some(Command::Reset { yes }) => commands::reset(yes),
-        Some(Command::Login) => commands::login(),
+        Some(Command::Login { force }) => commands::login(force),
         Some(Command::Logout) => commands::logout(),
         Some(Command::Doctor) => commands::doctor(),
         Some(Command::Agent { name }) => commands::agent(name.as_deref()),
@@ -203,6 +207,15 @@ mod tests {
             cli.command,
             Some(Command::Agent { name: Some(name) }) if name == "claude"
         ));
+    }
+
+    #[test]
+    fn parses_login_with_and_without_the_forced_reauthorization() {
+        let cli = Cli::try_parse_from(["blue", "login"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Login { force: false })));
+
+        let cli = Cli::try_parse_from(["blue", "login", "--force"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Login { force: true })));
     }
 
     #[test]

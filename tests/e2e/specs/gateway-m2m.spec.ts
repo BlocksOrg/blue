@@ -83,8 +83,9 @@ async function createMember(
 async function mintInferenceToken(
   home: string,
   page: Page,
+  args: string[] = ["login"],
 ): Promise<string> {
-  const login = spawnCli(home, ["login"]);
+  const login = spawnCli(home, args);
   const deviceUrl = await waitForOutput(
     login,
     /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/,
@@ -437,6 +438,47 @@ test.describe.serial("Gateway M2M auth", () => {
         .toBe(200);
       // The pre-logout token stays dead: session_not_before.
       expect(await inferenceStatus(login.context.request, first)).toBe(401);
+    } finally {
+      await login.context.close();
+    }
+  });
+
+  test("retires inference access on a forced re-login, not just the refresh grant", async ({ page, browser }) => {
+    test.setTimeout(120_000);
+    await loginAsAdmin(page);
+    const member = await createMember(page, browser);
+
+    // One browser context, as above: `--force` from a still signed-in browser
+    // reuses the sid, so nothing *else* can invalidate the old JWT. That is the
+    // case `--force` is documented for — replacing a session you no longer
+    // trust — and the one where revoking only the refresh grant left the
+    // already-minted token buying inference for its full 12h TTL.
+    const login = await signInMember(browser, member.email);
+    try {
+      const home = await prepareClient(`gateway-forced-relogin-${Date.now()}`);
+      const first = await mintInferenceToken(home, login.page);
+      expect(await inferenceStatus(login.context.request, first)).toBe(200);
+      const invalidations = parseMetric(
+        await (await login.context.request.get(`${PROXY}/metrics`)).text(),
+        "gateway_proxy_invalidation_events_total",
+      );
+
+      const second = await mintInferenceToken(home, login.page, [
+        "login",
+        "--force",
+      ]);
+      expect(jwtClaims(second).blue_oauth_session_id).toBe(
+        jwtClaims(first).blue_oauth_session_id,
+      );
+
+      // The forced re-login must not have cost the user working access.
+      await expect
+        .poll(() => inferenceStatus(login.context.request, second), {
+          timeout: 10_000,
+          intervals: [50, 100, 250],
+        })
+        .toBe(200);
+      await expectRevoked(login.context.request, first, invalidations);
     } finally {
       await login.context.close();
     }

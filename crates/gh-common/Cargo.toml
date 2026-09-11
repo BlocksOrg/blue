@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Exposes `paths::test_support`, which redirects HOME/XDG at a tempdir. Other
+# crates enable it as a dev-dependency feature; `#[cfg(test)]` would not be
+# visible across the crate boundary.
+test-support = []
+
 [dependencies]
 serde = { workspace = true }
 toml = { workspace = true }

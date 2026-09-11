@@ -109,7 +109,16 @@ pub(crate) async fn mint_gateway_inference_token(
         issued_at,
     )
     .await?
-    .ok_or_else(ApiError::unauthorized)?;
+    // The one 401 in this function that is not a malformed token: the CLI's
+    // OAuth refresh still works for 30 days, so the user's session file looks
+    // healthy long after the 12-hour browser session behind it is gone. Say
+    // which of the two expired, or the client can only guess.
+    .ok_or_else(|| {
+        ApiError::unauthorized_message(
+            "your browser sign-in that authorized this CLI has expired; \
+             run `blue login` to re-authorize",
+        )
+    })?;
     let key_ring = state
         .gateway_jwt
         .as_ref()

@@ -61,6 +61,79 @@ pub fn mcp_staging_path() -> Result<PathBuf, GhError> {
     Ok(blue_config_dir()?.join("mcp.json"))
 }
 
+/// Point every path this module resolves at one throwaway directory.
+///
+/// `HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` are process-global, so a test
+/// that touches `session.json` or the governance cache without this guard
+/// writes to the developer's real `~/.config/blue`. One mutex covers all three
+/// variables on purpose: two independent locks guarding overlapping globals
+/// deadlock the moment a test needs both.
+///
+/// Behind the `test-support` feature rather than `#[cfg(test)]` because
+/// `#[cfg(test)]` items are not visible to other crates.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Every variable [`home_dir`](super::home_dir), [`config_home`](super::config_home)
+    /// and [`cache_home`](super::cache_home) read.
+    const VARS: [&str; 4] = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"];
+
+    pub struct XdgHomeGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<OsString>)>,
+        dir: PathBuf,
+    }
+
+    impl XdgHomeGuard {
+        /// The tempdir standing in for `$HOME`.
+        pub fn home(&self) -> &std::path::Path {
+            &self.dir
+        }
+    }
+
+    /// Redirect `HOME` and the XDG roots at a fresh directory named after
+    /// `name`, restoring the previous values when the guard drops.
+    pub fn with_xdg_home(name: &str) -> XdgHomeGuard {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("blue-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".config")).unwrap();
+        std::fs::create_dir_all(dir.join(".cache")).unwrap();
+        let previous = VARS
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect();
+        std::env::set_var("HOME", &dir);
+        std::env::set_var("USERPROFILE", &dir);
+        std::env::set_var("XDG_CONFIG_HOME", dir.join(".config"));
+        std::env::set_var("XDG_CACHE_HOME", dir.join(".cache"));
+        XdgHomeGuard {
+            _lock: lock,
+            previous,
+            dir,
+        }
+    }
+
+    impl Drop for XdgHomeGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.previous.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmod, copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
@@ -13,6 +15,48 @@ const canonicalProfiles: Record<string, string> = {
   kimi: "kimi-v0_0_0",
   opencode: "opencode-v0_0_0",
 };
+
+const deviceUrlPattern = /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/;
+
+type PersistedOauthSession = {
+  token: string;
+  refresh_token: string;
+  client_id: string;
+  expires_at: number;
+  resource?: string;
+  scope?: string;
+};
+
+async function approveDeviceFlow(
+  page: Page,
+  child: ChildProcessWithoutNullStreams,
+) {
+  const completion = collect(child);
+  const deviceUrl = await waitForOutput(child, deviceUrlPattern);
+  await page.goto(deviceUrl);
+  await expect(page.getByText("Confirmation code")).toBeVisible();
+  await page.getByRole("button", { name: "Authorize" }).click();
+  await expect(page.getByText("CLI authorized")).toBeVisible();
+  return completion;
+}
+
+async function expectRefreshGrantRejected(page: Page, session: PersistedOauthSession) {
+  const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
+  const form: Record<string, string> = {
+    grant_type: "refresh_token",
+    refresh_token: session.refresh_token,
+    client_id: session.client_id,
+  };
+  if (session.resource) form.resource = session.resource;
+  if (session.scope) form.scope = session.scope;
+  const response = await page.request.post(`${dashboard}/api/auth/oauth2/token`, {
+    headers: { origin: dashboard },
+    form,
+  });
+  const body = await response.json();
+  expect(response.status(), JSON.stringify(body)).toBe(400);
+  expect(body).toMatchObject({ error: "invalid_grant" });
+}
 
 function oversizedGnuLongNameArchive(): Buffer {
   const body = Buffer.alloc(64 * 1024 + 1, "a");
@@ -78,38 +122,38 @@ test.describe.serial("Blue deployment journey", () => {
     );
     expect(accessClaims.sid).toEqual(expect.any(String));
     expect(accessClaims.sid).not.toBe("");
-    const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
-    const refreshed = await page.request.post(
-      `${dashboard}/api/auth/oauth2/token`,
-      {
-        headers: { origin: dashboard },
-        form: {
-          grant_type: "refresh_token",
-          refresh_token: persistedSession.refresh_token,
-          client_id: "blue-cli",
-          resource:
-            process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080",
-        },
-      },
-    );
-    expect(refreshed.status(), await refreshed.text()).toBe(200);
-    const refreshedGrant = await refreshed.json();
-    const refreshedToken = refreshedGrant.access_token;
-    const refreshedClaims = JSON.parse(
-      Buffer.from(refreshedToken.split(".")[1], "base64url").toString("utf8"),
-    );
-    expect(refreshedClaims.sid).toBe(accessClaims.sid);
-    persistedSession.token = refreshedToken;
-    persistedSession.expires_at =
-      Math.floor(Date.now() / 1000) + (refreshedGrant.expires_in ?? 900);
-    if (refreshedGrant.refresh_token) {
-      persistedSession.refresh_token = refreshedGrant.refresh_token;
-    }
+    // The resource indicator has to survive into session.json, or the CLI's own
+    // refresh asks for a token the Control API will not accept.
+    expect(persistedSession.resource).toBeTruthy();
+
+    // Age the access token and let the CLI refresh it. This used to be a
+    // hand-rolled POST to the token endpoint — a second implementation of the
+    // grant that happened to send `resource` when `refresh_if_needed` did not,
+    // which is exactly why no test caught the omission. Only `expires_at` is
+    // rewritten; every other field stays as the CLI wrote it.
+    persistedSession.expires_at = Math.floor(Date.now() / 1000) - 60;
     await writeFile(session, JSON.stringify(persistedSession), { mode: 0o600 });
+
     await expect(stat(path.join(home, ".codex", "blue.config.toml"))).rejects.toThrow();
     await expect(stat(path.join(home, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
+    // Any command that talks to the service drives the refresh.
     const preferred = await runCli(home, ["agent", "claude"]);
     expect(preferred.code, preferred.stderr).toBe(0);
+
+    const refreshedSession = JSON.parse(await readFile(session, "utf8"));
+    expect(refreshedSession.token).not.toBe(persistedSession.token);
+    expect(refreshedSession.expires_at).toBeGreaterThan(
+      Math.floor(Date.now() / 1000),
+    );
+    const refreshedClaims = JSON.parse(
+      Buffer.from(refreshedSession.token.split(".")[1], "base64url").toString(
+        "utf8",
+      ),
+    );
+    // Same browser session behind it, and an audience the Control API accepts —
+    // the two things a refresh without `resource` silently gets wrong.
+    expect(refreshedClaims.sid).toBe(accessClaims.sid);
+    expect(refreshedClaims.aud).toBeTruthy();
   });
 
   test("@smoke executable provisioner creates managed gateway access", async () => {
@@ -1158,5 +1202,124 @@ test.describe.serial("Blue deployment journey", () => {
     const logout = await runCli(home, ["logout"]);
     expect(logout.code, logout.stderr).toBe(0);
     await expect(readFile(path.join(home, ".config", "blue", "session.json"), "utf8")).rejects.toThrow();
+  });
+
+  test("declining replacement authorization leaves an ordinarily retired session signed out", async ({ page }) => {
+    const cancelledHome = await prepareClient("cancelled-session-replacement");
+    await loginAsAdmin(page);
+    const initial = await approveDeviceFlow(page, spawnCli(cancelledHome, ["login"]));
+    expect(initial.code, `${initial.stdout}\n${initial.stderr}`).toBe(0);
+
+    const replacement = spawnCli(cancelledHome, ["login", "--force"]);
+    const completion = collect(replacement);
+    const deviceUrl = await waitForOutput(replacement, deviceUrlPattern);
+    await page.goto(deviceUrl);
+    await page.getByRole("button", { name: "Deny" }).click();
+    await expect(page.getByText("Authorization denied")).toBeVisible();
+    const declined = await completion;
+    expect(declined.code).not.toBe(0);
+    await expect(
+      readFile(path.join(cancelledHome, ".config", "blue", "session.json"), "utf8"),
+    ).rejects.toThrow();
+  });
+
+  test("reset never recreates an expired local session while cleaning up", async ({ page }) => {
+    const resetHome = await prepareClient("reset-expired-session");
+    await loginAsAdmin(page);
+    const initial = await approveDeviceFlow(page, spawnCli(resetHome, ["login"]));
+    expect(initial.code, `${initial.stdout}\n${initial.stderr}`).toBe(0);
+
+    const sessionPath = path.join(resetHome, ".config", "blue", "session.json");
+    const expired = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
+    expired.expires_at = Math.floor(Date.now() / 1000) - 60;
+    await writeFile(sessionPath, JSON.stringify(expired), { mode: 0o600 });
+
+    const reset = await runCli(resetHome, ["reset", "--yes"]);
+    expect(reset.code, `${reset.stdout}\n${reset.stderr}`).toBe(0);
+    await expect(readFile(sessionPath, "utf8")).rejects.toThrow();
+  });
+
+  // These tests deliberately replay a revoked token to prove the old grant is
+  // dead. Better Auth treats that as theft and invalidates every refresh grant
+  // for the same user/client, so keep them after all shared-session journeys.
+  test("blue login retires the refresh grant of a rejected session", async ({ page }) => {
+    const recoveryHome = await prepareClient("login-session-recovery");
+    await loginAsAdmin(page);
+
+    const initial = await approveDeviceFlow(page, spawnCli(recoveryHome, ["login"]));
+    expect(initial.code, `${initial.stdout}\n${initial.stderr}`).toBe(0);
+
+    const sessionPath = path.join(recoveryHome, ".config", "blue", "session.json");
+    const previous = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
+    expect(previous.refresh_token).toBeTruthy();
+    previous.token = "locally-fresh-but-invalid-access-token";
+    previous.expires_at = Math.floor(Date.now() / 1000) + 900;
+    await writeFile(sessionPath, JSON.stringify(previous), { mode: 0o600 });
+
+    const recovered = await approveDeviceFlow(page, spawnCli(recoveryHome, ["login"]));
+    expect(recovered.code, `${recovered.stdout}\n${recovered.stderr}`).toBe(0);
+    expect(recovered.stdout).toContain("Logged in");
+
+    const replacement = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
+    expect(replacement.refresh_token).toBeTruthy();
+    expect(replacement.refresh_token).not.toBe(previous.refresh_token);
+    await expectRefreshGrantRejected(page, previous);
+  });
+
+  test("@smoke bare blue replaces a permanently invalid refresh grant after a delayed approval", async ({ page }) => {
+    const recoveryHome = await prepareClient("gateway-preflight-recovery");
+    await loginAsAdmin(page);
+
+    const initial = await approveDeviceFlow(page, spawnCli(recoveryHome, ["login"]));
+    expect(initial.code, `${initial.stdout}\n${initial.stderr}`).toBe(0);
+    const preferred = await runCli(recoveryHome, ["agent", "codex"]);
+    expect(preferred.code, preferred.stderr).toBe(0);
+
+    const sessionPath = path.join(recoveryHome, ".config", "blue", "session.json");
+    const previous = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
+    expect(previous.refresh_token).toBeTruthy();
+    const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
+    const revoked = await page.request.post(`${dashboard}/api/auth/oauth2/revoke`, {
+      headers: { origin: dashboard },
+      form: {
+        token: previous.refresh_token,
+        token_type_hint: "refresh_token",
+        client_id: previous.client_id,
+      },
+    });
+    expect(revoked.status(), await revoked.text()).toBeLessThan(300);
+    previous.token = "expired-access-token-cannot-clean-up-gateway-binding";
+    previous.expires_at = Math.floor(Date.now() / 1000) - 60;
+    await writeFile(sessionPath, JSON.stringify(previous), { mode: 0o600 });
+
+    const recovery = spawnCliInPty(recoveryHome, "blue");
+    const completion = collect(recovery);
+    const deviceUrl = await waitForOutput(recovery, deviceUrlPattern);
+    await page.goto(deviceUrl);
+    await expect(page.getByText("Confirmation code")).toBeVisible();
+    // Wait through a full five-second polling interval. The pending poll must
+    // not require a browser-session binding that only approval can create.
+    await page.waitForTimeout(6_000);
+    expect(recovery.exitCode).toBeNull();
+    await page.getByRole("button", { name: "Authorize" }).click();
+    await expect(page.getByText("CLI authorized")).toBeVisible();
+    const recovered = await completion;
+    expect(recovered.code, `${recovered.stdout}\n${recovered.stderr}`).toBe(0);
+    expect(recovered.stdout).toContain("fake-codex-ok");
+    const recoveryOutput = `${recovered.stdout}\n${recovered.stderr}`;
+    expect(recoveryOutput).not.toContain(
+      "Device authorization is not bound to a session",
+    );
+    expect(recoveryOutput).not.toContain(
+      "previous remote gateway session could not be confirmed revoked",
+    );
+    const authorizationUrls = new Set(
+      recoveryOutput.match(new RegExp(deviceUrlPattern, "g")) ?? [],
+    );
+    expect(authorizationUrls.size).toBe(1);
+
+    const replacement = JSON.parse(await readFile(sessionPath, "utf8")) as PersistedOauthSession;
+    expect(replacement.refresh_token).toBeTruthy();
+    expect(replacement.refresh_token).not.toBe(previous.refresh_token);
   });
 });
