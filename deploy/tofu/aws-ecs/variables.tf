@@ -159,6 +159,26 @@ variable "inference_proxy_client_id" {
   default = "blue-inference-proxy"
 }
 
+variable "gateway_jwt_active_kid" {
+  type        = string
+  default     = "blue-gateway-1"
+  description = "Key ID for the active gateway inference JWT signing key."
+}
+
+variable "gateway_jwt_private_key_pem" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "RSA private key PEM used by the control API to sign gateway inference JWTs. Required in gateway mode."
+}
+
+variable "gateway_jwt_jwks_json" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "Public JWKS containing the active gateway JWT key and any retained rotation keys. Required in gateway mode."
+}
+
 # The public CLI's OAuth client id. The dashboard seeds the client under this
 # id and the control-api advertises it in its discovery document, so both
 # containers are given the same value.

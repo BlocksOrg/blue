@@ -31,6 +31,28 @@ const SCROLLBACK_ROWS: usize = 2_000;
 // direction change or any non-navigation key still takes effect immediately.
 const NAVIGATION_DEBOUNCE: Duration = Duration::from_millis(150);
 const REVISION_AVAILABLE_LABEL: &str = "New Blue policy available";
+const SESSION_EXPIRED_LABEL: &str = "Session expired — sign in";
+/// How long before the inference JWT expires the countdown starts.
+const GATEWAY_EXPIRY_LEAD: Duration = Duration::from_secs(10 * 60);
+
+/// The policy field of the status row, plus whatever needs the user's
+/// attention right now. Previously the caller string-matched the label to
+/// decide whether to show a banner, which silently coupled the two.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PolicyState {
+    label: String,
+    /// Right-aligned banner; `None` in the ordinary case.
+    notice: Option<String>,
+}
+
+impl PolicyState {
+    fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            notice: None,
+        }
+    }
+}
 const BLUE_ASCII: [&str; 5] = [
     " ____  _",
     "| __ )| |_   _  ___",
@@ -1013,7 +1035,14 @@ impl StartupView {
     }
 }
 
-fn footer(agent: &str, policy: &str, gateway: &str, connectivity: &str, width: usize) -> String {
+fn footer(
+    agent: &str,
+    policy: &PolicyState,
+    gateway: &str,
+    connectivity: &str,
+    width: usize,
+) -> String {
+    let policy = &policy.label;
     let full = format!(
         " Ctrl-] Control · {agent} · policy {policy} · gateway {gateway} · control {connectivity}"
     );
@@ -1027,32 +1056,32 @@ fn footer(agent: &str, policy: &str, gateway: &str, connectivity: &str, width: u
     compact.chars().take(width.saturating_sub(1)).collect()
 }
 
-fn status_row(left: &str, width: usize, revision_available: bool) -> String {
-    if !revision_available {
+fn status_row(left: &str, width: usize, notice: Option<&str>) -> String {
+    let Some(notice) = notice else {
         return format!("{left:<width$}");
-    }
-    let notice_width = REVISION_AVAILABLE_LABEL.chars().count();
+    };
+    let notice_width = notice.chars().count();
     if width <= notice_width {
-        return REVISION_AVAILABLE_LABEL.chars().take(width).collect();
+        return notice.chars().take(width).collect();
     }
     let left_width = width - notice_width;
     let left = left
         .chars()
         .take(left_width.saturating_sub(1))
         .collect::<String>();
-    format!("{left:<left_width$}{REVISION_AVAILABLE_LABEL}")
+    format!("{left:<left_width$}{notice}")
 }
 
 fn footer_row(
     agent: &str,
-    policy: &str,
+    policy: &PolicyState,
     gateway: &str,
     connectivity: &str,
     width: usize,
     color: bool,
 ) -> String {
     let label = footer(agent, policy, gateway, connectivity, width);
-    let label = status_row(&label, width, policy == "update available");
+    let label = status_row(&label, width, policy.notice.as_deref());
     if color {
         format!("\x1b[7m{label}\x1b[0m")
     } else {
@@ -1063,7 +1092,7 @@ fn footer_row(
 fn draw_footer(
     stdout: &mut impl Write,
     agent: &str,
-    policy: &str,
+    policy: &PolicyState,
     gateway: &str,
     connectivity: &str,
     rows: u16,
@@ -1089,7 +1118,7 @@ enum ViewportRepair {
 #[derive(Clone, Copy)]
 struct FooterStatus<'a> {
     agent: &'a str,
-    policy: &'a str,
+    policy: &'a PolicyState,
     gateway: &'a str,
     connectivity: &'a str,
     rows: u16,
@@ -1099,7 +1128,7 @@ struct FooterStatus<'a> {
 impl<'a> FooterStatus<'a> {
     fn new(
         agent: &'a str,
-        policy: &'a str,
+        policy: &'a PolicyState,
         gateway: &'a str,
         connectivity: &'a str,
         size: (u16, u16),
@@ -1671,7 +1700,7 @@ fn render_resume(
     let status = status_row(
         " Ctrl+C / Ctrl-] cancel resume and return to agent",
         status_area.width as usize,
-        false,
+        None,
     );
     frame.render_widget(
         Paragraph::new(status).style(Style::default().add_modifier(Modifier::REVERSED)),
@@ -1688,7 +1717,7 @@ fn draw_control<W: Write>(
         Option<&ResumeWizard>,
     ),
     transcript: &[String],
-    policy: &str,
+    policy: &PolicyState,
     gateway: &str,
     connection: (&str, bool),
 ) -> std::io::Result<()> {
@@ -1863,17 +1892,14 @@ fn draw_control<W: Write>(
 
         let identity = if signed_out { "signed out" } else { agent };
         let status = format!(
-            " Ctrl+C / Ctrl-] agent  ·  {identity}  ·  policy {policy}  ·  gateway {gateway}  ·  control {connectivity}"
+            " Ctrl+C / Ctrl-] agent  ·  {identity}  ·  policy {}  ·  gateway {gateway}  ·  control {connectivity}",
+            policy.label
         );
         let status = status
             .chars()
             .take(status_area.width as usize)
             .collect::<String>();
-        let status = status_row(
-            &status,
-            status_area.width as usize,
-            policy == "update available",
-        );
+        let status = status_row(&status, status_area.width as usize, policy.notice.as_deref());
         frame.render_widget(
             Paragraph::new(status)
             .style(Style::default().add_modifier(Modifier::REVERSED)),
@@ -1903,6 +1929,39 @@ fn replay_agent(
         status.rows,
         status.cols,
     )
+}
+
+/// Redraws whichever surface currently owns the terminal.
+#[allow(clippy::too_many_arguments)]
+fn redraw_surface<W: Write>(
+    active: bool,
+    stdout: &mut impl Write,
+    control_terminal: Option<&mut Terminal<CrosstermBackend<W>>>,
+    agent: &str,
+    interaction: (
+        &ControlEditor,
+        Option<&ControlPrompt>,
+        Option<&ResumeWizard>,
+    ),
+    transcript: &[String],
+    policy: &PolicyState,
+    gateway: &str,
+    connection: (&str, bool),
+    size: (u16, u16),
+) -> std::io::Result<()> {
+    if active {
+        draw_footer(stdout, agent, policy, gateway, connection.0, size.0, size.1)
+    } else {
+        draw_control(
+            control_terminal.expect("control terminal is open"),
+            agent,
+            interaction,
+            transcript,
+            policy,
+            gateway,
+            connection,
+        )
+    }
 }
 
 fn stop_child(session: &PtySession) -> Result<i32> {
@@ -2020,6 +2079,15 @@ fn start_connectivity_probe(
 pub struct SupervisorRuntime {
     pub connectivity_health_url: Option<String>,
     pub revision_notice: Option<Arc<Mutex<Option<String>>>>,
+    /// Set by the background watcher when the control service answers 401.
+    /// Driven by the /governance-config response, never by the token refresh:
+    /// @better-auth/oauth-provider still mints an access token after the
+    /// backing session is gone, so the refresh succeeding proves nothing.
+    pub auth_notice: Option<Arc<Mutex<Option<String>>>>,
+    /// `exp` of the inference JWT this agent was launched with, when there is
+    /// one. The token is fixed in the child's environment, so the only honest
+    /// remedy is to restart with a fresh one.
+    pub gateway_token_expires_at: Option<i64>,
     pub gateway_available: bool,
     pub direct_mode: bool,
 }
@@ -2036,6 +2104,8 @@ pub fn supervise(
     let SupervisorRuntime {
         connectivity_health_url,
         revision_notice,
+        auth_notice,
+        gateway_token_expires_at,
         gateway_available,
         direct_mode,
     } = runtime;
@@ -2069,10 +2139,12 @@ pub fn supervise(
         "Agent output remains buffered while Blue control is open.".into(),
         "Type / to browse commands.".into(),
     ];
-    let mut policy_state = policy.to_owned();
+    let mut policy_state = PolicyState::new(policy);
     let (connectivity_rx, _connectivity_stop, mut connectivity_state) =
         start_connectivity_probe(connectivity_health_url);
     let mut last_notice = None;
+    let mut last_auth_notice = None;
+    let mut gateway_expiry_warned = false;
     let mut pending_input = Vec::new();
     let mut control_input = Vec::new();
     let mut terminal = vt100::Parser::new(rows.saturating_sub(1).max(1), cols, SCROLLBACK_ROWS);
@@ -2117,7 +2189,10 @@ pub fn supervise(
             .and_then(|notice| notice.lock().ok().and_then(|notice| notice.clone()));
         if notice != last_notice {
             if let Some(notice) = notice.as_ref() {
-                policy_state = "update available".into();
+                policy_state = PolicyState {
+                    label: "update available".into(),
+                    notice: Some(REVISION_AVAILABLE_LABEL.into()),
+                };
                 append_transcript(&mut transcript, format!("Policy update: {notice}"));
                 if active {
                     draw_footer(
@@ -2142,6 +2217,85 @@ pub fn supervise(
                 }
             }
             last_notice = notice;
+        }
+
+        // A dead session is not a policy update: it needs the user to act, and
+        // the only way back is to stop the child and sign in.
+        let auth = auth_notice
+            .as_ref()
+            .and_then(|notice| notice.lock().ok().and_then(|notice| notice.clone()));
+        if auth.is_some() && auth != last_auth_notice {
+            let message = auth.clone().unwrap_or_default();
+            policy_state.notice = Some(SESSION_EXPIRED_LABEL.into());
+            append_transcript(&mut transcript, message);
+            // Only raise the prompt when nothing else owns the surface, and
+            // only once per distinct notice — otherwise a cancelled prompt
+            // comes straight back on the next poll. The banner stays lit.
+            if prompt.is_none() && resume.is_none() {
+                prompt = Some(confirmation_prompt(
+                    "Login expired. Stop the agent and sign in?",
+                    "Stop agent and sign in",
+                    "the current agent session must end first",
+                    PromptAction::Login,
+                ));
+            }
+            redraw_surface(
+                active,
+                &mut stdout,
+                control_terminal.as_mut(),
+                agent,
+                (&editor, prompt.as_ref(), resume.as_ref()),
+                &transcript,
+                &policy_state,
+                gateway,
+                (&connectivity_state, signed_out),
+                size,
+            )?;
+            last_auth_notice = auth;
+        }
+
+        // The inference JWT is baked into the child's environment at spawn and
+        // is never rotated in flight, so warn before it dies mid-turn rather
+        // than letting the agent start failing against the proxy. Never
+        // auto-restart: that would kill an in-flight turn.
+        if let Some(expires_at) = gateway_token_expires_at {
+            let remaining = expires_at.saturating_sub(now_unix());
+            if remaining > 0 && remaining <= GATEWAY_EXPIRY_LEAD.as_secs() as i64 {
+                let minutes = (remaining + 59) / 60;
+                let banner = format!("Gateway access expires in {minutes}m");
+                if policy_state.notice.as_deref() != Some(banner.as_str())
+                    && last_auth_notice.is_none()
+                {
+                    policy_state.notice = Some(banner);
+                    if !gateway_expiry_warned {
+                        gateway_expiry_warned = true;
+                        append_transcript(
+                            &mut transcript,
+                            "Gateway access expires soon. Reload the agent to mint a fresh token.",
+                        );
+                        if prompt.is_none() && resume.is_none() {
+                            prompt = Some(confirmation_prompt(
+                                "Gateway access expires soon. Quit and reload the agent?",
+                                "Quit and reload now",
+                                "gracefully stop the current agent",
+                                PromptAction::ReloadCurrent,
+                            ));
+                        }
+                    }
+                    redraw_surface(
+                        active,
+                        &mut stdout,
+                        control_terminal.as_mut(),
+                        agent,
+                        (&editor, prompt.as_ref(), resume.as_ref()),
+                        &transcript,
+                        &policy_state,
+                        gateway,
+                        (&connectivity_state, signed_out),
+                        size,
+                    )?;
+                }
+            }
         }
         for event in session.drain_events() {
             match event {
@@ -2842,33 +2996,41 @@ mod tests {
             .collect()
     }
 
+    fn revision_available() -> PolicyState {
+        PolicyState {
+            label: "update available".into(),
+            notice: Some(REVISION_AVAILABLE_LABEL.into()),
+        }
+    }
+
     #[test]
     fn footer_compacts_without_overflow() {
+        let current = PolicyState::new("current");
         assert!(
-            footer("opencode", "current", "managed", "connected", 80)
+            footer("opencode", &current, "managed", "connected", 80)
                 .chars()
                 .count()
                 <= 80
         );
         assert!(
-            footer("opencode", "current", "managed", "offline", 20)
+            footer("opencode", &current, "managed", "offline", 20)
                 .chars()
                 .count()
                 <= 20
         );
         assert_eq!(
-            footer("codex", "current", "managed", "connected", 80),
+            footer("codex", &current, "managed", "connected", 80),
             " Ctrl-] Control · codex · policy current · gateway managed · control connected"
         );
-        let plain = footer_row("codex", "current", "managed", "connected", 60, false);
+        let plain = footer_row("codex", &current, "managed", "connected", 60, false);
         assert_eq!(plain.chars().count(), 60);
         assert!(!plain.contains("\x1b["));
         assert!(
-            footer_row("codex", "current", "managed", "connected", 60, true).contains("\x1b[7m")
+            footer_row("codex", &current, "managed", "connected", 60, true).contains("\x1b[7m")
         );
         let update = footer_row(
             "codex",
-            "update available",
+            &revision_available(),
             "managed",
             "connected",
             80,
@@ -2880,7 +3042,7 @@ mod tests {
 
         let compact_update = footer_row(
             "opencode",
-            "update available",
+            &revision_available(),
             "managed",
             "connected",
             35,
@@ -2891,13 +3053,57 @@ mod tests {
 
         let narrow_update = footer_row(
             "codex",
-            "update available",
+            &revision_available(),
             "managed",
             "connected",
             12,
             false,
         );
         assert_eq!(narrow_update, "New Blue pol");
+    }
+
+    #[test]
+    fn the_status_banner_is_independent_of_the_policy_label() {
+        // The banner used to be inferred from the policy label reading exactly
+        // "update available", so any other attention state was unrenderable.
+        let expired = PolicyState {
+            label: "current".into(),
+            notice: Some(SESSION_EXPIRED_LABEL.into()),
+        };
+        let row = footer_row("codex", &expired, "managed", "connected", 80, false);
+        assert_eq!(row.chars().count(), 80);
+        assert!(row.ends_with(SESSION_EXPIRED_LABEL));
+        assert!(row.contains("policy current"));
+
+        let countdown = PolicyState {
+            label: "current".into(),
+            notice: Some("Gateway access expires in 7m".into()),
+        };
+        assert!(
+            footer_row("codex", &countdown, "managed", "connected", 80, false)
+                .ends_with("Gateway access expires in 7m")
+        );
+
+        // No notice, no banner.
+        assert_eq!(
+            footer_row(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                80,
+                false
+            )
+            .trim_end(),
+            footer(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                80
+            )
+            .trim_end()
+        );
     }
 
     #[test]
@@ -2908,14 +3114,26 @@ mod tests {
             &mut output,
             &mut observer,
             b"\x1b[38",
-            FooterStatus::new("codex", "current", "managed", "connected", (24, 80)),
+            FooterStatus::new(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                (24, 80),
+            ),
         )
         .unwrap();
         forward_agent_output(
             &mut output,
             &mut observer,
             b";2;1;2;3mBLUE_ANSI_OK\x1b[0m",
-            FooterStatus::new("codex", "current", "managed", "connected", (24, 80)),
+            FooterStatus::new(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                (24, 80),
+            ),
         )
         .unwrap();
 
@@ -2930,7 +3148,13 @@ mod tests {
         let mut observer = OutputObserver::default();
         repair_agent_surface(
             &mut output,
-            FooterStatus::new("codex", "current", "managed", "connected", (ROWS, COLS)),
+            FooterStatus::new(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                (ROWS, COLS),
+            ),
             Some(ViewportRepair::Full),
             true,
         )
@@ -2946,7 +3170,13 @@ mod tests {
                 &mut output,
                 &mut observer,
                 bytes,
-                FooterStatus::new("codex", "current", "managed", "connected", (ROWS, COLS)),
+                FooterStatus::new(
+                    "codex",
+                    &PolicyState::new("current"),
+                    "managed",
+                    "connected",
+                    (ROWS, COLS),
+                ),
             )
             .unwrap();
         }
@@ -2964,7 +3194,13 @@ mod tests {
         let mut observer = OutputObserver::default();
         repair_agent_surface(
             &mut output,
-            FooterStatus::new("codex", "current", "managed", "connected", (ROWS, COLS)),
+            FooterStatus::new(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                (ROWS, COLS),
+            ),
             Some(ViewportRepair::Full),
             true,
         )
@@ -2973,7 +3209,13 @@ mod tests {
             &mut output,
             &mut observer,
             b"\x1b[r\x1b[1;1H1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n",
-            FooterStatus::new("codex", "current", "managed", "connected", (ROWS, COLS)),
+            FooterStatus::new(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                (ROWS, COLS),
+            ),
         )
         .unwrap();
 
@@ -2990,7 +3232,13 @@ mod tests {
         let mut observer = OutputObserver::default();
         repair_agent_surface(
             &mut output,
-            FooterStatus::new("codex", "current", "managed", "connected", (ROWS, COLS)),
+            FooterStatus::new(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                (ROWS, COLS),
+            ),
             Some(ViewportRepair::Full),
             true,
         )
@@ -3000,7 +3248,13 @@ mod tests {
             &mut output,
             &mut observer,
             b"\x1b[?2026h\x1b[?1049h\x1b[2J\x1b[8;1HCODEX FRAME\x1b[?2026l",
-            FooterStatus::new("codex", "current", "managed", "connected", (ROWS, COLS)),
+            FooterStatus::new(
+                "codex",
+                &PolicyState::new("current"),
+                "managed",
+                "connected",
+                (ROWS, COLS),
+            ),
         )
         .unwrap();
 
@@ -3349,7 +3603,7 @@ mod tests {
             "codex",
             (&editor, None, Some(&wizard)),
             &["OLD CONTROL TRANSCRIPT".into()],
-            "current",
+            &PolicyState::new("current"),
             "managed",
             ("connected", false),
         )
@@ -3371,7 +3625,7 @@ mod tests {
             "codex",
             (&editor, None, Some(&wizard)),
             &["OLD CONTROL TRANSCRIPT".into()],
-            "current",
+            &PolicyState::new("current"),
             "managed",
             ("connected", false),
         )
@@ -3448,7 +3702,7 @@ mod tests {
             "codex",
             (&editor, None, Some(&wizard)),
             &[],
-            "current",
+            &PolicyState::new("current"),
             "managed",
             ("connected", false),
         )
@@ -3469,7 +3723,7 @@ mod tests {
             "codex",
             (&editor, None, Some(&wizard)),
             &[],
-            "current",
+            &PolicyState::new("current"),
             "managed",
             ("connected", false),
         )
@@ -3538,7 +3792,7 @@ mod tests {
             "codex",
             (&editor, None, None),
             &transcript,
-            "current",
+            &PolicyState::new("current"),
             "managed",
             ("connected", false),
         )
@@ -3556,7 +3810,7 @@ mod tests {
             "codex",
             (&editor, None, None),
             &transcript,
-            "current",
+            &PolicyState::new("current"),
             "managed",
             ("connected", false),
         )

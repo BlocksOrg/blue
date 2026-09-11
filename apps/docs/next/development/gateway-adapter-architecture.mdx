@@ -21,16 +21,16 @@ The control plane turns an operator choice into agent configuration:
 ```text
 blue.yaml gateway.type
   → Control API validates the compiled registry
-  → personalized GatewayConfig { type, proxy_url, pseudotoken, auth_style }
+  → personalized GatewayConfig { type, proxy_url, token, auth_style }
   → client registry computes GatewayRoute { base_url, token }
   → version-owned HarnessImplementation adds auth placement and wire API
   → gh-config commits the ReconcilePlan
 ```
 
-The data plane exchanges that pseudotoken for an upstream credential:
+The data plane validates that inference JWT and resolves an upstream credential:
 
 ```text
-agent request with pseudotoken
+agent request with session-bound inference JWT
   → inference proxy selects HARNESS_GATEWAY_TYPE from the same registry
   → Control API resolves the encrypted user credential
   → adapter maps path and credential placement
@@ -50,7 +50,7 @@ agent request with pseudotoken
 | --- | --- | --- |
 | `gh-service::GatewayConfig` | Shared client policy fields | Provider administrator credentials or executable behavior |
 | `gh-gateway::GatewayAdapter` | Registry identity, client route validation, upstream path/auth policy, and invalid-credential classification | Network I/O, harness files, or credential bytes |
-| `HarnessImplementation` | Version-specific pseudotoken placement and agent wire protocol | Gateway-type dispatch or upstream-provider behavior |
+| `HarnessImplementation` | Version-specific inference-token placement and agent wire protocol | Gateway-type dispatch or upstream-provider behavior |
 | Inference proxy | Streaming, limits, credential resolution, request forwarding, and application of adapter decisions | Provider administrator operations |
 | `GatewayProvisioner` | Creating, retaining, rotating, and revoking upstream user credentials | Agent configuration or inference forwarding |
 | Control API | Server-selected gateway mode, policy personalization, encrypted credentials, and startup validation | Enabling gateway mode from client input |
@@ -78,10 +78,10 @@ pub trait GatewayAdapter: Send + Sync {
 }
 ```
 
-`GatewayRoute` contains only the Blue inference-proxy URL and pseudotoken. The
+`GatewayRoute` contains only the Blue inference-proxy URL and inference JWT. The
 dispatcher attaches the harness-owned `AuthPlacement` and `wire_api` afterward,
 so a gateway cannot replace those decisions. Route and wiring debug output
-redacts the pseudotoken.
+redacts the token.
 
 `UpstreamCredentialPlacement` declares bearer authentication or a named header;
 it never contains the credential itself. The proxy strips `Authorization`,
@@ -155,7 +155,7 @@ crates/gh-gateway/src/
     the provider integration must ship in the public server binary.
   </Step>
   <Step title="Extend policy only when necessary">
-    Reuse `type`, `proxy_url`, `pseudotoken`, and `auth_style` when possible.
+    Reuse `type`, `proxy_url`, `token`, and `auth_style` when possible.
     `auth_style` is retained for compatibility and must be `bearer`; it describes
     agent-to-Blue authentication, not the adapter's upstream credential header.
     New non-secret client fields require coordinated changes to `gh-service`,
@@ -195,7 +195,7 @@ At minimum, demonstrate:
 
 - Unique, nonempty lowercase registry keys and lookup from all three consumers.
 - Rejection of unknown gateway types and non-`bearer` client `auth_style`.
-- Correct client route normalization without exposing a pseudotoken in debug
+- Correct client route normalization without exposing an inference JWT in debug
   output.
 - Correct upstream path and credential header, with incoming authentication
   headers removed.
@@ -236,7 +236,7 @@ journey.
 - The server decides whether gateway mode exists; a client may only downgrade
   to governance-only mode.
 - `gh-config` remains the only writer of agent configuration files.
-- Pseudotokens may reach clients. Upstream credentials and administrator secrets
+- Session-bound inference JWTs may reach clients. Upstream credentials and administrator secrets
   may not.
 - Adapter decisions are pure and contain no credential bytes.
 - Governance-only clients gain no hard dependency on the proxy, provisioner,

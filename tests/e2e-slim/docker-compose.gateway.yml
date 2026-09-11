@@ -67,6 +67,11 @@ services:
       E2E_LITELLM_URL: http://litellm:4000
       HARNESS_LITELLM_ADMIN_KEY: ${LITELLM_MASTER_KEY:-sk-e2e-slim-master}
       HARNESS_GATEWAY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      HARNESS_GATEWAY_JWT_ISSUER: http://127.0.0.1:8080
+      HARNESS_GATEWAY_JWT_AUDIENCE: blue-inference-proxy
+      HARNESS_GATEWAY_JWT_ACTIVE_KID: e2e-slim-rsa-1
+      HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /gateway-jwt/jwt-signing-key.pem
+      HARNESS_GATEWAY_JWT_JWKS_FILE: /gateway-jwt/jwks.json
       # Plain-HTTP internal transport (no mTLS certs in this suite).
       HARNESS_INTERNAL_TRANSPORT_MODE: insecure-http
       HARNESS_INTERNAL_LISTEN: 0.0.0.0:8082
@@ -74,6 +79,7 @@ services:
       - ./fixtures/gateway-slim.yaml:/etc/blue/gateway-slim.yaml:ro
       # Mounted read-only; the exec bit comes from the checkout (committed 0755).
       - ./fixtures/litellm-provisioner.mjs:/etc/blue/litellm-provisioner:ro
+      - ./fixtures/jwks:/gateway-jwt:ro
     ports:
       - "8082:8082"
     depends_on:
@@ -101,6 +107,9 @@ services:
       HARNESS_INTERNAL_TRANSPORT_MODE: insecure-http
       HARNESS_GATEWAY_RESOLVER_URL: http://control-api:8082/internal/gateway/resolve
       HARNESS_GATEWAY_LOG_URL: http://control-api:8082/internal/gateway/request-logs
+      HARNESS_GATEWAY_JWKS_URL: http://control-api:8082/internal/gateway/jwks
+      HARNESS_GATEWAY_JWT_ISSUER: http://127.0.0.1:8080
+      HARNESS_GATEWAY_JWT_AUDIENCE: blue-inference-proxy
       # M2M service token: client-credentials against the JWKS sidecar's issuer.
       # resource -> the JWT `aud`, which must equal control-api's auth audience.
       HARNESS_PROXY_OAUTH_TOKEN_URL: http://jwks:8080/oauth2/token

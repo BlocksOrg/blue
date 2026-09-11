@@ -51,17 +51,17 @@
     },
     {
       "body": "# Example\n\nA managed skill.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.codex/plugins/cache/governance-blue-managed-standalone-skills/blue-managed-standalone-skills/1.0.0/skills/example/SKILL.md"
     },
     {
       "body": "---\nname: reviewer\ndescription: Review changes\n---\nReview carefully.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/codex/agents/reviewer.md"
     },
     {
       "body": "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"fixture-hook\"}]}]}}",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/codex/hooks/hooks.json"
     },
     {
@@ -76,7 +76,7 @@
     },
     {
       "body": "# Example\n\nA managed skill.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/codex/marketplaces/governance-blue-managed-standalone-skills/plugins/blue-managed-standalone-skills/skills/example/SKILL.md"
     },
     {

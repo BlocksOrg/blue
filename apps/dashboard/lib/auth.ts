@@ -3,9 +3,11 @@ import { admin, jwt, organization } from "better-auth/plugins";
 import { genericOAuth } from "better-auth/plugins/generic-oauth";
 import { nextCookies } from "better-auth/next-js";
 import {
+  DEVICE_CODE_GRANT_TYPE,
   oauthDeviceAuthorization,
   oauthProvider,
 } from "@better-auth/oauth-provider";
+import { APIError } from "better-auth/api";
 import { Pool } from "pg";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { bootstrapEmail, identityConfig } from "./identity-config";
@@ -88,6 +90,119 @@ export async function invalidateDeviceBrowserLink(
     `update auth."deviceCode" set "browserToken"=null where "userCode"=$1`,
     [userCode],
   );
+}
+
+/**
+ * Better Auth 1.7.2 does not carry the approving browser session through its
+ * OAuth device-code bridge. Add that binding without changing the OAuth
+ * provider itself: the approval route records the session on the device code,
+ * and this wrapper supplies it to the provider's shared token issuer.
+ */
+function sessionBoundOAuthDeviceAuthorization() {
+  const plugin = oauthDeviceAuthorization({
+    verificationUri: `${publicUrl}/device`,
+    expiresIn: "10m",
+    interval: "5s",
+  });
+  const sessionField = {
+    type: "string" as const,
+    required: false,
+    references: {
+      model: "session",
+      field: "id",
+      onDelete: "set null" as const,
+    },
+  };
+  Object.assign(plugin.schema.deviceCode.fields, {
+    blueOAuthSessionId: sessionField,
+  });
+
+  type DeviceExchangeInput = {
+    ctx: {
+      body?: Record<string, unknown>;
+      context: {
+        adapter: {
+          findOne(query: unknown): Promise<Record<string, unknown> | null>;
+        };
+      };
+    };
+    provider: {
+      issueTokens(
+        params: Record<string, unknown>,
+      ): Promise<Record<string, unknown>>;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  const grant = plugin.options.grant as typeof plugin.options.grant & {
+    grants: Record<
+      string,
+      (input: DeviceExchangeInput) => Promise<Record<string, unknown>>
+    >;
+  };
+  const exchange = grant.grants[DEVICE_CODE_GRANT_TYPE];
+  grant.grants[DEVICE_CODE_GRANT_TYPE] = async (input) => {
+    const deviceCode = String(input.ctx.body?.device_code ?? "");
+    const record = deviceCode
+      ? await input.ctx.context.adapter.findOne({
+          model: "deviceCode",
+          where: [{ field: "deviceCode", value: deviceCode }],
+        })
+      : null;
+    const sessionId =
+      typeof record?.blueOAuthSessionId === "string"
+        ? record.blueOAuthSessionId
+        : undefined;
+    if (!sessionId)
+      throw new APIError("BAD_REQUEST", {
+        error: "invalid_grant",
+        error_description: "Device authorization is not bound to a session",
+      });
+    const session = await input.ctx.context.adapter.findOne({
+      model: "session",
+      where: [{ field: "id", value: sessionId }],
+    });
+    const sessionExpiresAt =
+      session?.expiresAt instanceof Date
+        ? session.expiresAt
+        : new Date(String(session?.expiresAt ?? ""));
+    if (
+      !session ||
+      session.userId !== record?.userId ||
+      !Number.isFinite(sessionExpiresAt.getTime()) ||
+      sessionExpiresAt <= new Date()
+    )
+      throw new APIError("BAD_REQUEST", {
+        error: "invalid_grant",
+        error_description: "Device authorization session is inactive",
+      });
+
+    return exchange({
+      ...input,
+      provider: {
+        ...input.provider,
+        issueTokens: (params) =>
+          input.provider.issueTokens({ ...params, sessionId }),
+      },
+    });
+  };
+  return plugin;
+}
+
+export async function bindDeviceAuthorizationSession(
+  userCode: string,
+  requestHeaders: Headers,
+): Promise<boolean> {
+  const current = await auth.api.getSession({ headers: requestHeaders });
+  if (!current) return false;
+  const result = await authPool.query(
+    `update auth."deviceCode"
+     set "blueOAuthSessionId"=$1
+     where "userCode"=$2 and status='pending' and "userId"=$3
+       and "expiresAt">now()`,
+    [current.session.id, userCode, current.user.id],
+  );
+  return Boolean(result.rowCount);
 }
 
 export const auth = betterAuth({
@@ -228,11 +343,7 @@ export const auth = betterAuth({
               email: user.email,
             }
           : {},
-        }), oauthDeviceAuthorization({
-          verificationUri: `${publicUrl}/device`,
-          expiresIn: "10m",
-          interval: "5s",
-        })]),
+        }), sessionBoundOAuthDeviceAuthorization()]),
     ...(identity.mode === "oidc"
       ? [
           genericOAuth({

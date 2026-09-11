@@ -8,6 +8,7 @@
     "check:content": "node scripts/check-content.mjs",
     "sync:contract": "node scripts/sync-contract.mjs",
     "check:contract": "node scripts/check-contract.mjs",
+    "check:release": "node scripts/check-release-snapshot.mjs",
     "release:docs": "node scripts/release-version.mjs"
   },
   "devDependencies": {

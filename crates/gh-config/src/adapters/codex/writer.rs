@@ -2,7 +2,7 @@
 //!
 //! Managed model/approval/sandbox flags + `[mcp_servers.*]`, and (gateway mode)
 //! a `[model_providers.governed]` block whose `env_key` names the env var the
-//! pseudotoken is exported into. Mirrors control-sdk `agent_codex.py`.
+//! inference token is exported into. Mirrors control-sdk `agent_codex.py`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -112,7 +112,7 @@ pub fn write(
         providers.insert(GOVERNED_PROVIDER.into(), Toml::Table(provider));
         table.insert("model_providers".into(), Toml::Table(providers));
 
-        // The pseudotoken must reach Codex's process env (also republished to
+        // The inference token must reach Codex's process env (also republished to
         // GUI environments by the daemon).
         env.insert(env_key, w.token.clone());
     }
@@ -739,7 +739,7 @@ mod tests {
         let result = write(&mut plan, home, policy, wiring, session_upload_hook, None)?;
         let mut transaction = crate::FileTransaction::begin(home, &plan)?;
         transaction.apply(&plan)?;
-        transaction.commit();
+        transaction.commit()?;
         Ok(result)
     }
 

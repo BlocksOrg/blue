@@ -20,13 +20,22 @@ jobs:
   # Every suite below consumes its artifact instead of recompiling the workspace.
   build:
     uses: ./.github/workflows/images.yml
+    # Must cover every job declared in the called workflow, including the
+    # registry-mode `merge` job artifact mode never reaches: GitHub validates the
+    # callee's permission requests statically at run-creation time, before any
+    # `if:` is evaluated. An under-grant kills the whole run at startup with zero
+    # jobs and no check-run, so the failure is invisible on the PR. Same union as
+    # the release.yml call site.
     permissions:
       contents: read
+      packages: write
+      attestations: write
+      id-token: write
 
   smoke:
     if: github.event_name == 'pull_request'
     needs: build
-    runs-on: Yellow
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -46,9 +55,11 @@ jobs:
           if-no-files-found: ignore
 
   full:
-    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # PRs get the `smoke` tier only; the 50-test full suite (a strict superset)
+    # runs post-merge on main, on the nightly cron, and on demand.
+    if: github.event_name != 'pull_request'
     needs: build
-    runs-on: Yellow
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "select \"expiresAt\" from auth.\"session\" where id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "expiresAt",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2c77d558dbfb11f1ca589fd85b6e42607740be414fd640db3175339ba1e8bf58"
+}

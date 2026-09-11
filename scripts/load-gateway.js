@@ -34,7 +34,7 @@ export default function () {
     JSON.stringify({ model: __ENV.MODEL || "load-test", input: "Return OK.", stream: true }),
     {
       headers: {
-        Authorization: `Bearer ${__ENV.PSEUDOTOKEN}`,
+        Authorization: `Bearer ${__ENV.INFERENCE_TOKEN}`,
         "Content-Type": "application/json",
         "X-Harness-Agent": "load-test",
         "X-Harness-Model": __ENV.MODEL || "load-test",

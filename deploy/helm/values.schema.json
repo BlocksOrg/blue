@@ -21,6 +21,15 @@
         "enableInferenceProxy": { "type": "boolean" },
         "gatewayType": { "type": "string", "pattern": "^$|^[a-z0-9_-]+$" },
         "inferenceProxyClientId": { "type": "string" },
+        "inferenceJwt": {
+          "type": "object",
+          "required": ["secret", "activeKid", "audience"],
+          "properties": {
+            "secret": { "type": "string" },
+            "activeKid": { "type": "string" },
+            "audience": { "type": "string", "minLength": 1 }
+          }
+        },
         "internalTransport": {
           "type": "object",
           "required": ["mode", "serverSecret", "clientSecret"],
@@ -85,8 +94,11 @@
       },
       "allOf": [{
         "if": { "properties": { "enableInferenceProxy": { "const": true } } },
-        "then": { "required": ["gatewayType"], "allOf": [
+        "then": { "required": ["gatewayType", "inferenceJwt"], "allOf": [
           { "properties": { "gatewayType": { "minLength": 1 } } },
+          { "properties": { "inferenceJwt": { "properties": {
+            "secret": { "minLength": 1 }, "activeKid": { "minLength": 1 }
+          } } } },
           {
           "if": { "properties": { "internalTransport": { "properties": { "mode": { "const": "mtls" } } } } },
           "then": { "properties": { "internalTransport": { "properties": {

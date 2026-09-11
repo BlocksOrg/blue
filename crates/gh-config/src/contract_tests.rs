@@ -162,7 +162,7 @@ fn every_production_interval_has_a_pure_golden_plan() {
                     "mcp":[{"name":"fixture", "command":"fixture-mcp", "args":["--stdio"]}]
                 }))
                 .unwrap();
-                let gateway: GatewayConfig = serde_json::from_value(serde_json::json!({"type":"litellm", "proxy_url":"https://gateway.example", "pseudotoken":"fixture-token"})).unwrap();
+                let gateway: GatewayConfig = serde_json::from_value(serde_json::json!({"type":"litellm", "proxy_url":"https://gateway.example", "token":"fixture-token"})).unwrap();
                 let wiring = gateway_enabled.then(|| {
                     registration
                         .implementation
@@ -234,7 +234,7 @@ fn every_production_interval_has_a_pure_golden_plan() {
                 );
                 let mut transaction = FileTransaction::begin(&home, &plan).unwrap();
                 transaction.apply(&plan).unwrap();
-                transaction.commit();
+                transaction.commit().unwrap();
                 let launch = registration
                     .implementation
                     .launch(&home, wiring.as_ref(), HarnessLaunchSpec::default())
@@ -571,7 +571,10 @@ fn synthetic_definition_runs_detection_packages_transition_commit_rollback_and_l
     std::fs::create_dir_all(package_root.join("skills")).unwrap();
     std::fs::write(package_root.join("skills/example.txt"), "example").unwrap();
     let policy = HarnessPolicy::default();
-    let gateway:GatewayConfig=serde_json::from_value(serde_json::json!({"type":"litellm","proxy_url":"https://gateway.example","pseudotoken":"token"})).unwrap();
+    let gateway: GatewayConfig = serde_json::from_value(
+        serde_json::json!({"type":"litellm","proxy_url":"https://gateway.example","token":"token"}),
+    )
+    .unwrap();
     for version in ["1.9.0", "2.0.0"] {
         std::fs::write(
             &binary,
@@ -753,12 +756,14 @@ fn revision_snapshot_restores_earlier_harness_commits() {
     }
     // Populate locks before taking the expected snapshot.
     {
-        let mut revision = begin_revision_transaction_at(&home, &contexts).unwrap();
-        revision.commit();
+        let locks = acquire_revision_locks_at(&home, &contexts).unwrap();
+        let mut revision = locks.begin_transaction().unwrap();
+        revision.commit().unwrap();
     }
     let before = snapshot(&home);
     {
-        let _revision = begin_revision_transaction_at(&home, &contexts).unwrap();
+        let locks = acquire_revision_locks_at(&home, &contexts).unwrap();
+        let _revision = locks.begin_transaction().unwrap();
         let changed: HarnessPolicy =
             serde_json::from_value(serde_json::json!({"managed_config":{"model":"changed"}}))
                 .unwrap();
@@ -790,7 +795,10 @@ fn revision_snapshot_restores_earlier_harness_commits() {
     }
     assert_eq!(snapshot(&home), before);
     assert!(
-        begin_revision_transaction_at(&home, &[contexts[0].clone(), contexts[0].clone()]).is_err(),
+        acquire_revision_locks_at(&home, &[contexts[0].clone(), contexts[0].clone()])
+            .unwrap()
+            .begin_transaction()
+            .is_err(),
         "colliding transaction declarations must fail before snapshots"
     );
     std::fs::remove_dir_all(home).unwrap();

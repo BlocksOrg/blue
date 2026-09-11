@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "update public.gateway_auth_sessions set revoked_at=coalesce(revoked_at,now()),updated_at=now() where oauth_session_id=$1 and user_id=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f9b75c984bdee3ec6570bb29d639357416d1aa29e9c3cad601b89b08d31a55a"
+}

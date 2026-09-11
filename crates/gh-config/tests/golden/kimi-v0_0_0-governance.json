@@ -25,7 +25,7 @@
   "writes": [
     {
       "body": "---\nname: reviewer\ndescription: Review changes\n---\nReview carefully.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/kimi/agents/reviewer.md"
     },
     {
@@ -35,7 +35,7 @@
     },
     {
       "body": "[[hooks]]\nevent = \"Stop\"\ncommand = \"fixture-hook\"\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/kimi/hooks/hooks.toml"
     },
     {
@@ -45,7 +45,7 @@
     },
     {
       "body": "# Example\n\nA managed skill.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/kimi/skills/example/SKILL.md"
     }
   ]

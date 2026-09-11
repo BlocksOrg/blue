@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into gateway_key_selections(user_id,gateway_email,proxy_virtual_key,credential_state) values($1,$2,$3,'ready')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b011ebe095c0b6884399646c07917e26f34f34d853b27fada614a3fa29841429"
+}

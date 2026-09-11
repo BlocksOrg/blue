@@ -43,8 +43,10 @@ resource "aws_secretsmanager_secret_version" "runtime" {
       HARNESS_REDIS_URL = "rediss://default:${random_password.redis_auth.result}@${aws_elasticache_replication_group.blue[0].primary_endpoint_address}:6379/0"
     } : {},
     local.enable_proxy ? {
-      HARNESS_PROXY_OAUTH_CLIENT_SECRET = random_password.proxy_oauth_client_secret[0].result
-      HARNESS_GATEWAY_ENCRYPTION_KEY    = random_id.gateway_encryption[0].b64_std
+      HARNESS_PROXY_OAUTH_CLIENT_SECRET   = random_password.proxy_oauth_client_secret[0].result
+      HARNESS_GATEWAY_ENCRYPTION_KEY      = random_id.gateway_encryption[0].b64_std
+      HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM = var.gateway_jwt_private_key_pem
+      HARNESS_GATEWAY_JWT_JWKS_JSON       = var.gateway_jwt_jwks_json
     } : {},
   ))
 }
@@ -62,5 +64,7 @@ locals {
     "HARNESS_REDIS_URL",
     "HARNESS_PROXY_OAUTH_CLIENT_SECRET",
     "HARNESS_GATEWAY_ENCRYPTION_KEY",
+    "HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM",
+    "HARNESS_GATEWAY_JWT_JWKS_JSON",
   ] : k => "${local.runtime_secret_arn}:${k}::" }
 }

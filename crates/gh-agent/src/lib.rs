@@ -4,13 +4,13 @@
 //!
 //! `apply_once` reconciles a single config revision; `reconcile_loop` polls the
 //! service on `revision`/TTL and reconciles on change. In gateway mode it also
-//! publishes the pseudotoken to GUI-visible environments so desktop apps see it.
+//! publishes the inference token to GUI-visible environments so desktop apps see it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gh_common::{GhError, Harness};
 use gh_config::{
-    begin_revision_transaction, preflight_packages, preflight_packages_with_fetcher,
+    acquire_revision_locks, preflight_packages, preflight_packages_with_fetcher,
     resolve_compatibility, teardown_inactive_packages, write_harness_with_package_fetcher,
     write_harness_with_packages, AuthenticatedPackageFetcher, HarnessWrite, PackageFetcher,
     ProfileStatus, WriteOptions,
@@ -152,14 +152,14 @@ fn apply_once_with_inventory_and_optional_fetcher(
     }
 
     // Hold every required harness lock in stable key order before package
-    // state is read or any final implementation plan is produced. The outer
-    // snapshot spans every harness and both persisted state stores.
+    // state is read or any final implementation plan is produced. Do not take
+    // the rollback snapshot until every package preflight has succeeded.
     let contexts = candidates
         .iter()
         .map(|(_, _, context)| context.clone())
         .collect::<Vec<_>>();
-    let mut revision_transaction = match begin_revision_transaction(&contexts) {
-        Ok(transaction) => transaction,
+    let revision_locks = match acquire_revision_locks(&contexts) {
+        Ok(locks) => locks,
         Err(error) => {
             let message = error.to_string();
             return candidates
@@ -167,7 +167,7 @@ fn apply_once_with_inventory_and_optional_fetcher(
                 .map(|(harness, _, _)| HarnessReconcile {
                     harness,
                     result: Err(GhError::config(format!(
-                        "starting revision transaction: {message}"
+                        "acquiring revision locks: {message}"
                     ))),
                 })
                 .collect();
@@ -208,6 +208,22 @@ fn apply_once_with_inventory_and_optional_fetcher(
             .collect();
     }
 
+    let mut revision_transaction = match revision_locks.begin_transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            let message = error.to_string();
+            return candidates
+                .into_iter()
+                .map(|(harness, _, _)| HarnessReconcile {
+                    harness,
+                    result: Err(GhError::config(format!(
+                        "starting revision transaction: {message}"
+                    ))),
+                })
+                .collect();
+        }
+    };
+
     let mut out = Vec::new();
     for (harness, policy, context) in candidates {
         let result = match fetcher {
@@ -235,7 +251,15 @@ fn apply_once_with_inventory_and_optional_fetcher(
             .is_ok_and(|write| write.package_errors.is_empty())
     });
     if all_succeeded {
-        revision_transaction.commit();
+        if let Err(error) = revision_transaction.commit() {
+            let message = error.to_string();
+            for item in &mut out {
+                item.result = Err(GhError::config(format!(
+                    "committing revision transaction: {message}"
+                )));
+            }
+            return out;
+        }
         for write in out.iter().filter_map(|item| item.result.as_ref().ok()) {
             if !write.env.is_empty() {
                 publish_gui_env(&write.env);
@@ -250,6 +274,7 @@ fn apply_once_with_inventory_and_optional_fetcher(
 
 /// Poll the service and reconcile whenever the `revision` changes. Runs until
 /// the process is killed. `sleep` is injected so this is testable / interruptible.
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_loop(
     client: &ServiceClient,
     session: &Session,
@@ -258,11 +283,15 @@ pub fn reconcile_loop(
     now: impl Fn() -> i64,
     sleep: impl Fn(u64),
     mut on_reconciled: impl FnMut(&GovernanceConfig, &mut HarnessInventory, &[HarnessReconcile], bool),
+    mut on_unauthorized: impl FnMut(&str),
 ) {
     let mut last_revision: Option<String> = None;
+    let mut published_env: BTreeSet<String> = BTreeSet::new();
+    let mut unauthorized = false;
     loop {
         let ttl = match client.fetch_or_cached(session, now()) {
             Ok(config) => {
+                unauthorized = false;
                 let packages_drifted = gh_config::package_statuses()
                     .map(|statuses| {
                         statuses.iter().any(|status| {
@@ -324,6 +353,12 @@ pub fn reconcile_loop(
                         }
                     }
                 }
+                published_env.extend(
+                    results
+                        .iter()
+                        .filter_map(|result| result.result.as_ref().ok())
+                        .flat_map(|write| write.env.keys().cloned()),
+                );
                 on_reconciled(&config, &mut inventory, &results, all_succeeded);
                 if all_succeeded {
                     last_revision = Some(config.revision.clone());
@@ -332,12 +367,42 @@ pub fn reconcile_loop(
                 }
                 config.ttl_seconds()
             }
-            Err(e) => {
-                tracing::error!(error = %e, "config fetch failed; will retry");
-                GovernanceConfig::DEFAULT_TTL_SECONDS
+            Err(error) => {
+                let (ttl, needs_user) = failure_backoff(&error);
+                if needs_user {
+                    // Reconciling here would rewrite agent config from a cache
+                    // that carries no usable token. Back off, log once on the
+                    // transition rather than every poll, and take the dead
+                    // credentials back out of the GUI environment.
+                    if !unauthorized {
+                        unauthorized = true;
+                        tracing::error!(%error, "control service needs the user to act; not reconciling");
+                        if !published_env.is_empty() {
+                            unpublish_gui_env(&published_env);
+                            published_env.clear();
+                        }
+                    }
+                    on_unauthorized(&error.to_string());
+                } else {
+                    unauthorized = false;
+                    tracing::error!(%error, "config fetch failed; will retry");
+                }
+                ttl
             }
         };
         sleep(ttl);
+    }
+}
+
+/// Poll interval after a failed fetch, and whether the failure is one only the
+/// user can clear. An outage should be retried promptly; a dead session should
+/// not be, because nothing the daemon does will fix it.
+fn failure_backoff(error: &GhError) -> (u64, bool) {
+    match error {
+        GhError::Unauthorized(_) | GhError::ActionRequired(_) => {
+            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
+        }
+        _ => (GovernanceConfig::DEFAULT_TTL_SECONDS, false),
     }
 }
 
@@ -360,6 +425,22 @@ pub fn publish_gui_env(vars: &BTreeMap<String, String>) {
     }
 }
 
+/// Remove env vars from the GUI-visible environment. A GUI Codex that finds a
+/// known-dead JWT there fails with an opaque proxy 401; one that finds nothing
+/// says it has no credentials, which is both true and actionable.
+pub fn unpublish_gui_env(names: &BTreeSet<String>) {
+    for name in names {
+        let ok = if cfg!(target_os = "macos") {
+            run("launchctl", &["unsetenv", name])
+        } else {
+            run("systemctl", &["--user", "unset-environment", name])
+        };
+        if !ok {
+            tracing::debug!(var = %name, "could not clear env var from GUI environment (best-effort)");
+        }
+    }
+}
+
 fn run(cmd: &str, args: &[&str]) -> bool {
     std::process::Command::new(cmd)
         .args(args)
@@ -374,6 +455,19 @@ fn run(cmd: &str, args: &[&str]) -> bool {
 mod tests {
     use super::*;
     use gh_harness::{HarnessInventory, HarnessInventoryEntry};
+    use gh_service::{ManagedPackage, PackageAdapter};
+
+    struct EditingFailingFetcher {
+        path: std::path::PathBuf,
+        replacement: Vec<u8>,
+    }
+
+    impl PackageFetcher for EditingFailingFetcher {
+        fn fetch(&self, _source_ref: &str, _artifact_id: Option<&str>) -> Result<Vec<u8>, GhError> {
+            std::fs::write(&self.path, &self.replacement).unwrap();
+            Err(GhError::other("injected package preflight failure"))
+        }
+    }
 
     fn config() -> GovernanceConfig {
         GovernanceConfig {
@@ -454,5 +548,159 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("revision preflight failed")));
+    }
+
+    #[test]
+    fn failed_package_preflight_child_helper() {
+        let Some(home) = std::env::var_os("BLUE_PREFLIGHT_ROLLBACK_TEST_HOME") else {
+            return;
+        };
+        let home = std::path::PathBuf::from(home);
+        let native = home.join(".codex/config.toml");
+        let concurrent_edit = b"model = \"concurrent-user-edit\"\n".to_vec();
+
+        let mut config = config();
+        config.allowed_harnesses = vec!["codex".into()];
+        config.packages = vec![ManagedPackage {
+            id: "failing-package".into(),
+            name: None,
+            version: "1.0.0".into(),
+            source_ref: "mock://failing-package".into(),
+            artifact_id: None,
+            sha256: "a".repeat(64),
+            platform_sources: Default::default(),
+            settings: Default::default(),
+            adapters: [(
+                "codex".into(),
+                PackageAdapter {
+                    skills_dir: Some("skills".into()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }];
+        let inventory = HarnessInventory {
+            entries: vec![HarnessInventoryEntry {
+                name: "codex".into(),
+                api_allowed: true,
+                client_supported: true,
+                installed: true,
+                path: Some(home.join("bin/codex")),
+                raw_version: Some("0.149.1".into()),
+                version: Some(semver::Version::new(0, 149, 1)),
+                compatibility_profile: None,
+                compatibility_deprecated: false,
+                compatibility_error: None,
+                compatibility_warning: None,
+                reconciled: false,
+            }],
+        };
+        let fetcher = EditingFailingFetcher {
+            path: native.clone(),
+            replacement: concurrent_edit.clone(),
+        };
+
+        let results = apply_once_with_inventory_and_fetcher(
+            &config,
+            WriteOptions::default(),
+            &inventory,
+            &fetcher,
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].result.is_err());
+        assert!(results[0]
+            .result
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("injected package preflight failure"));
+        assert_eq!(std::fs::read(&native).unwrap(), concurrent_edit);
+
+        let transaction_root = home.join(".blue-transactions");
+        assert!(
+            !transaction_root.exists()
+                || std::fs::read_dir(&transaction_root)
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "failed preflight must not create a transaction journal"
+        );
+        assert!(!home
+            .join(".config/blue/runtime/codex/compatibility-state.json")
+            .exists());
+        assert!(!home.join(".config/blue/package-state.json").exists());
+        assert!(!home.join(".config/blue/package-state/codex.json").exists());
+        assert!(!home.join(".config/blue/packages/.staging").exists());
+        assert!(no_transaction_staging_paths(&home));
+    }
+
+    fn no_transaction_staging_paths(path: &std::path::Path) -> bool {
+        if path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.contains(".blue-stage-")
+                || name.contains(".blue-write-")
+                || name.contains(".blue-remove-")
+        }) {
+            return false;
+        }
+        if path.is_dir() {
+            return std::fs::read_dir(path).unwrap().all(|entry| {
+                let path = entry.unwrap().path();
+                no_transaction_staging_paths(&path)
+            });
+        }
+        true
+    }
+
+    #[test]
+    fn failed_package_preflight_preserves_concurrent_native_edit_without_transaction_artifacts() {
+        let home = std::env::temp_dir().join(format!(
+            "blue-preflight-rollback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let native = home.join(".codex/config.toml");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, b"model = \"original\"\n").unwrap();
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::failed_package_preflight_child_helper"])
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_CACHE_HOME")
+            .env("BLUE_PREFLIGHT_ROLLBACK_TEST_HOME", &home)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read(&native).unwrap(),
+            b"model = \"concurrent-user-edit\"\n"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod unauthorized_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_rejected_session_backs_the_daemon_off() {
+        assert_eq!(
+            failure_backoff(&GhError::service("connection refused")),
+            (GovernanceConfig::DEFAULT_TTL_SECONDS, false)
+        );
+        assert_eq!(
+            failure_backoff(&GhError::unauthorized("your session is no longer valid")),
+            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
+        );
+        assert_eq!(
+            failure_backoff(&GhError::action_required("run `blue gateway`")),
+            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
+        );
     }
 }

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "insert into gateway_key_selections(user_id,gateway_email,credential_ciphertext,credential_nonce,credential_wrapped_key,encryption_key_id,credential_version,credential_expires_at,provisioner_metadata) values($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bytea",
+        "Bytea",
+        "Bytea",
+        "Text",
+        "Uuid",
+        "Timestamptz",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1726841c44c7fc74a290fe22f13556e349ebbbc4f8dba4cc22be69e750238bd9"
+}

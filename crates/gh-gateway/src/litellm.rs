@@ -6,7 +6,8 @@ use crate::{GatewayAdapter, GatewayRoute, InvalidCredentialReason, UpstreamCrede
 /// LiteLLM's client-facing routing adapter.
 ///
 /// Every harness points at Blue's inference proxy rather than LiteLLM itself.
-/// The proxy replaces the pseudotoken with the user's LiteLLM virtual key.
+/// The proxy validates the inference JWT and replaces it with the user's
+/// LiteLLM virtual key.
 pub(crate) struct LiteLlmAdapter;
 
 impl GatewayAdapter for LiteLlmAdapter {
@@ -23,10 +24,10 @@ impl GatewayAdapter for LiteLlmAdapter {
             .trim_end_matches('/')
             .to_owned();
         let token = gateway
-            .pseudotoken
+            .token
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| GhError::config("gateway runtime config is missing pseudotoken"))?
+            .ok_or_else(|| GhError::config("gateway runtime config is missing token"))?
             .to_owned();
 
         Ok(GatewayRoute { base_url, token })

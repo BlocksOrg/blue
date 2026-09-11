@@ -69,6 +69,7 @@ tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "time", "migrate", "macros", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
+windows-sys = "0.59"
 aws-config = { version = "=1.11.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-kms = { version = "=1.117.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }

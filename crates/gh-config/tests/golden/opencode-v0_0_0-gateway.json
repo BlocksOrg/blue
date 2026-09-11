@@ -32,7 +32,7 @@
   "writes": [
     {
       "body": "---\nname: reviewer\ndescription: Review changes\n---\nReview carefully.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/opencode/agents/reviewer.md"
     },
     {
@@ -47,12 +47,12 @@
     },
     {
       "body": "export const Fixture = async () => ({})\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/opencode/plugins/fixture.js"
     },
     {
       "body": "# Example\n\nA managed skill.\n",
-      "mode": 420,
+      "mode": 384,
       "path": "$HOME/.config/blue/runtime/opencode/skills/example/SKILL.md"
     }
   ]

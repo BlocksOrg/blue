@@ -36,6 +36,12 @@ control_api:
 #   url: os.environ/HARNESS_GATEWAY_URL
 #   inference_proxy_url: os.environ/HARNESS_INFERENCE_PROXY_URL
 #   inference_proxy_health_url: os.environ/HARNESS_INFERENCE_PROXY_HEALTH_URL
+#   inference_jwt:
+#     issuer: os.environ/HARNESS_GATEWAY_JWT_ISSUER
+#     audience: os.environ/HARNESS_GATEWAY_JWT_AUDIENCE
+#     active_kid: os.environ/HARNESS_GATEWAY_JWT_ACTIVE_KID
+#     private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
+#     jwks_file: /var/run/blue/gateway-jwt/jwks.json
 #   # OAuth client id the inference proxy presents; defaults to blue-inference-proxy.
 #   internal_allowed_client_id: blue-inference-proxy
 #   secret_encryption:
@@ -52,12 +58,14 @@ control_api:
 
 governance:
   revision: "2026-08-30.1"
-  contract_version: 2
+  contract_version: 3
   required_capabilities:
     - adapter_intervals
     - compiled_harness_registry
     - transactional_reconcile
     - versioned_state
+    # Required when gateway is enabled.
+    # - gateway_inference_jwt
   minimum_client_version: "0.1.0"
   ttl_seconds: 300
   required: true

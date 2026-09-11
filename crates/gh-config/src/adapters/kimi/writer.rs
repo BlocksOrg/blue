@@ -308,7 +308,7 @@ mod tests {
         let result = write(&mut plan, home, policy, wiring, session_upload_hooks, None)?;
         let mut transaction = crate::FileTransaction::begin(home, &plan)?;
         transaction.apply(&plan)?;
-        transaction.commit();
+        transaction.commit()?;
         Ok(result)
     }
 
@@ -390,7 +390,7 @@ mod tests {
         .unwrap();
         let wiring = GatewayWiring {
             base_url: "https://inference.example".into(),
-            token: "psk_test".into(),
+            token: "test-inference-jwt".into(),
             wire_api: None,
             auth: AuthPlacement::InFile,
         };

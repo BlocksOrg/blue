@@ -228,6 +228,10 @@ jobs:
         env:
           IMAGE: ${{ needs.setup.outputs.image }}
         run: |
+          # SC2046: both expansions must word-split — one yields the `-t <tag>`
+          # pairs, the other one `<image>@sha256:<digest>` argument per digest
+          # file. Quoting either would collapse it into a single argv entry.
+          # shellcheck disable=SC2046
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "${IMAGE}@sha256:%s " *)

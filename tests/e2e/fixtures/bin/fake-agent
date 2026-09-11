@@ -4,7 +4,10 @@ set -euo pipefail
 agent="$(basename "$0")"
 if [[ "${1:-}" == "--version" ]] || [[ "${1:-}" == "version" ]]; then
   version_var="E2E_${agent^^}_VERSION"
-  version="${!version_var:-1.0.0}"
+  version="${!version_var:-}"
+  if [[ -z "$version" ]]; then
+    version="$(node -e 'const lock = require("/work/tests/e2e/agents.lock.json"); process.stdout.write(lock.agents[process.argv[1]].version)' "$agent")"
+  fi
   printf '%s %s\n' "$agent" "$version"
   exit 0
 fi

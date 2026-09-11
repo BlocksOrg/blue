@@ -5,8 +5,8 @@ info:
   description: >
     The client-side contract the `blue` CLI expects from the provisioned
     service. The reference `control-api` implements it; any BYO service that
-    honors these shapes can be swapped in. Gateway-mode endpoints (pseudotoken
-    issuance) are OPTIONAL — governance-only deployments need only
+    honors these shapes can be swapped in. Gateway-mode inference JWT
+    issuance is OPTIONAL — governance-only deployments need only
     `GET /governance-config`. CLI callers use OAuth 2.0 access tokens issued
     through RFC 8628 device authorization; dashboard callers use an HTTP-only
     Better Auth session cookie.
@@ -156,6 +156,25 @@ paths:
         "200": { description: Current identity }
         "401": { description: "Missing, expired, or revoked service session" }
 
+  /gateway/jwks:
+    get:
+      operationId: getGatewayJwks
+      tags: [Gateway]
+      summary: Get inference JWT verification keys
+      security: []
+      responses:
+        "200": { description: Active and retained gateway verification keys }
+        "404": { description: Gateway mode is disabled }
+
+  /gateway/session/revoke:
+    post:
+      operationId: revokeGatewaySession
+      tags: [Gateway]
+      summary: Revoke the gateway session bound to the current OAuth session
+      responses:
+        "204": { description: Gateway session revoked }
+        "401": { description: Access token is invalid or has no sid claim }
+
   /governance-config:
     get:
       operationId: getGovernanceConfig
@@ -163,7 +182,7 @@ paths:
       summary: Fetch the governance config for the authenticated user/org
       description: >
         Returns which harnesses are allowed, per-harness managed config,
-        MCP/skills, and — in gateway mode — the per-user pseudotoken embedded in
+        MCP/skills, and — in gateway mode — a session-bound inference JWT embedded in
         the global `gateway` block. Response is scoped to the caller's
         org/groups (server-side).
       responses:
@@ -243,7 +262,7 @@ paths:
       operationId: getGatewayKey
       tags: [Gateway]
       summary: Get the authenticated user's managed gateway-key status
-      description: Credential and pseudotoken values are never returned.
+      description: Credential and inference JWT values are never returned.
       responses:
         "200":
           description: Managed gateway-key status and non-secret metadata
@@ -1527,7 +1546,7 @@ components:
 
     GatewayRuntimeChecks:
       type: object
-      required: [gateway_policy, gateway_url, inference_proxy_url, provisioner, secret_encryption, internal_auth]
+      required: [gateway_policy, gateway_url, inference_proxy_url, provisioner, secret_encryption, internal_auth, inference_jwt_signing]
       properties:
         gateway_policy: { type: boolean }
         gateway_url: { type: boolean }
@@ -1535,6 +1554,7 @@ components:
         provisioner: { type: boolean }
         secret_encryption: { type: boolean }
         internal_auth: { type: boolean }
+        inference_jwt_signing: { type: boolean }
 
     GatewayRequestResult:
       type: string
@@ -1852,22 +1872,22 @@ components:
       required: [type]
       description: >
         Present ⇒ gateway mode for every allowed harness; omit ⇒ governance-only.
-        proxy_url and pseudotoken are runtime fields injected by the control API
+        proxy_url and token are runtime fields injected by the control API
         when it delivers the policy to an authenticated client.
       properties:
         type: { type: string, description: Deployment-defined gateway adapter identifier. }
         proxy_url: { type: string, description: Runtime inference proxy URL injected at delivery time }
-        pseudotoken:
+        token:
           type: string
           description: >
-            Runtime-only per-user opaque stand-in (psk_…). Durable-but-revocable;
-            the inference proxy swaps it for an upstream gateway credential. The control
-            API injects it into the authenticated client's config response.
+            Runtime-only, session-bound inference JWT. The inference proxy validates it
+            and swaps it for an upstream gateway credential. The control API injects it
+            into the authenticated client's config response and never persists it.
         auth_style:
           type: string
           enum: [bearer]
           default: bearer
-          description: Compatibility field; bearer is the only supported client-to-proxy authentication style.
+          description: Client-to-proxy authentication style; bearer is the only supported value.
 
     McpServer:
       type: object

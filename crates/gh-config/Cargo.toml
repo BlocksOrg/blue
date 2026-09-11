@@ -20,6 +20,14 @@ hex = { workspace = true }
 flate2 = "1"
 tar = "0.4"
 semver = { workspace = true }
+rand = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }

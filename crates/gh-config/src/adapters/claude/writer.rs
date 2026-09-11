@@ -289,7 +289,7 @@ mod tests {
         )?;
         let mut transaction = crate::FileTransaction::begin(home, &plan)?;
         transaction.apply(&plan)?;
-        transaction.commit();
+        transaction.commit()?;
         Ok(result)
     }
 
@@ -304,7 +304,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             home.join(".claude/settings.json"),
-            br#"{"custom":"keep","model":"claude-governed","permissions":{"deny":["danger"],"defaultMode":"bypassPermissions"},"env":{"PERSONAL":"yes","ANTHROPIC_BASE_URL":"http://proxy","ANTHROPIC_AUTH_TOKEN":"psk_old"},"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"my-session-hook"}]},{"hooks":[{"type":"command","command":"harness session-upload claude"}]}]}}"#,
+            br#"{"custom":"keep","model":"claude-governed","permissions":{"deny":["danger"],"defaultMode":"bypassPermissions"},"env":{"PERSONAL":"yes","ANTHROPIC_BASE_URL":"http://proxy","ANTHROPIC_AUTH_TOKEN":"old-inference-token"},"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"my-session-hook"}]},{"hooks":[{"type":"command","command":"harness session-upload claude"}]}]}}"#,
         )
         .unwrap();
         let policy: HarnessPolicy = serde_json::from_value(json!({

@@ -45,6 +45,12 @@ Set `HARNESS_LOG=debug` for more client diagnostics.
   <Accordion title="A managed package failed to activate">
     Run `blue status` to identify the package and harness. Confirm the archive URL is reachable, its configured SHA-256 matches the exact bytes, every adapter path exists, and a helper asset covers the current OS and architecture. A previous working version remains available when its adapter is still compatible, but the affected governed launch stays blocked until reconciliation succeeds.
   </Accordion>
+  <Accordion title="A package download reports an unsupported redirect">
+    `blue status` reports `public package redirects and environment proxies are unsupported` when a public package URL answers with a redirect. Blue downloads the recorded URL and never follows one. A GitHub release-asset URL always redirects to a short-lived signed URL, so the final URL is not a usable substitute; ask an administrator to republish the package from `github:owner/repository@ref` or a managed repository connection. See [public repositories and archives](/next/admin/managed-packages).
+  </Accordion>
+  <Accordion title="A package host resolves to a private address">
+    `package URL must resolve only to public addresses` means this client's resolver returned at least one non-public address for the package host; Blue rejects the whole answer set rather than falling back to the public addresses in it. Split-horizon or internal DNS that rewrites a public hostname causes this on an otherwise reachable host. The fix is a managed package source connection with its own host allowlist, not a client-side override.
+  </Accordion>
   <Accordion title="A removed package is quarantined">
     Reconciliation detected local changes in metaharness-owned content and disabled the package without deleting those changes. Inspect the quarantine path reported by client status, preserve anything needed, and remove it manually when it is no longer useful.
   </Accordion>

@@ -87,7 +87,7 @@ control_api:
 
 governance:
   revision: "2026-08-30.1"
-  contract_version: 2
+  contract_version: 3
   required_capabilities:
     - adapter_intervals
     - compiled_harness_registry
@@ -234,6 +234,13 @@ gateway:
   inference_proxy_url: https://inference.blue.example.com
   inference_proxy_health_url: http://127.0.0.1:8081/health
   internal_allowed_client_id: blue-inference-proxy
+  inference_jwt:
+    issuer: https://api.blue.example.com
+    audience: blue-inference-proxy
+    active_kid: gateway-2026-09
+    private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
+    jwks_file: /var/run/blue/gateway-jwt/jwks.json
+    token_ttl_seconds: 43200
   secret_encryption:
     provider: aws-kms
     key_id: arn:aws:kms:us-west-2:123456789012:key/example
@@ -249,6 +256,12 @@ gateway:
 | `inference_proxy_url` | Public proxy URL written into governed agent overlays. |
 | `inference_proxy_health_url` | Internal health URL used by the Control API. |
 | `internal_allowed_client_id` | OAuth client id (`sub`) the Control API accepts on the internal resolver from the inference proxy's client-credentials token. Defaults to `blue-inference-proxy`. |
+| `inference_jwt.issuer` | Exact issuer placed in inference JWTs and required by the proxy. |
+| `inference_jwt.audience` | Exact inference-proxy audience placed in inference JWTs. |
+| `inference_jwt.active_kid` | Signing-key ID; it must identify a key in `inference_jwt.jwks_file`. |
+| `inference_jwt.private_key_file` | Active RS256 private signing key, mounted only in Control API replicas. |
+| `inference_jwt.jwks_file` | Public JWKS with the active key and retained verification keys for rotation. |
+| `inference_jwt.token_ttl_seconds` | Inference JWT lifetime; defaults to `43200` (12 hours) and is always clamped to the remaining browser session. The token is written into the agent process environment at spawn and is not rotated in flight, so a shorter value shortens the usable agent run. |
 | `secret_encryption.provider` | `aws-kms` for production or `environment` for development. |
 | `secret_encryption.key_id` | AWS KMS key used for envelope encryption. |
 | `secret_encryption.key` | Base64 environment key required by the development `environment` provider. |
@@ -263,11 +276,12 @@ gateway:
 `HARNESS_PROVISIONER_EXECUTABLE_PATH` and `HARNESS_PROVISIONER_EXECUTABLE_SHA256` override the corresponding custom-provisioner YAML fields.
 
 The inference proxy also requires `HARNESS_GATEWAY_TYPE` with the same value as
-`gateway.type`; it does not infer a gateway from the upstream URL. In Helm, set
-`blue.gatewayType`, which is required with `blue.enableInferenceProxy=true` and
-is injected into both the Control API and proxy workloads.
+`gateway.type`, plus `HARNESS_GATEWAY_JWKS_URL`,
+`HARNESS_GATEWAY_JWT_ISSUER`, and `HARNESS_GATEWAY_JWT_AUDIENCE`; it does not
+infer a gateway or trust domain from URLs. In Helm, set `blue.gatewayType` and
+the `blue.inferenceJwt` values when `blue.enableInferenceProxy=true`.
 
-The LiteLLM administrator key remains a runtime secret supplied as `HARNESS_LITELLM_ADMIN_KEY`; do not put it in governance policy. See [Bring your own gateway](/next/concepts/gateway-mode) for the request path, pseudotoken model, and operational checks.
+The LiteLLM administrator key and inference JWT private key remain runtime secrets; do not put them in governance policy. See [Bring your own gateway](/next/concepts/gateway-mode) for the authenticated request path, key ring, and operational checks.
 
 ## Configure the governance baseline
 
@@ -276,7 +290,7 @@ The `governance` section is the deployment-authored baseline delivered to client
 | Field | Meaning |
 | --- | --- |
 | `revision` | Required seed value. The Control API replaces it with an immutable stored revision ID whenever it publishes a revision. |
-| `contract_version` | Wire contract version. Current clients support version 2. |
+| `contract_version` | Wire contract version. Current clients support version 3. |
 | `required_capabilities` | Features a client must support before accepting policy. |
 | `minimum_client_version` | Operator-visible rollout floor; required when using harness version ranges or versioned package adapters. |
 | `ttl_seconds` | Client cache and polling interval; defaults to 300 seconds. |

@@ -1,21 +1,24 @@
 //! Streaming inference proxy for gateway mode.
 //!
-//! Pseudotoken resolutions are cached briefly and invalidated through the
+//! Session-bound credential resolutions are cached briefly and invalidated through the
 //! Control API event stream. Request metadata is delivered in bounded batches.
 
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{Extension, State};
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::StreamExt;
+use jsonwebtoken::jwk::{Jwk, JwkSet};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
@@ -33,6 +36,10 @@ struct Mapping {
     profile_name: Option<String>,
     credential_version: Option<String>,
     credential_expires_at: Option<OffsetDateTime>,
+    gateway_session_expires_at: Option<OffsetDateTime>,
+    /// Instant the backing session was last reactivated after a CLI logout.
+    /// Tokens issued before it are rejected.
+    session_not_before: Option<OffsetDateTime>,
 }
 
 struct CacheEntry {
@@ -57,28 +64,34 @@ impl CredentialCache {
         }
     }
 
-    fn get(&mut self, digest: &str) -> Option<Mapping> {
-        let valid = self.entries.get(digest).is_some_and(|entry| {
+    fn get(&mut self, cache_key: &str) -> Option<Mapping> {
+        let valid = self.entries.get(cache_key).is_some_and(|entry| {
             entry.expires_at > Instant::now()
                 && entry
                     .mapping
                     .credential_expires_at
                     .is_none_or(|expires| expires > OffsetDateTime::now_utc())
+                && entry
+                    .mapping
+                    .gateway_session_expires_at
+                    .is_none_or(|expires| expires > OffsetDateTime::now_utc())
         });
         if !valid {
-            self.entries.remove(digest);
+            self.entries.remove(cache_key);
             return None;
         }
-        self.order.retain(|key| key != digest);
-        self.order.push_back(digest.to_owned());
-        self.entries.get(digest).map(|entry| entry.mapping.clone())
+        self.order.retain(|key| key != cache_key);
+        self.order.push_back(cache_key.to_owned());
+        self.entries
+            .get(cache_key)
+            .map(|entry| entry.mapping.clone())
     }
 
-    fn insert(&mut self, digest: String, mapping: Mapping) {
-        self.order.retain(|key| key != &digest);
-        self.order.push_back(digest.clone());
+    fn insert(&mut self, cache_key: String, mapping: Mapping) {
+        self.order.retain(|key| key != &cache_key);
+        self.order.push_back(cache_key.clone());
         self.entries.insert(
-            digest,
+            cache_key,
             CacheEntry {
                 mapping,
                 expires_at: Instant::now() + self.ttl,
@@ -91,14 +104,16 @@ impl CredentialCache {
         }
     }
 
-    fn invalidate(&mut self, digest: Option<&str>, user_id: &str) {
-        if let Some(digest) = digest {
-            self.entries.remove(digest);
-            self.order.retain(|key| key != digest);
+    fn invalidate(&mut self, oauth_session_id: Option<&str>, user_id: &str) {
+        if let Some(oauth_session_id) = oauth_session_id {
+            let cache_key = format!("{oauth_session_id}:{user_id}");
+            self.entries.remove(&cache_key);
+            self.order.retain(|key| key != &cache_key);
+        } else {
+            self.entries
+                .retain(|_, entry| entry.mapping.user_id.as_deref() != Some(user_id));
+            self.order.retain(|key| self.entries.contains_key(key));
         }
-        self.entries
-            .retain(|_, entry| entry.mapping.user_id.as_deref() != Some(user_id));
-        self.order.retain(|key| self.entries.contains_key(key));
     }
 
     fn clear(&mut self) {
@@ -111,8 +126,14 @@ impl CredentialCache {
 struct Metrics {
     cache_hits: AtomicU64,
     cache_misses: AtomicU64,
+    invalidation_events: AtomicU64,
+    invalidation_disconnects: AtomicU64,
+    cache_bypasses: AtomicU64,
     resolver_errors: AtomicU64,
-    rate_limited: AtomicU64,
+    rate_limited_unverified: AtomicU64,
+    rate_limited_session: AtomicU64,
+    jwks_fetches: AtomicU64,
+    jwks_unknown_kid: AtomicU64,
     log_dropped: AtomicU64,
     active_streams: AtomicU64,
     oauth_token_fetches: AtomicU64,
@@ -181,6 +202,10 @@ struct AppState {
     map: HashMap<String, Mapping>,
     static_key: Option<String>,
     resolver_url: Option<String>,
+    gateway_jwks_url: Option<String>,
+    gateway_jwt_issuer: Option<String>,
+    gateway_jwt_audience: Option<String>,
+    gateway_jwks: RwLock<Option<CachedGatewayJwks>>,
     event_url: Option<String>,
     oauth: Option<OauthConfig>,
     service_token: RwLock<Option<CachedServiceToken>>,
@@ -194,13 +219,66 @@ struct AppState {
     rates: Mutex<HashMap<String, RateWindow>>,
     per_token_rps: u64,
     per_token_burst: u64,
+    /// Budget for tokens that fail signature verification, charged per peer
+    /// address. Legitimate traffic never touches it.
+    unverified_rps: u64,
+    jwks_refetch_cooldown: Duration,
     resolver_permits: Arc<Semaphore>,
     request_permits: Arc<Semaphore>,
     max_body_bytes: usize,
     log_tx: mpsc::Sender<RequestLogEvent>,
     invalidation_tx: mpsc::Sender<InvalidCredentialReport>,
     metrics: Metrics,
+    invalidation_healthy: AtomicBool,
     ready: AtomicBool,
+}
+
+struct CachedGatewayJwks {
+    set: JwkSet,
+    fetched_at: Instant,
+    /// When the JWKS endpoint was last called, successfully or not. Bounds how
+    /// often an unknown kid can make us call it again.
+    last_attempt: Instant,
+}
+
+impl CachedGatewayJwks {
+    fn key(&self, kid: &str) -> Option<&Jwk> {
+        self.set
+            .keys
+            .iter()
+            .find(|key| key.common.key_id.as_deref() == Some(kid))
+    }
+}
+
+const GATEWAY_JWKS_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Deserialize, Serialize)]
+struct GatewayInferenceClaims {
+    #[allow(dead_code)]
+    iss: String,
+    #[allow(dead_code)]
+    aud: String,
+    sub: String,
+    iat: i64,
+    exp: i64,
+    jti: String,
+    blue_oauth_session_id: String,
+    scope: String,
+}
+
+struct GatewayIdentity {
+    user_id: Uuid,
+    oauth_session_id: String,
+    /// Signature-verified `iat`, compared against the session's
+    /// `session_not_before`. Deliberately **not** part of `cache_key`: every
+    /// JWT for a session would otherwise get its own cache entry.
+    issued_at: i64,
+}
+
+impl GatewayIdentity {
+    fn cache_key(&self) -> String {
+        format!("{}:{}", self.oauth_session_id, self.user_id)
+    }
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -273,6 +351,9 @@ async fn main() {
         .to_owned();
     let static_key = std::env::var("HARNESS_STATIC_VIRTUAL_KEY").ok();
     let resolver_url = std::env::var("HARNESS_GATEWAY_RESOLVER_URL").ok();
+    let gateway_jwks_url = std::env::var("HARNESS_GATEWAY_JWKS_URL").ok();
+    let gateway_jwt_issuer = std::env::var("HARNESS_GATEWAY_JWT_ISSUER").ok();
+    let gateway_jwt_audience = std::env::var("HARNESS_GATEWAY_JWT_AUDIENCE").ok();
     let log_url = std::env::var("HARNESS_GATEWAY_LOG_URL").ok();
     let event_url = std::env::var("HARNESS_GATEWAY_EVENT_URL").ok().or_else(|| {
         resolver_url
@@ -319,14 +400,25 @@ async fn main() {
         );
     }
     let map = load_map();
+    let explicit_local_development =
+        std::env::var("BLUE_ALLOW_INSECURE_DEV").as_deref() == Ok("true");
+    if dynamic_mode && (static_key.is_some() || !map.is_empty()) {
+        panic!("static gateway routing cannot be combined with the production resolver path");
+    }
+    if !dynamic_mode && !explicit_local_development {
+        panic!("HARNESS_GATEWAY_RESOLVER_URL is required outside explicit local development");
+    }
     let listen = std::env::var("HARNESS_LISTEN").unwrap_or_else(|_| "0.0.0.0:8081".into());
     validate_urls(
-        &upstream_base,
-        resolver_url.as_ref(),
-        log_url.as_ref(),
-        event_url.as_ref(),
-        credential_invalid_url.as_ref(),
-        oauth.as_ref().map(|oauth| &oauth.token_url),
+        ProxyUrls {
+            gateway: &upstream_base,
+            gateway_jwks: gateway_jwks_url.as_deref(),
+            resolver: resolver_url.as_deref(),
+            logs: log_url.as_deref(),
+            events: event_url.as_deref(),
+            credential_invalid: credential_invalid_url.as_deref(),
+            token: oauth.as_ref().map(|oauth| oauth.token_url.as_str()),
+        },
         internal_transport,
     );
 
@@ -359,6 +451,10 @@ async fn main() {
         map,
         static_key,
         resolver_url,
+        gateway_jwks_url,
+        gateway_jwt_issuer,
+        gateway_jwt_audience,
+        gateway_jwks: RwLock::new(None),
         event_url,
         oauth,
         service_token: RwLock::new(None),
@@ -375,6 +471,11 @@ async fn main() {
         rates: Mutex::new(HashMap::new()),
         per_token_rps: env_u64("HARNESS_PROXY_PER_TOKEN_RPS", 50),
         per_token_burst: env_u64("HARNESS_PROXY_PER_TOKEN_BURST", 100),
+        unverified_rps: env_u64("HARNESS_PROXY_UNVERIFIED_RPS", 20),
+        jwks_refetch_cooldown: Duration::from_secs(env_u64(
+            "HARNESS_PROXY_JWKS_REFETCH_COOLDOWN",
+            30,
+        )),
         resolver_permits: Arc::new(Semaphore::new(env_usize(
             "HARNESS_PROXY_MAX_RESOLVER_CONCURRENCY",
             64,
@@ -387,6 +488,7 @@ async fn main() {
         log_tx,
         invalidation_tx,
         metrics: Metrics::default(),
+        invalidation_healthy: AtomicBool::new(!dynamic_mode),
         ready: AtomicBool::new(true),
     });
 
@@ -472,12 +574,15 @@ async fn main() {
         .await
         .unwrap_or_else(|error| panic!("binding {listen}: {error}"));
     let mut server_shutdown = shutdown_rx;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = server_shutdown.changed().await;
-        })
-        .await
-        .expect("server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = server_shutdown.changed().await;
+    })
+    .await
+    .expect("server error");
     let _ = tokio::time::timeout(Duration::from_secs(10), log_handle).await;
 }
 
@@ -589,6 +694,9 @@ fn validate_required_gateway_env(get: impl Fn(&str) -> Option<String>) -> Result
             "HARNESS_PROXY_OAUTH_CLIENT_ID",
             "HARNESS_PROXY_OAUTH_CLIENT_SECRET",
             "HARNESS_PROXY_OAUTH_RESOURCE",
+            "HARNESS_GATEWAY_JWKS_URL",
+            "HARNESS_GATEWAY_JWT_ISSUER",
+            "HARNESS_GATEWAY_JWT_AUDIENCE",
         ] {
             if !present(name) {
                 missing.push(name);
@@ -642,28 +750,31 @@ fn oauth_config_from_env() -> Option<OauthConfig> {
     })
 }
 
-fn validate_urls(
-    gateway: &str,
-    resolver: Option<&String>,
-    log: Option<&String>,
-    events: Option<&String>,
-    invalidation: Option<&String>,
-    token: Option<&String>,
-    internal_transport: InternalTransportMode,
-) {
+struct ProxyUrls<'a> {
+    gateway: &'a str,
+    gateway_jwks: Option<&'a str>,
+    resolver: Option<&'a str>,
+    logs: Option<&'a str>,
+    events: Option<&'a str>,
+    credential_invalid: Option<&'a str>,
+    token: Option<&'a str>,
+}
+
+fn validate_urls(urls: ProxyUrls<'_>, internal_transport: InternalTransportMode) {
     let allow_insecure = std::env::var("BLUE_ALLOW_INSECURE_DEV").as_deref() == Ok("true");
     for (name, url) in [
-        ("gateway", Some(gateway)),
-        ("resolver", resolver.map(String::as_str)),
-        ("request-log", log.map(String::as_str)),
-        ("events", events.map(String::as_str)),
-        ("credential-invalidation", invalidation.map(String::as_str)),
-        ("token", token.map(String::as_str)),
+        ("gateway", Some(urls.gateway)),
+        ("gateway-jwks", urls.gateway_jwks),
+        ("resolver", urls.resolver),
+        ("request-log", urls.logs),
+        ("events", urls.events),
+        ("credential-invalidation", urls.credential_invalid),
+        ("token", urls.token),
     ] {
         if let Some(url) = url {
             let internal = matches!(
                 name,
-                "resolver" | "request-log" | "events" | "credential-invalidation"
+                "gateway-jwks" | "resolver" | "request-log" | "events" | "credential-invalidation"
             );
             if internal {
                 if !internal_url_matches_transport(internal_transport, url) {
@@ -716,8 +827,15 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
         concat!(
             "gateway_proxy_cache_hits_total {}\n",
             "gateway_proxy_cache_misses_total {}\n",
+            "gateway_proxy_invalidation_events_total {}\n",
+            "gateway_proxy_invalidation_disconnects_total {}\n",
+            "gateway_proxy_cache_bypasses_total {}\n",
+            "gateway_proxy_invalidation_stream_healthy {}\n",
             "gateway_proxy_resolver_errors_total {}\n",
-            "gateway_proxy_rate_limited_total {}\n",
+            "gateway_proxy_rate_limited_unverified_total {}\n",
+            "gateway_proxy_rate_limited_session_total {}\n",
+            "gateway_proxy_jwks_fetches_total {}\n",
+            "gateway_proxy_jwks_unknown_kid_total {}\n",
             "gateway_proxy_log_dropped_total {}\n",
             "gateway_proxy_active_streams {}\n",
             "gateway_proxy_oauth_token_fetches_total {}\n",
@@ -727,8 +845,21 @@ async fn metrics(State(state): State<Arc<AppState>>) -> String {
         ),
         state.metrics.cache_hits.load(Ordering::Relaxed),
         state.metrics.cache_misses.load(Ordering::Relaxed),
+        state.metrics.invalidation_events.load(Ordering::Relaxed),
+        state
+            .metrics
+            .invalidation_disconnects
+            .load(Ordering::Relaxed),
+        state.metrics.cache_bypasses.load(Ordering::Relaxed),
+        u8::from(state.invalidation_healthy.load(Ordering::Acquire)),
         state.metrics.resolver_errors.load(Ordering::Relaxed),
-        state.metrics.rate_limited.load(Ordering::Relaxed),
+        state
+            .metrics
+            .rate_limited_unverified
+            .load(Ordering::Relaxed),
+        state.metrics.rate_limited_session.load(Ordering::Relaxed),
+        state.metrics.jwks_fetches.load(Ordering::Relaxed),
+        state.metrics.jwks_unknown_kid.load(Ordering::Relaxed),
         state.metrics.log_dropped.load(Ordering::Relaxed),
         state.metrics.active_streams.load(Ordering::Relaxed),
         state.metrics.oauth_token_fetches.load(Ordering::Relaxed),
@@ -881,10 +1012,7 @@ async fn token_refresh_worker(
 
 #[derive(Deserialize)]
 struct ResolveResponse {
-    upstream_credential: Option<String>,
-    /// Historical LiteLLM-specific field retained for one compatibility
-    /// release.
-    virtual_key: Option<String>,
+    upstream_credential: String,
     user: String,
     user_id: Option<String>,
     organization_id: Option<String>,
@@ -892,6 +1020,8 @@ struct ResolveResponse {
     profile_name: Option<String>,
     credential_version: Option<String>,
     credential_expires_at: Option<String>,
+    gateway_session_expires_at: Option<String>,
+    session_not_before: Option<String>,
 }
 #[derive(Debug)]
 enum ResolveError {
@@ -899,25 +1029,136 @@ enum ResolveError {
     Unavailable,
 }
 
-fn resolved_upstream_credential(
-    upstream_credential: Option<String>,
-    virtual_key: Option<String>,
-) -> Result<String, ResolveError> {
-    let credential = match (upstream_credential, virtual_key) {
-        (Some(current), Some(legacy)) if current != legacy => {
-            return Err(ResolveError::Unavailable)
+async fn gateway_jwk_for(state: &AppState, kid: &str) -> Result<Jwk, ResolveError> {
+    {
+        let cached = state.gateway_jwks.read().await;
+        if let Some(cache) = cached.as_ref() {
+            if let Some(key) = cache.key(kid) {
+                if cache.fetched_at.elapsed() < GATEWAY_JWKS_TTL {
+                    return Ok(key.clone());
+                }
+            } else if cache.last_attempt.elapsed() < state.jwks_refetch_cooldown {
+                // Unknown kid against a set we just fetched. Refetching per
+                // request turns a trickle of bogus kids into a JWKS flood
+                // against the Control API; rotation still converges within one
+                // cooldown.
+                state
+                    .metrics
+                    .jwks_unknown_kid
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(ResolveError::Invalid);
+            }
         }
-        (Some(current), _) => current,
-        (None, Some(legacy)) => legacy,
-        (None, None) => return Err(ResolveError::Unavailable),
-    };
-    if credential.trim().is_empty() {
-        return Err(ResolveError::Unavailable);
     }
-    Ok(credential)
+    let url = state
+        .gateway_jwks_url
+        .as_ref()
+        .ok_or(ResolveError::Unavailable)?;
+    state.metrics.jwks_fetches.fetch_add(1, Ordering::Relaxed);
+    let response = if state.oauth.is_some() {
+        let token = get_valid_token(state)
+            .await
+            .ok_or(ResolveError::Unavailable)?;
+        state
+            .control_client
+            .read()
+            .await
+            .clone()
+            .get(url)
+            .bearer_auth(token)
+            .timeout(state.resolver_timeout)
+            .send()
+            .await
+    } else {
+        // Explicit local-development mode has no Control API service identity.
+        state
+            .oauth_client
+            .get(url)
+            .timeout(state.resolver_timeout)
+            .send()
+            .await
+    };
+    let fetched = match response {
+        Ok(response) => match response.error_for_status() {
+            Ok(response) => response.json::<JwkSet>().await.map_err(|_| ()),
+            Err(_) => Err(()),
+        },
+        Err(_) => Err(()),
+    };
+    let now = Instant::now();
+    let mut cached = state.gateway_jwks.write().await;
+    let Ok(set) = fetched else {
+        // Record the attempt even on failure, so a broken JWKS endpoint is not
+        // retried once per request.
+        if let Some(cache) = cached.as_mut() {
+            cache.last_attempt = now;
+        }
+        return Err(ResolveError::Unavailable);
+    };
+    // Cache the set *before* looking the kid up. Doing it the other way round
+    // meant an unknown kid never populated the cache at all, so every
+    // legitimate miss that followed paid for another fetch.
+    let cache = cached.insert(CachedGatewayJwks {
+        set,
+        fetched_at: now,
+        last_attempt: now,
+    });
+    cache.key(kid).cloned().ok_or_else(|| {
+        state
+            .metrics
+            .jwks_unknown_kid
+            .fetch_add(1, Ordering::Relaxed);
+        ResolveError::Invalid
+    })
 }
 
-async fn resolve_dynamic(state: &AppState, pseudotoken: &str) -> Result<Mapping, ResolveError> {
+async fn validate_gateway_token(
+    state: &AppState,
+    token: &str,
+) -> Result<GatewayIdentity, ResolveError> {
+    let header = decode_header(token).map_err(|_| ResolveError::Invalid)?;
+    if header.alg != Algorithm::RS256 {
+        return Err(ResolveError::Invalid);
+    }
+    let kid = header.kid.as_deref().ok_or(ResolveError::Invalid)?;
+    let jwk = gateway_jwk_for(state, kid).await?;
+    let key = DecodingKey::from_jwk(&jwk).map_err(|_| ResolveError::Invalid)?;
+    let issuer = state
+        .gateway_jwt_issuer
+        .as_deref()
+        .ok_or(ResolveError::Unavailable)?;
+    let audience = state
+        .gateway_jwt_audience
+        .as_deref()
+        .ok_or(ResolveError::Unavailable)?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[audience]);
+    let claims = decode::<GatewayInferenceClaims>(token, &key, &validation)
+        .map_err(|_| ResolveError::Invalid)?
+        .claims;
+    if !claims
+        .scope
+        .split_whitespace()
+        .any(|scope| scope == "gateway:infer")
+        || claims.blue_oauth_session_id.trim().is_empty()
+        || claims.jti.trim().is_empty()
+        || claims.iat > OffsetDateTime::now_utc().unix_timestamp() + 60
+        || claims.exp <= claims.iat
+    {
+        return Err(ResolveError::Invalid);
+    }
+    Ok(GatewayIdentity {
+        user_id: claims.sub.parse().map_err(|_| ResolveError::Invalid)?,
+        oauth_session_id: claims.blue_oauth_session_id,
+        issued_at: claims.iat,
+    })
+}
+
+async fn resolve_dynamic(
+    state: &AppState,
+    identity: &GatewayIdentity,
+) -> Result<Mapping, ResolveError> {
     let url = state
         .resolver_url
         .as_ref()
@@ -935,7 +1176,10 @@ async fn resolve_dynamic(state: &AppState, pseudotoken: &str) -> Result<Mapping,
         .post(url)
         .bearer_auth(&token)
         .timeout(state.resolver_timeout)
-        .json(&serde_json::json!({ "pseudotoken": pseudotoken }))
+        .json(&serde_json::json!({
+            "user_id": identity.user_id,
+            "blue_oauth_session_id": identity.oauth_session_id,
+        }))
         .send()
         .await
         .map_err(|_| ResolveError::Unavailable)?;
@@ -949,10 +1193,11 @@ async fn resolve_dynamic(state: &AppState, pseudotoken: &str) -> Result<Mapping,
         .json()
         .await
         .map_err(|_| ResolveError::Unavailable)?;
-    let upstream_credential =
-        resolved_upstream_credential(body.upstream_credential, body.virtual_key)?;
+    if body.upstream_credential.trim().is_empty() {
+        return Err(ResolveError::Unavailable);
+    }
     Ok(Mapping {
-        upstream_credential,
+        upstream_credential: body.upstream_credential,
         user: body.user,
         user_id: body.user_id,
         organization_id: body.organization_id,
@@ -963,11 +1208,19 @@ async fn resolve_dynamic(state: &AppState, pseudotoken: &str) -> Result<Mapping,
             .credential_expires_at
             .as_deref()
             .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
+        gateway_session_expires_at: body
+            .gateway_session_expires_at
+            .as_deref()
+            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
+        session_not_before: body
+            .session_not_before
+            .as_deref()
+            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
     })
 }
 
 fn load_map() -> HashMap<String, Mapping> {
-    let Some(path) = std::env::var("HARNESS_PSEUDOTOKEN_MAP_FILE").ok() else {
+    let Some(path) = std::env::var("HARNESS_STATIC_TOKEN_MAP_FILE").ok() else {
         return HashMap::new();
     };
     let text =
@@ -995,13 +1248,15 @@ fn load_map() -> HashMap<String, Mapping> {
                     profile_name: None,
                     credential_version: None,
                     credential_expires_at: None,
+                    gateway_session_expires_at: None,
+                    session_not_before: None,
                 },
             )
         })
         .collect()
 }
 
-fn extract_pseudotoken(headers: &HeaderMap) -> Option<String> {
+fn extract_inference_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(text) = value.to_str() {
             if let Some(token) = text.strip_prefix("Bearer ") {
@@ -1015,30 +1270,37 @@ fn extract_pseudotoken(headers: &HeaderMap) -> Option<String> {
         .map(str::trim)
         .map(str::to_owned)
 }
+
 fn token_digest(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-fn admitted(state: &AppState, digest: &str) -> bool {
+/// Token bucket over `state.rates`. Callers prefix the key with the keyspace
+/// they own (`t:` unverified token digest, `s:` verified session, `p:` peer
+/// address) so the three limiters cannot collide in the shared map.
+fn admitted_at(state: &AppState, key: &str, rps: u64, burst: u64) -> bool {
     let mut rates = state.rates.lock().expect("rate limiter poisoned");
     if rates.len() > 200_000 {
         rates.retain(|_, window| window.updated.elapsed() < Duration::from_secs(120));
     }
-    let burst = state.per_token_burst.max(1) as f64;
-    let window = rates.entry(digest.to_owned()).or_insert(RateWindow {
+    let burst = burst.max(1) as f64;
+    let window = rates.entry(key.to_owned()).or_insert(RateWindow {
         updated: Instant::now(),
         tokens: burst,
     });
     let now = Instant::now();
-    window.tokens = (window.tokens
-        + now.duration_since(window.updated).as_secs_f64() * state.per_token_rps as f64)
-        .min(burst);
+    window.tokens =
+        (window.tokens + now.duration_since(window.updated).as_secs_f64() * rps as f64).min(burst);
     window.updated = now;
     if window.tokens < 1.0 {
         return false;
     }
     window.tokens -= 1.0;
     true
+}
+
+fn admitted(state: &AppState, cache_key: &str) -> bool {
+    admitted_at(state, cache_key, state.per_token_rps, state.per_token_burst)
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
@@ -1276,7 +1538,7 @@ async fn deliver_log_batch(
 #[derive(Deserialize)]
 struct InvalidationEvent {
     user_id: String,
-    pseudotoken_hash: Option<String>,
+    oauth_session_id: Option<String>,
     #[allow(dead_code)]
     credential_version: Option<String>,
 }
@@ -1287,6 +1549,7 @@ async fn invalidation_worker(
     let url = state.event_url.clone().expect("event URL checked");
     let mut last_id: Option<String> = None;
     loop {
+        mark_invalidation_unhealthy(&state);
         if *shutdown.borrow() {
             return;
         }
@@ -1302,11 +1565,26 @@ async fn invalidation_worker(
         }
         match request.send().await {
             Ok(response) if response.status().is_success() => {
+                // Events published while the stream was down were never seen,
+                // so anything cached from before the gap is untrustworthy.
+                state.cache.lock().expect("cache poisoned").clear();
+                state.invalidation_healthy.store(true, Ordering::Release);
                 let mut bytes = response.bytes_stream();
                 let mut buffer = String::new();
                 let mut event_id = None;
                 loop {
-                    let chunk = tokio::select! { chunk = bytes.next() => chunk, _ = shutdown.changed() => return };
+                    let chunk = tokio::select! {
+                        chunk = tokio::time::timeout(Duration::from_secs(30), bytes.next()) => {
+                            match chunk {
+                                Ok(chunk) => chunk,
+                                Err(_) => {
+                                    tracing::warn!("invalidation stream heartbeat timed out");
+                                    break;
+                                }
+                            }
+                        },
+                        _ = shutdown.changed() => return
+                    };
                     let Some(Ok(chunk)) = chunk else {
                         break;
                     };
@@ -1319,6 +1597,10 @@ async fn invalidation_worker(
                         } else if let Some(data) = line.strip_prefix("data:") {
                             if data.trim() == "{\"resync\":true}" {
                                 state.cache.lock().expect("cache poisoned").clear();
+                                state
+                                    .metrics
+                                    .invalidation_events
+                                    .fetch_add(1, Ordering::Relaxed);
                                 last_id = None;
                             } else if let Ok(event) =
                                 serde_json::from_str::<InvalidationEvent>(data.trim())
@@ -1327,7 +1609,11 @@ async fn invalidation_worker(
                                     .cache
                                     .lock()
                                     .expect("cache poisoned")
-                                    .invalidate(event.pseudotoken_hash.as_deref(), &event.user_id);
+                                    .invalidate(event.oauth_session_id.as_deref(), &event.user_id);
+                                state
+                                    .metrics
+                                    .invalidation_events
+                                    .fetch_add(1, Ordering::Relaxed);
                                 last_id = event_id.take().or(last_id);
                             }
                         }
@@ -1341,6 +1627,45 @@ async fn invalidation_worker(
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// Marks the invalidation stream down. Deliberately does **not** clear the
+/// cache: `cached_mapping` already refuses to serve entries while unhealthy,
+/// so they are unreachable anyway, and dropping them only guarantees that
+/// recovery is a cold-start fan-out too. The reconnect path clears instead,
+/// which is where entries actually became untrustworthy.
+fn mark_invalidation_unhealthy(state: &AppState) {
+    if state.invalidation_healthy.swap(false, Ordering::AcqRel) {
+        state
+            .metrics
+            .invalidation_disconnects
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn cached_mapping(state: &AppState, cache_key: &str) -> Option<Mapping> {
+    if state.invalidation_healthy.load(Ordering::Acquire) {
+        state.cache.lock().expect("cache poisoned").get(cache_key)
+    } else {
+        state.metrics.cache_bypasses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+}
+
+fn inference_token_predates_session(issued_at: i64, not_before: OffsetDateTime) -> bool {
+    // JWT NumericDate values have whole-second precision, while PostgreSQL
+    // timestamptz retains fractions of a second. Treat the entire revocation
+    // second as revoked; otherwise a token minted just before a fractional
+    // revocation compares equal after unix_timestamp() truncates the boundary.
+    issued_at <= not_before.unix_timestamp()
+}
+
+fn too_many_requests(message: &'static str) -> Response {
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, message).into_response();
+    response
+        .headers_mut()
+        .insert("retry-after", "1".parse().unwrap());
+    response
 }
 
 async fn proxy_auth_guard(
@@ -1362,26 +1687,89 @@ async fn proxy_auth_guard(
             return response;
         }
     };
-    let Some(pseudotoken) = extract_pseudotoken(request.headers()) else {
-        return (StatusCode::UNAUTHORIZED, "missing pseudotoken").into_response();
+    let Some(inference_token) = extract_inference_token(request.headers()) else {
+        return (StatusCode::UNAUTHORIZED, "missing inference token").into_response();
     };
-    let digest = token_digest(&pseudotoken);
-    if !admitted(&state, &digest) {
-        state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
-        let mut response = (
-            StatusCode::TOO_MANY_REQUESTS,
-            "pseudotoken rate limit exceeded",
-        )
-            .into_response();
-        response
-            .headers_mut()
-            .insert("retry-after", "1".parse().unwrap());
-        return response;
+    // Meter *before* verification. Signature checks are the expensive part, so
+    // a limiter that only runs after them leaves unverifiable tokens entirely
+    // unmetered.
+    if !admitted(&state, &format!("t:{}", token_digest(&inference_token))) {
+        state
+            .metrics
+            .rate_limited_unverified
+            .fetch_add(1, Ordering::Relaxed);
+        return too_many_requests("token rate limit exceeded");
+    }
+    let peer_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| peer.ip());
+    let identity = if state.resolver_url.is_some() {
+        match validate_gateway_token(&state, &inference_token).await {
+            Ok(identity) => Some(identity),
+            Err(ResolveError::Invalid) => {
+                // Digest keying alone cannot see a flood of freshly random
+                // tokens — each one gets its own bucket. Charge the peer for
+                // failures only, so legitimate traffic never touches this.
+                if let Some(peer_ip) = peer_ip {
+                    if !admitted_at(
+                        &state,
+                        &format!("p:{peer_ip}"),
+                        state.unverified_rps,
+                        state.unverified_rps,
+                    ) {
+                        state
+                            .metrics
+                            .rate_limited_unverified
+                            .fetch_add(1, Ordering::Relaxed);
+                        return too_many_requests("unverified token rate limit exceeded");
+                    }
+                }
+                return (StatusCode::UNAUTHORIZED, "invalid inference token").into_response();
+            }
+            Err(ResolveError::Unavailable) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "JWT verification unavailable",
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        None
+    };
+    let cache_key = identity
+        .as_ref()
+        .map(GatewayIdentity::cache_key)
+        .unwrap_or_else(|| "local-development".into());
+    if !admitted(&state, &format!("s:{cache_key}")) {
+        state
+            .metrics
+            .rate_limited_session
+            .fetch_add(1, Ordering::Relaxed);
+        return too_many_requests("session rate limit exceeded");
     }
 
-    let cached = { state.cache.lock().expect("cache poisoned").get(&digest) };
-    let mapping = if let Some(mapping) = state.map.get(&pseudotoken) {
-        mapping.clone()
+    let cached = cached_mapping(&state, &cache_key);
+    let mapping = if identity.is_none() {
+        if let Some(mapping) = state.map.get(&inference_token) {
+            mapping.clone()
+        } else if let Some(upstream_credential) = state.static_key.clone() {
+            Mapping {
+                upstream_credential,
+                user: "dev".into(),
+                user_id: None,
+                organization_id: None,
+                profile_id: None,
+                profile_name: None,
+                credential_version: None,
+                credential_expires_at: None,
+                gateway_session_expires_at: None,
+                session_not_before: None,
+            }
+        } else {
+            return (StatusCode::UNAUTHORIZED, "invalid local development token").into_response();
+        }
     } else if let Some(mapping) = cached {
         state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
         mapping
@@ -1393,49 +1781,41 @@ async fn proxy_auth_guard(
                 .lock()
                 .expect("resolution locks poisoned");
             locks
-                .entry(digest.clone())
+                .entry(cache_key.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
         let _resolution_guard = resolution_lock.lock().await;
-        let rechecked = { state.cache.lock().expect("cache poisoned").get(&digest) };
+        let rechecked = cached_mapping(&state, &cache_key);
         if let Some(mapping) = rechecked {
             state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
             state
                 .resolution_locks
                 .lock()
                 .expect("resolution locks poisoned")
-                .remove(&digest);
+                .remove(&cache_key);
             mapping
         } else {
-            let resolved = resolve_dynamic(&state, &pseudotoken).await;
+            let Some(identity) = identity.as_ref() else {
+                unreachable!("local-development requests return before dynamic resolution")
+            };
+            let resolved = resolve_dynamic(&state, identity).await;
             state
                 .resolution_locks
                 .lock()
                 .expect("resolution locks poisoned")
-                .remove(&digest);
+                .remove(&cache_key);
             match resolved {
                 Ok(mapping) => {
-                    state
-                        .cache
-                        .lock()
-                        .expect("cache poisoned")
-                        .insert(digest, mapping.clone());
+                    let mut cache = state.cache.lock().expect("cache poisoned");
+                    if state.invalidation_healthy.load(Ordering::Acquire) {
+                        cache.insert(cache_key, mapping.clone());
+                    }
                     mapping
                 }
                 Err(ResolveError::Invalid) => {
-                    return (StatusCode::UNAUTHORIZED, "unknown pseudotoken").into_response()
+                    return (StatusCode::UNAUTHORIZED, "inactive gateway session").into_response()
                 }
-                Err(ResolveError::Unavailable) if state.static_key.is_some() => Mapping {
-                    upstream_credential: state.static_key.clone().unwrap(),
-                    user: "dev".into(),
-                    user_id: None,
-                    organization_id: None,
-                    profile_id: None,
-                    profile_name: None,
-                    credential_version: None,
-                    credential_expires_at: None,
-                },
                 Err(ResolveError::Unavailable) => {
                     state
                         .metrics
@@ -1450,6 +1830,19 @@ async fn proxy_auth_guard(
             }
         }
     };
+
+    // Reject JWTs minted before the session was reactivated. The helper also
+    // rejects the revocation second because JWT iat cannot represent the
+    // database boundary's sub-second precision.
+    if let (Some(identity), Some(not_before)) = (identity.as_ref(), mapping.session_not_before) {
+        if inference_token_predates_session(identity.issued_at, not_before) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "inference token predates this session",
+            )
+                .into_response();
+        }
+    }
 
     request.extensions_mut().insert(mapping);
     request.extensions_mut().insert(permit);
@@ -1734,6 +2127,8 @@ mod tests {
             profile_name: None,
             credential_version: Some("v1".into()),
             credential_expires_at: None,
+            gateway_session_expires_at: None,
+            session_not_before: None,
         }
     }
     #[test]
@@ -1746,6 +2141,61 @@ mod tests {
         assert!(cache.get("two").is_some());
         cache.invalidate(None, "u2");
         assert!(cache.get("two").is_none());
+    }
+    #[test]
+    fn cache_invalidation_can_target_one_oauth_session() {
+        let mut cache = CredentialCache::new(2, Duration::from_secs(60));
+        cache.insert("session-a:u1".into(), mapping("u1"));
+        cache.insert("session-b:u1".into(), mapping("u1"));
+        cache.invalidate(Some("session-a"), "u1");
+        assert!(cache.get("session-a:u1").is_none());
+        assert!(cache.get("session-b:u1").is_some());
+    }
+
+    #[test]
+    fn revocation_rejects_tokens_from_the_same_fractional_second() {
+        let revocation_second = 1_789_006_527;
+        let revoked_at = OffsetDateTime::from_unix_timestamp(revocation_second).unwrap()
+            + time::Duration::milliseconds(447);
+
+        assert!(inference_token_predates_session(
+            revocation_second - 1,
+            revoked_at
+        ));
+        assert!(inference_token_predates_session(
+            revocation_second,
+            revoked_at
+        ));
+        assert!(!inference_token_predates_session(
+            revocation_second + 1,
+            revoked_at
+        ));
+    }
+
+    #[test]
+    fn invalidation_disconnect_bypasses_but_retains_the_cache() {
+        let state = test_state(None);
+        state
+            .cache
+            .lock()
+            .unwrap()
+            .insert("session-a:u1".into(), mapping("u1"));
+
+        mark_invalidation_unhealthy(&state);
+
+        assert!(!state.invalidation_healthy.load(Ordering::Acquire));
+        assert!(cached_mapping(&state, "session-a:u1").is_none());
+        // Unreachable, but retained: recovery must not be a cold start. The
+        // reconnect path is what clears.
+        assert!(state.cache.lock().unwrap().get("session-a:u1").is_some());
+        assert_eq!(
+            state
+                .metrics
+                .invalidation_disconnects
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(state.metrics.cache_bypasses.load(Ordering::Relaxed), 1);
     }
     #[test]
     fn metadata_uses_allowlisted_headers_and_omits_query() {
@@ -1815,6 +2265,10 @@ mod tests {
             map: HashMap::new(),
             static_key: None,
             resolver_url: None,
+            gateway_jwks_url: None,
+            gateway_jwt_issuer: None,
+            gateway_jwt_audience: None,
+            gateway_jwks: RwLock::new(None),
             event_url: None,
             oauth,
             service_token: RwLock::new(None),
@@ -1828,12 +2282,15 @@ mod tests {
             rates: Mutex::new(HashMap::new()),
             per_token_rps: 100,
             per_token_burst: 100,
+            unverified_rps: 20,
+            jwks_refetch_cooldown: Duration::from_secs(30),
             resolver_permits: Arc::new(Semaphore::new(8)),
             request_permits: Arc::new(Semaphore::new(8)),
             max_body_bytes: 1024,
             log_tx,
             invalidation_tx,
             metrics: Metrics::default(),
+            invalidation_healthy: AtomicBool::new(true),
             ready: AtomicBool::new(true),
         })
     }
@@ -1857,6 +2314,197 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}/token")
+    }
+
+    async fn spawn_gateway_jwks_server() -> String {
+        async fn handler() -> axum::Json<serde_json::Value> {
+            let mut set: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../tests/e2e-slim/fixtures/jwks/jwks.json"
+            ))
+            .unwrap();
+            let mut retained = set["keys"][0].clone();
+            retained["kid"] = "retained-key".into();
+            set["keys"].as_array_mut().unwrap().push(retained);
+            axum::Json(set)
+        }
+        let app = Router::new().route("/jwks", get(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/jwks")
+    }
+
+    /// Same fixture as `spawn_gateway_jwks_server`, but counts every fetch.
+    async fn spawn_counting_jwks_server(counter: Arc<AtomicUsize>) -> String {
+        async fn handler(State(counter): State<Arc<AtomicUsize>>) -> axum::Json<serde_json::Value> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            axum::Json(
+                serde_json::from_str(include_str!(
+                    "../../../tests/e2e-slim/fixtures/jwks/jwks.json"
+                ))
+                .unwrap(),
+            )
+        }
+        let app = Router::new()
+            .route("/jwks", get(handler))
+            .with_state(counter);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/jwks")
+    }
+
+    #[tokio::test]
+    async fn a_repeated_unknown_kid_costs_exactly_one_jwks_fetch() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut state = test_state(None);
+        let jwks_url = spawn_counting_jwks_server(counter.clone()).await;
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.gateway_jwks_url = Some(jwks_url);
+
+        for _ in 0..5 {
+            assert!(matches!(
+                gateway_jwk_for(&state, "no-such-kid").await,
+                Err(ResolveError::Invalid)
+            ));
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(state.metrics.jwks_unknown_kid.load(Ordering::Relaxed), 5);
+
+        // The unknown kid still populated the cache, so a legitimate kid that
+        // arrives afterwards is served without another fetch.
+        assert!(gateway_jwk_for(&state, "e2e-slim-rsa-1").await.is_ok());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(state.metrics.jwks_fetches.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn an_expired_cooldown_lets_key_rotation_converge() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut state = test_state(None);
+        let jwks_url = spawn_counting_jwks_server(counter.clone()).await;
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.gateway_jwks_url = Some(jwks_url);
+        mutable.jwks_refetch_cooldown = Duration::ZERO;
+
+        for _ in 0..3 {
+            assert!(gateway_jwk_for(&state, "rotated-in-kid").await.is_err());
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn unverified_and_session_limiters_do_not_share_a_keyspace() {
+        let state = test_state(None);
+        // Same string, different keyspaces: exhausting one must not affect the
+        // other.
+        for _ in 0..state.per_token_burst {
+            assert!(admitted(&state, "t:collide"));
+        }
+        assert!(!admitted(&state, "t:collide"));
+        assert!(admitted(&state, "s:collide"));
+    }
+
+    #[test]
+    fn a_repeated_malformed_token_is_rejected_before_verification() {
+        let mut state = test_state(None);
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.per_token_rps = 0;
+        mutable.per_token_burst = 2;
+        let key = format!("t:{}", token_digest("not-a-jwt"));
+        assert!(admitted(&state, &key));
+        assert!(admitted(&state, &key));
+        assert!(!admitted(&state, &key));
+    }
+
+    fn sign_gateway_claims(claims: &GatewayInferenceClaims, kid: &str) -> String {
+        let key = jsonwebtoken::EncodingKey::from_rsa_pem(include_bytes!(
+            "../../../tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem"
+        ))
+        .unwrap();
+        let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
+        header.kid = Some(kid.into());
+        jsonwebtoken::encode(&header, claims, &key).unwrap()
+    }
+
+    #[tokio::test]
+    async fn inference_jwt_validation_rejects_invalid_claims_and_signatures() {
+        let mut state = test_state(None);
+        let jwks_url = spawn_gateway_jwks_server().await;
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.gateway_jwks_url = Some(jwks_url);
+        mutable.gateway_jwt_issuer = Some("https://control.example".into());
+        mutable.gateway_jwt_audience = Some("blue-inference-proxy".into());
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mut claims = GatewayInferenceClaims {
+            iss: "https://control.example".into(),
+            aud: "blue-inference-proxy".into(),
+            sub: Uuid::new_v4().to_string(),
+            iat: now,
+            exp: now + 300,
+            jti: Uuid::new_v4().to_string(),
+            blue_oauth_session_id: "oauth-session".into(),
+            scope: "gateway:infer".into(),
+        };
+        let valid = sign_gateway_claims(&claims, "e2e-slim-rsa-1");
+        let identity = validate_gateway_token(&state, &valid).await.unwrap();
+        assert_eq!(identity.oauth_session_id, "oauth-session");
+        assert!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "retained-key"))
+                .await
+                .is_ok()
+        );
+
+        claims.aud = "wrong-audience".into();
+        assert!(matches!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "e2e-slim-rsa-1")).await,
+            Err(ResolveError::Invalid)
+        ));
+        claims.aud = "blue-inference-proxy".into();
+        claims.iss = "https://wrong.example".into();
+        assert!(matches!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "e2e-slim-rsa-1")).await,
+            Err(ResolveError::Invalid)
+        ));
+        claims.iss = "https://control.example".into();
+        claims.scope = "governance:read".into();
+        assert!(matches!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "e2e-slim-rsa-1")).await,
+            Err(ResolveError::Invalid)
+        ));
+        claims.scope = "gateway:infer".into();
+        claims.blue_oauth_session_id.clear();
+        assert!(matches!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "e2e-slim-rsa-1")).await,
+            Err(ResolveError::Invalid)
+        ));
+        claims.blue_oauth_session_id = "oauth-session".into();
+        claims.sub = "not-a-uuid".into();
+        assert!(matches!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "e2e-slim-rsa-1")).await,
+            Err(ResolveError::Invalid)
+        ));
+        claims.sub = Uuid::new_v4().to_string();
+        claims.exp = now - 120;
+        assert!(matches!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "e2e-slim-rsa-1")).await,
+            Err(ResolveError::Invalid)
+        ));
+        claims.exp = now + 300;
+        let mut tampered = sign_gateway_claims(&claims, "e2e-slim-rsa-1");
+        tampered.push('x');
+        assert!(matches!(
+            validate_gateway_token(&state, &tampered).await,
+            Err(ResolveError::Invalid)
+        ));
+        assert!(matches!(
+            validate_gateway_token(&state, &sign_gateway_claims(&claims, "unknown-key")).await,
+            Err(ResolveError::Invalid)
+        ));
     }
 
     async fn capture_headers(
@@ -2071,35 +2719,6 @@ mod tests {
             ))
             .is_err()
         );
-    }
-
-    #[test]
-    fn resolver_accepts_dual_wire_transition_and_rejects_ambiguity() {
-        let current: ResolveResponse = serde_json::from_value(serde_json::json!({
-            "upstream_credential": "current",
-            "user": "user@example.com"
-        }))
-        .unwrap();
-        assert_eq!(
-            resolved_upstream_credential(current.upstream_credential, current.virtual_key).unwrap(),
-            "current"
-        );
-        let legacy: ResolveResponse = serde_json::from_value(serde_json::json!({
-            "virtual_key": "legacy",
-            "user": "user@example.com"
-        }))
-        .unwrap();
-        assert_eq!(
-            resolved_upstream_credential(legacy.upstream_credential, legacy.virtual_key).unwrap(),
-            "legacy"
-        );
-        assert_eq!(
-            resolved_upstream_credential(Some("same".into()), Some("same".into())).unwrap(),
-            "same"
-        );
-        assert!(resolved_upstream_credential(Some("one".into()), Some("two".into())).is_err());
-        assert!(resolved_upstream_credential(None, None).is_err());
-        assert!(resolved_upstream_credential(Some("  ".into()), None).is_err());
     }
 
     #[test]
