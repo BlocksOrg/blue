@@ -26,7 +26,7 @@ pub(crate) async fn migrate(database_url: &str) -> Result<(), ApiError> {
     migrate_pool(&pool).await
 }
 
-async fn migrate_pool(pool: &PgPool) -> Result<(), ApiError> {
+pub(crate) async fn migrate_pool(pool: &PgPool) -> Result<(), ApiError> {
     // Historical migration 0002 selected the `auth` schema before pg_trgm was
     // first installed. Put this relocatable extension in its final schema up
     // front so clean installs can create the trigram indexes in migration 0029;

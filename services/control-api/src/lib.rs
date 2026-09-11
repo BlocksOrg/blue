@@ -1540,18 +1540,10 @@ async fn build_app_inner(
     if let Some(protector) = &secret_protector {
         migrate_legacy_gateway_credentials(&pool, protector).await?;
     }
-    let (bootstrap_org_id, bootstrap_user_id) = bootstrap_identity(&pool, &config).await?;
     let blob = BlobStore::from_config(&config).await?;
     let package_blob =
         BlobStore::from_config_with_bucket(&config, config.s3_package_bucket.clone()).await?;
-    reconcile_deployment_governance(
-        &pool,
-        &config,
-        &package_blob,
-        bootstrap_org_id,
-        bootstrap_user_id,
-    )
-    .await?;
+    bootstrap_deployment(&pool, &config, &package_blob).await?;
     let (revision_events, _) = tokio::sync::broadcast::channel(256);
     let gateway_kms_max_concurrency = config.gateway_kms_max_concurrency;
     let gateway_provisioning_max_concurrency = config
@@ -2250,6 +2242,48 @@ async fn bootstrap_identity(pool: &PgPool, config: &AppConfig) -> Result<(Uuid, 
     Ok((org_id, user_id))
 }
 
+/// Seed the deployment's organization, admin and governance revision, holding a
+/// database-wide lock for the whole sequence.
+///
+/// The chart runs this binary as two Deployments — `control-api` and `worker` —
+/// and on a cold start both reach this path against an empty database. Left to
+/// race, they write the same bootstrap rows from two sessions: one wins and the
+/// other takes a unique violation, which `From<sqlx::Error>` turns into
+/// `record already exists` and kills the process on its first start. The lock
+/// makes the loser wait and then read what the winner wrote.
+///
+/// The lock transaction carries no writes of its own, so every early return
+/// drops it and releases the lock.
+async fn bootstrap_deployment(
+    pool: &PgPool,
+    config: &AppConfig,
+    package_blob: &BlobStore,
+) -> Result<(), ApiError> {
+    let bootstrap_lock = acquire_bootstrap_lock(pool, &config.bootstrap_org).await?;
+    let (org_id, user_id) = bootstrap_identity(pool, config).await?;
+    reconcile_deployment_governance(pool, config, package_blob, org_id, user_id).await?;
+    bootstrap_lock.rollback().await?;
+    Ok(())
+}
+
+/// The lock is keyed by the bootstrap organization so unrelated deployments
+/// sharing a database never wait on each other. It reuses the salt of the
+/// gateway lifecycle lock; the key spaces stay disjoint because that one is
+/// keyed by user id.
+async fn acquire_bootstrap_lock(
+    pool: &PgPool,
+    bootstrap_org: &str,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, ApiError> {
+    let mut bootstrap_lock = pool.begin().await?;
+    sqlx::query!(
+        "select pg_advisory_xact_lock(hashtextextended($1, 928451))",
+        format!("bootstrap-identity:{bootstrap_org}")
+    )
+    .execute(&mut *bootstrap_lock)
+    .await?;
+    Ok(bootstrap_lock)
+}
+
 fn normalized_governance_value(
     config: &gh_service::GovernanceConfig,
 ) -> Result<serde_json::Value, ApiError> {
@@ -2583,6 +2617,19 @@ async fn materialize_deployment_package_sources(
     })
 }
 
+async fn upsert_deployment_governance_state<'a>(
+    executor: impl sqlx::PgExecutor<'a>,
+    org_id: Uuid,
+    baseline_document: &serde_json::Value,
+    source_sha256: &str,
+) -> Result<(), ApiError> {
+    sqlx::query!("INSERT INTO deployment_governance_state (organization_id,baseline_document,source_sha256) VALUES ($1,$2,$3) ON CONFLICT (organization_id) DO UPDATE SET baseline_document=EXCLUDED.baseline_document,source_sha256=EXCLUDED.source_sha256,updated_at=now()",
+        org_id,
+        baseline_document,
+        source_sha256).execute(executor).await?;
+    Ok(())
+}
+
 async fn reconcile_deployment_governance(
     pool: &PgPool,
     config: &AppConfig,
@@ -2637,10 +2684,10 @@ async fn reconcile_deployment_governance(
             normalized_governance_value(&serde_json::from_value(row.document).map_err(
                 |error| ApiError::internal(format!("decoding bootstrap config: {error}")),
             )?)?;
-        sqlx::query!("INSERT INTO deployment_governance_state (organization_id,baseline_document,source_sha256) VALUES ($1,$2,$3)",
-        org_id,
-        baseline,
-        source_sha256).execute(pool).await?;
+        // The bootstrap row is written once per organization, but a replica that
+        // lost the startup race can still arrive here behind a stale read, so the
+        // seed upserts like every other writer of this table.
+        upsert_deployment_governance_state(pool, org_id, &baseline, &source_sha256).await?;
         return Ok(());
     }
     let current = current.expect("checked above");
@@ -2719,10 +2766,8 @@ async fn reconcile_deployment_governance(
         )
         .await?;
     }
-    sqlx::query!("INSERT INTO deployment_governance_state (organization_id,baseline_document,source_sha256) VALUES ($1,$2,$3) ON CONFLICT (organization_id) DO UPDATE SET baseline_document=EXCLUDED.baseline_document,source_sha256=EXCLUDED.source_sha256,updated_at=now()",
-        org_id,
-        &incoming_value,
-        source_sha256).execute(&mut *transaction).await?;
+    upsert_deployment_governance_state(&mut *transaction, org_id, &incoming_value, &source_sha256)
+        .await?;
     transaction.commit().await?;
 
     let effective: serde_json::Value = if merged_value == current_value {
@@ -11724,6 +11769,119 @@ mod tests {
         assert!(!config.harnesses["codex"]
             .package_overrides
             .contains_key("selected"));
+    }
+
+    /// A fresh deployment starts control-api and the worker at the same moment,
+    /// and both seed the same rows. These cover the serialization that keeps the
+    /// loser of that race from exiting on a unique violation.
+    #[cfg(feature = "postgres-tests")]
+    mod cold_start {
+        use std::time::Duration;
+
+        use sqlx::PgPool;
+
+        use crate::{acquire_bootstrap_lock, bootstrap_identity, AppConfig};
+
+        fn bootstrap_config(org: &str) -> AppConfig {
+            let mut config = super::config_with_gateway_runtime(None);
+            config.bootstrap_org = org.to_owned();
+            config.bootstrap_org_name = "Cold Start".into();
+            config.bootstrap_admin_sub = "admin-subject".into();
+            config.bootstrap_admin_email = "admin@example.com".into();
+            config
+        }
+
+        #[sqlx::test(migrations = false)]
+        async fn the_bootstrap_lock_excludes_a_second_process(pool: PgPool) {
+            crate::db::migrate_pool(&pool).await.unwrap();
+            let held = acquire_bootstrap_lock(&pool, "cold-start").await.unwrap();
+
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(250),
+                    acquire_bootstrap_lock(&pool, "cold-start"),
+                )
+                .await
+                .is_err(),
+                "a second process entered bootstrap while the first still held the lock"
+            );
+            // Keyed per deployment: another organization's bootstrap never waits.
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                acquire_bootstrap_lock(&pool, "other-deployment"),
+            )
+            .await
+            .expect("an unrelated organization waited on this lock")
+            .unwrap()
+            .rollback()
+            .await
+            .unwrap();
+
+            held.rollback().await.unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                acquire_bootstrap_lock(&pool, "cold-start"),
+            )
+            .await
+            .expect("the lock outlived the transaction that held it")
+            .unwrap()
+            .rollback()
+            .await
+            .unwrap();
+        }
+
+        #[sqlx::test(migrations = false)]
+        async fn concurrent_bootstrap_seeds_a_single_identity(pool: PgPool) {
+            crate::db::migrate_pool(&pool).await.unwrap();
+
+            let identities = futures_util::future::join_all((0..3).map(|_| {
+                let pool = pool.clone();
+                let config = bootstrap_config("cold-start");
+                async move {
+                    let lock = acquire_bootstrap_lock(&pool, &config.bootstrap_org)
+                        .await
+                        .unwrap();
+                    let identity = bootstrap_identity(&pool, &config).await;
+                    lock.rollback().await.unwrap();
+                    identity.expect("bootstrap failed under concurrency")
+                }
+            }))
+            .await;
+
+            assert!(identities.iter().all(|identity| *identity == identities[0]));
+            let organizations = sqlx::query_scalar!(
+                "select count(*) as \"count!\" from organizations where slug=$1",
+                "cold-start"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(organizations, 1);
+            let admins = sqlx::query_scalar!(
+                "select count(*) as \"count!\" from users where organization_id=$1",
+                identities[0].0
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(admins, 1);
+        }
+
+        #[sqlx::test(migrations = false)]
+        async fn the_seeded_governance_baseline_survives_a_second_writer(pool: PgPool) {
+            crate::db::migrate_pool(&pool).await.unwrap();
+            let config = bootstrap_config("cold-start");
+            let (org_id, _) = bootstrap_identity(&pool, &config).await.unwrap();
+            let baseline = serde_json::json!({"revision": "seed"});
+            let digest = "0".repeat(64);
+
+            crate::upsert_deployment_governance_state(&pool, org_id, &baseline, &digest)
+                .await
+                .unwrap();
+            crate::upsert_deployment_governance_state(&pool, org_id, &baseline, &digest)
+                .await
+                .expect("re-seeding the deployment baseline must not conflict");
+        }
     }
 }
 
