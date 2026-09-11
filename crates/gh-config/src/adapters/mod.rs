@@ -247,6 +247,7 @@ pub trait HarnessImplementation: std::fmt::Debug + Sync {
         &self,
         _home: &Path,
         _wiring: Option<&GatewayWiring>,
+        _policy: &HarnessPolicy,
         spec: crate::HarnessLaunchSpec,
     ) -> Result<crate::HarnessLaunchSpec, GhError> {
         Ok(spec)

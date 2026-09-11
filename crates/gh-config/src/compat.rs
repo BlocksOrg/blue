@@ -10,6 +10,30 @@ use gh_common::{GhError, Harness, InstallInvocation};
 use gh_service::HarnessPolicy;
 use semver::{Version, VersionReq};
 
+pub(crate) fn policy_requires_update_suppression(policy: &HarnessPolicy) -> Result<bool, GhError> {
+    if !policy.allow_unverified_versions {
+        return Ok(true);
+    }
+    let Some(requirement) = policy
+        .version_requirement
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Err(GhError::config(
+            "allow_unverified_versions requires an explicit version_requirement",
+        ));
+    };
+    let requirement = VersionReq::parse(requirement).map_err(|error| {
+        GhError::config(format!(
+            "invalid harness version requirement `{requirement}`: {error}"
+        ))
+    })?;
+    Ok(requirement
+        .comparators
+        .iter()
+        .any(|comparator| !matches!(comparator.op, semver::Op::Greater | semver::Op::GreaterEq)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileStatus {
     Supported,
@@ -519,6 +543,53 @@ pub fn resolve_for_definition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suppresses_updates_unless_unverified_versions_have_no_maximum() {
+        for (allow_unverified_versions, requirement, expected) in [
+            (false, None, true),
+            (false, Some("*"), true),
+            (false, Some(">=1.2.0"), true),
+            (true, Some("*"), false),
+            (true, Some(">=1.2.0"), false),
+            (true, Some(">1.2.0, >=2.0.0"), false),
+            (true, Some("<2.0.0"), true),
+            (true, Some("<=2.0.0"), true),
+            (true, Some("=1.2.3"), true),
+            (true, Some("1.2"), true),
+            (true, Some("1.*"), true),
+            (true, Some("^1.2.3"), true),
+            (true, Some("~1.2.3"), true),
+            (true, Some(">=1.2.0, <2.0.0"), true),
+        ] {
+            let policy = HarnessPolicy {
+                version_requirement: requirement.map(str::to_owned),
+                allow_unverified_versions,
+                ..Default::default()
+            };
+            assert_eq!(
+                policy_requires_update_suppression(&policy).unwrap(),
+                expected,
+                "allow_unverified_versions={allow_unverified_versions}, requirement={requirement:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uncapped_updates_require_a_valid_explicit_range() {
+        let missing = HarnessPolicy {
+            allow_unverified_versions: true,
+            ..Default::default()
+        };
+        assert!(policy_requires_update_suppression(&missing).is_err());
+
+        let policy = HarnessPolicy {
+            version_requirement: Some("not semver".into()),
+            allow_unverified_versions: true,
+            ..Default::default()
+        };
+        assert!(policy_requires_update_suppression(&policy).is_err());
+    }
 
     #[test]
     fn enforces_governance_requirement() {

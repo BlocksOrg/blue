@@ -15,7 +15,7 @@ const DISABLE_AUTO_UPDATE_ENV: &str = "KIMI_CODE_NO_AUTO_UPDATE";
 pub struct Operations {
     plan: fn(&Implementation, &ReconcileInput<'_>, &ResolvedPackages) -> Result<ReconcilePlan, GhError>,
     launch: fn(&Path, crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError>,
-    launch_controls: fn(&Path, &mut crate::HarnessLaunchSpec) -> Result<(), GhError>,
+    launch_controls: fn(&Path, &HarnessPolicy, &mut crate::HarnessLaunchSpec) -> Result<(), GhError>,
     paths: fn(&Path) -> ImplementationPaths,
     native_migration_needs_review: fn(&Path, &HarnessPolicy) -> bool,
     gateway_wiring: fn(&GatewayConfig) -> Result<GatewayWiring, GhError>,
@@ -66,9 +66,9 @@ pub(crate) fn session_start_hooks(profile: &str) -> Result<Vec<toml::Value>, GhE
 
 impl HarnessImplementation for Implementation {
     fn support(&self) -> &'static GenerationSupport { self.spec.support }
-    fn launch(&self, home: &Path, _: Option<&GatewayWiring>, spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
+    fn launch(&self, home: &Path, _: Option<&GatewayWiring>, policy: &HarnessPolicy, spec: crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError> {
         let mut spec = (self.spec.operations.launch)(home, spec)?;
-        (self.spec.operations.launch_controls)(home, &mut spec)?;
+        (self.spec.operations.launch_controls)(home, policy, &mut spec)?;
         Ok(spec)
     }
     fn session_upload_disposition(&self, input: &ReconcileInput<'_>) -> SessionUploadDisposition {
@@ -100,7 +100,7 @@ fn plan_v1(implementation: &Implementation, input: &ReconcileInput<'_>, packages
         let components = implementation.package_components(packages);
         let mut report = execute(implementation, &mut plan, input, &components)?;
         let mut launch = crate::HarnessLaunchSpec { env: report.env, launch_args: report.launch_args };
-        (implementation.spec.operations.launch_controls)(input.home, &mut launch)?;
+        (implementation.spec.operations.launch_controls)(input.home, input.policy, &mut launch)?;
         report.env = launch.env; report.launch_args = launch.launch_args;
         plan.files = report.files; plan.env = report.env; plan.launch_args = report.launch_args; plan.warnings = report.warnings; plan.normalize(); Ok(plan)
 }
@@ -114,7 +114,10 @@ fn launch(home: &Path, mut spec: crate::HarnessLaunchSpec) -> Result<crate::Harn
         .insert("KIMI_CODE_HOME".into(), runtime.display().to_string());
     Ok(spec)
 }
-fn disable_auto_updates(_: &Path, spec: &mut crate::HarnessLaunchSpec) -> Result<(), GhError> {
+fn disable_auto_updates(_: &Path, policy: &HarnessPolicy, spec: &mut crate::HarnessLaunchSpec) -> Result<(), GhError> {
+    if !crate::compat::policy_requires_update_suppression(policy)? {
+        return Ok(());
+    }
     spec.env
         .insert(DISABLE_AUTO_UPDATE_ENV.into(), "1".into());
     Ok(())

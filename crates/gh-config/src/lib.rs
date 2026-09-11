@@ -157,7 +157,7 @@ fn resolve_launch_spec_at(
     context
         .profile
         .implementation
-        .launch(home, wiring.as_ref(), spec)
+        .launch(home, wiring.as_ref(), policy, spec)
 }
 
 /// Write all managed files for a single harness. This is the one entry point.
@@ -1545,6 +1545,22 @@ mod transaction_tests {
                 "check_for_update_on_startup=false"
             ]
         );
+
+        let uncapped_policy = HarnessPolicy {
+            version_requirement: Some(">=0.149.0".into()),
+            allow_unverified_versions: true,
+            ..Default::default()
+        };
+        let uncapped_spec = resolve_launch_spec_at(
+            &home,
+            &context,
+            &uncapped_policy,
+            &[],
+            None,
+            WriteOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(uncapped_spec.launch_args, vec!["--profile", "blue"]);
         assert_eq!(std::fs::read(&overlay).unwrap(), before);
         let _ = std::fs::remove_dir_all(home);
     }
