@@ -2612,6 +2612,9 @@ async fn reconcile_deployment_governance(
                 ApiError::internal(format!("invalid deployment governance config: {error}"))
             })?;
     validate_complete_governance(&incoming).map_err(ApiError::internal)?;
+    if let Some(error) = uncertified_harness_range(&incoming) {
+        tracing::warn!("deployment governance config: {error}");
+    }
     let incoming_value = normalized_governance_value(&incoming)?;
 
     let current = sqlx::query_as!(ConfigRow,
@@ -2688,6 +2691,9 @@ async fn reconcile_deployment_governance(
     validate_complete_governance(&merged).map_err(|error| {
         ApiError::internal(format!("merged governance config is invalid: {error}"))
     })?;
+    if let Some(error) = uncertified_harness_range(&merged) {
+        tracing::warn!("effective governance config: {error}");
+    }
 
     let mut transaction = pool.begin().await?;
     if merged_value != current_value {
@@ -3274,6 +3280,14 @@ async fn insert_governance_revision(
     let mut config = gh_service::source::parse_config(std::path::Path::new("config.yaml"), yaml)
         .map_err(|error| ApiError::bad_request(format!("invalid governance config: {error}")))?;
     validate_complete_governance(&config).map_err(ApiError::bad_request)?;
+    // Every admin write lands here; the deployment's own bootstrap revision is
+    // the one caller that must still go through, so it is never rejected for a
+    // range the deployment file already carries.
+    if origin != "bootstrap" {
+        if let Some(error) = uncertified_harness_range(&config) {
+            return Err(ApiError::bad_request(error));
+        }
+    }
     let revision = Uuid::new_v4().to_string();
     config.revision = revision.clone();
     let canonical_yaml = serde_yaml::to_string(&config)
@@ -6492,6 +6506,30 @@ fn validate_governance_packages(config: &gh_service::GovernanceConfig) -> Result
         .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+/// A harness range that matches no Blue-certified release is a mistake worth
+/// blocking where an admin makes it, but *not* worth refusing to boot over.
+/// A deployment can already hold one — it saved cleanly before this check
+/// existed — and the API that would fix it is the thing that would be down.
+/// So this is kept out of `validate_complete_governance`, which runs on the
+/// startup reconcile path, and is enforced only on admin writes.
+fn uncertified_harness_range(config: &gh_service::GovernanceConfig) -> Option<String> {
+    config.harnesses.iter().find_map(|(harness, policy)| {
+        let requirement = policy.version_requirement.as_ref()?;
+        let parsed_harness = harness.parse().ok()?;
+        if gh_config::supported_install(parsed_harness, policy).is_ok() {
+            return None;
+        }
+        let action = if policy.allow_unverified_versions {
+            "adjust the allowed range so it includes a supported harness release"
+        } else {
+            "widen the allowed range or enable `Allow unverified versions` to accept releases beyond Blue's certified ceiling"
+        };
+        Some(format!(
+            "harness `{harness}` version requirement `{requirement}` includes no Blue-certified release; {action}"
+        ))
+    })
 }
 
 fn validate_complete_governance(config: &gh_service::GovernanceConfig) -> Result<(), String> {
@@ -10633,7 +10671,7 @@ mod tests {
             "revision": "r1",
             "allowed_harnesses": ["codex"],
             "harnesses": {
-                "codex": { "version_requirement": ">=1.0.0, <3.0.0" }
+                "codex": { "version_requirement": ">=0.145.0, <0.151.1-0" }
             }
         }))
         .unwrap();
@@ -10648,6 +10686,50 @@ mod tests {
         let disjoint = gh_service::legacy_requirement_interval(">=3.0.0").unwrap();
         assert!(left.overlaps(&overlapping));
         assert!(!left.overlaps(&disjoint));
+    }
+
+    #[test]
+    fn harness_policy_rejects_a_range_above_the_certified_ceiling() {
+        let mut config: gh_service::GovernanceConfig = serde_json::from_value(json!({
+            "revision": "r1",
+            "allowed_harnesses": ["codex"],
+            "harnesses": {
+                "codex": { "version_requirement": ">0.151.0" }
+            }
+        }))
+        .unwrap();
+        stamp_version_aware_client_floor(&mut config);
+
+        let error = uncertified_harness_range(&config).unwrap();
+        assert!(error.contains("includes no Blue-certified release"));
+        assert!(error.contains("enable `Allow unverified versions`"));
+
+        config
+            .harnesses
+            .get_mut("codex")
+            .unwrap()
+            .allow_unverified_versions = true;
+        stamp_version_aware_client_floor(&mut config);
+        assert_eq!(uncertified_harness_range(&config), None);
+    }
+
+    /// The deployment that already holds such a range has to keep booting: the
+    /// startup reconcile runs `validate_complete_governance`, and the admin API
+    /// is the only way to correct the range.
+    #[test]
+    fn a_range_above_the_certified_ceiling_does_not_block_startup_validation() {
+        let mut config: gh_service::GovernanceConfig = serde_json::from_value(json!({
+            "revision": "r1",
+            "allowed_harnesses": ["codex"],
+            "harnesses": {
+                "codex": { "version_requirement": ">0.151.0" }
+            }
+        }))
+        .unwrap();
+        stamp_version_aware_client_floor(&mut config);
+
+        assert!(uncertified_harness_range(&config).is_some());
+        assert!(validate_complete_governance(&config).is_ok());
     }
 
     #[test]
