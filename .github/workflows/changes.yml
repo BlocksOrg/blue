@@ -98,7 +98,7 @@ jobs:
           fi
 
           echo "Changed files (${base}...${head}):"
-          echo "$files" | sed 's/^/  /'
+          echo "$files" | awk '{ print "  " $0 }'
 
           if [ -z "$files" ]; then
             decide true "empty diff; assuming code changed"
