@@ -233,3 +233,5 @@ configuration, and test commands are covered in
 ## License
 
 Blue is licensed under the [MIT License](LICENSE).
+
+<!-- scratch: verifying the docs-only CI guard; this branch is throwaway -->
