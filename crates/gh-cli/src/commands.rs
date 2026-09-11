@@ -584,6 +584,27 @@ fn resolved_preference(eligible: &[String], preferred: Option<&str>) -> Option<S
         .map(str::to_owned)
 }
 
+/// Keep a configured default selected long enough for `run_prepared` to offer
+/// its version repair. Compatibility is intentionally not part of this check:
+/// filtering through `eligible_names` here would discard the default before
+/// `ensure_compatible_version` can upgrade it.
+fn installed_allowed_preference(
+    inventory: &HarnessInventory,
+    preferred: Option<&str>,
+) -> Option<String> {
+    let preferred = preferred?;
+    inventory
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.name == preferred
+                && entry.api_allowed
+                && entry.client_supported
+                && entry.installed
+        })
+        .map(|entry| entry.name.clone())
+}
+
 fn eligible_harnesses(config: &GovernanceConfig) -> Result<Vec<String>> {
     let applied = load_applied_state()?;
     let mut inventory = discover_inventory_cached(&config.allowed_harnesses, applied.as_ref());
@@ -710,7 +731,12 @@ pub fn start() -> Result<()> {
     let session = ensure_session_for_start(&cfg)?;
     let client = ServiceClient::from_config(&cfg).context("building service client")?;
     let prepared = prepare_launch(cfg.clone(), client, session)?;
-    let preferred = choose_preferred_harness(&mut cfg, &prepared.inventory.eligible_names())?;
+    let preferred =
+        installed_allowed_preference(&prepared.inventory, cfg.ui.preferred_harness.as_deref())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                choose_preferred_harness(&mut cfg, &prepared.inventory.eligible_names())
+            })?;
     run_prepared(&preferred, &[], prepared)
 }
 
@@ -6089,6 +6115,38 @@ mod tests {
         );
         assert_eq!(resolved_preference(&several, Some("kimi")), None);
         assert_eq!(resolved_preference(&several, None), None);
+    }
+
+    #[test]
+    fn start_keeps_an_incompatible_installed_default_for_version_repair() {
+        let mut codex = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
+        codex.compatibility_error = Some("policy requires >=0.200.0".into());
+        let inventory = HarnessInventory {
+            entries: vec![codex],
+        };
+
+        assert!(inventory.eligible_names().is_empty());
+        assert_eq!(
+            installed_allowed_preference(&inventory, Some("codex")).as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn start_does_not_keep_a_default_that_is_no_longer_allowed_or_installed() {
+        let mut disallowed = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
+        disallowed.api_allowed = false;
+        let mut missing = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
+        missing.installed = false;
+        for codex in [disallowed, missing] {
+            let inventory = HarnessInventory {
+                entries: vec![codex],
+            };
+            assert_eq!(
+                installed_allowed_preference(&inventory, Some("codex")),
+                None
+            );
+        }
     }
 
     #[test]

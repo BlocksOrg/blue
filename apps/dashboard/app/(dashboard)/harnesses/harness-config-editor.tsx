@@ -171,7 +171,9 @@ function HarnessEditDialog({
               />
               <p className="text-xs text-muted-foreground">
                 Optional semver range. Incompatible or unparseable installed
-                versions are blocked before Blue changes managed files.
+                versions are blocked before Blue changes managed files. The
+                range must include a Blue-certified release unless unverified
+                versions are explicitly allowed below.
               </p>
             </div>
 

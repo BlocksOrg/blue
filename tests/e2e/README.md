@@ -3,7 +3,8 @@
 The E2E suite builds the production Blue image, installs the executable fixture in
 `fixtures/custom-provisioner`, and layers only that executable
 onto the stock image using the consumer deployment pattern. It boots the result with
-PostgreSQL, MinIO, the inference proxy, and a deterministic LiteLLM-compatible
+PostgreSQL, pinned MinIO server/client releases from Quay, the inference proxy,
+and a deterministic LiteLLM-compatible
 upstream. A lightweight deterministic endpoint stands in for the separately tested
 documentation site. The suite then runs the `blue` binary from the deployment
 image's shared Rust build stage alongside fake native agent
