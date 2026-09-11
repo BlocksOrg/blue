@@ -104,7 +104,8 @@ tests/e2e-slim/run.sh
 
 The orchestrator builds (or, in prebuilt mode, reuses) the deployment image,
 brings up the stack (`--wait`), builds the `blue` binary, and runs
-`cargo nextest run --manifest-path tests/e2e-slim/Cargo.toml`. Useful env:
+`cargo nextest run --manifest-path tests/e2e-slim/Cargo.toml`. The host-side
+fixture setup supports both GNU/Linux and macOS command-line tools. Useful env:
 
 | Variable | Effect |
 | --- | --- |
