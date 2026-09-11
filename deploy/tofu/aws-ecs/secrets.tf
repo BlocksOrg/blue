@@ -34,7 +34,7 @@ resource "aws_secretsmanager_secret_version" "runtime" {
   secret_id = aws_secretsmanager_secret.runtime.id
   secret_string = jsonencode(merge(
     {
-      HARNESS_DATABASE_URL             = "postgres://${var.database_username}:${random_password.database.result}@${aws_db_instance.blue.address}:${aws_db_instance.blue.port}/${var.database_name}"
+      HARNESS_DATABASE_URL             = "postgres://${var.database_username}:${random_password.database.result}@${aws_db_instance.blue.address}:${aws_db_instance.blue.port}/${var.database_name}?sslmode=require"
       BETTER_AUTH_SECRET               = random_password.auth.result
       HARNESS_BOOTSTRAP_ADMIN_EMAIL    = var.bootstrap_admin_email
       HARNESS_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap_admin.result

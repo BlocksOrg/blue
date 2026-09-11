@@ -5,9 +5,10 @@ variable "name" {
   default = "blue"
 }
 
-variable "tags" {
-  type    = map(string)
-  default = {}
+variable "environment" {
+  type        = string
+  default     = "production"
+  description = "Deployment environment for this stack. With `name`, it builds the tags applied to every resource."
 }
 
 variable "bootstrap_admin_email" {
@@ -355,4 +356,13 @@ variable "redis_client_security_group_ids" {
   type        = set(string)
   default     = []
   description = "Additional security groups (beyond the ECS task SG) allowed to reach Redis."
+}
+
+# ---------------------------------------------------------------------------
+# GitHub Actions OIDC deploy role
+# ---------------------------------------------------------------------------
+variable "github_oidc_repository" {
+  type        = string
+  default     = ""
+  description = "GitHub repository whose deploy workflow may assume the ECS deploy role, written exactly as the repository's OIDC subject prefix minus `repo:` — `gh api repos/OWNER/NAME/actions/oidc/customization/sub -q .sub_claim_prefix`. That is `owner/name`, or `owner@OWNER_ID/name@REPO_ID` for a repository on immutable subject claims. Empty disables the role."
 }
