@@ -24,9 +24,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Does this change touch anything outside docs/website? Gates `build` below,
+  # and with it every suite that needs its artifact.
+  changes:
+    uses: ./.github/workflows/changes.yml
+    permissions:
+      contents: read
+
   # Authoritative one-shot build of the production image + compiled binaries,
   # shared with the full e2e suite. Both slim jobs consume its artifact.
   build:
+    needs: changes
+    # `!cancelled()` so an infra failure inside `changes` still builds: a failed
+    # `needs` would otherwise skip this job and, with it, every suite below.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     uses: ./.github/workflows/images.yml
     # Must cover every job declared in the called workflow, including the
     # registry-mode `merge` job artifact mode never reaches: GitHub validates the
@@ -82,8 +93,10 @@ jobs:
   gateway-secret:
     # Tier B spends real money on inference, so PRs skip it outright — no point
     # probing for the secret there. It runs post-merge on main and on demand,
-    # leaving `e2e-slim-governance` as the PR tier.
-    if: github.event_name != 'pull_request'
+    # leaving `e2e-slim-governance` as the PR tier. Nothing to probe for either
+    # when `build` is skipped, so it carries the same changed-paths guard.
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     outputs:
       present: ${{ steps.check.outputs.present }}

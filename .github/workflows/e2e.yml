@@ -16,9 +16,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Does this change touch anything outside docs/website? Gates `build` below,
+  # and with it every suite that needs its artifact.
+  changes:
+    uses: ./.github/workflows/changes.yml
+    permissions:
+      contents: read
+
   # Authoritative one-shot build of the production image + compiled binaries.
   # Every suite below consumes its artifact instead of recompiling the workspace.
   build:
+    needs: changes
+    # `!cancelled()` so an infra failure inside `changes` still builds: a failed
+    # `needs` would otherwise skip this job and, with it, every suite below.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     uses: ./.github/workflows/images.yml
     # Must cover every job declared in the called workflow, including the
     # registry-mode `merge` job artifact mode never reaches: GitHub validates the
