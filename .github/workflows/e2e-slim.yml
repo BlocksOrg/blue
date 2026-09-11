@@ -28,12 +28,21 @@ jobs:
   # shared with the full e2e suite. Both slim jobs consume its artifact.
   build:
     uses: ./.github/workflows/images.yml
+    # Must cover every job declared in the called workflow, including the
+    # registry-mode `merge` job artifact mode never reaches: GitHub validates the
+    # callee's permission requests statically at run-creation time, before any
+    # `if:` is evaluated. An under-grant kills the whole run at startup with zero
+    # jobs and no check-run, so the failure is invisible on the PR. Same union as
+    # the release.yml call site.
     permissions:
       contents: read
+      packages: write
+      attestations: write
+      id-token: write
 
   e2e-slim-governance:
     needs: build
-    runs-on: Yellow
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -68,9 +77,13 @@ jobs:
 
   # Gate the gateway job on the presence of the OPENROUTER_API_KEY secret. The
   # `secrets` context is not usable in a job-level `if`, so a tiny guard job reads
-  # it into an output. Absent (e.g. fork PRs) -> the gateway job is skipped and the
-  # secret-free `e2e-slim-governance` job above is the whole suite.
+  # it into an output. Absent -> the gateway job is skipped and the secret-free
+  # `e2e-slim-governance` job above is the whole suite.
   gateway-secret:
+    # Tier B spends real money on inference, so PRs skip it outright — no point
+    # probing for the secret there. It runs post-merge on main and on demand,
+    # leaving `e2e-slim-governance` as the PR tier.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       present: ${{ steps.check.outputs.present }}
@@ -87,8 +100,8 @@ jobs:
 
   e2e-slim-gateway:
     needs: [build, gateway-secret]
-    if: needs.gateway-secret.outputs.present == 'true'
-    runs-on: Yellow
+    if: github.event_name != 'pull_request' && needs.gateway-secret.outputs.present == 'true'
+    runs-on: ubuntu-latest
     # Tier B is the full certification grid (a real OpenRouter round-trip per
     # (agent, version) cell × up to 3 attempts), so it needs more wall-clock than
     # the old 4-cert job.
