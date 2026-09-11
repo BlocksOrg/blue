@@ -6,6 +6,7 @@ import {
   adapterSupportsHarness,
   describeMappingIssue,
   harnessMappingIssue,
+  packageAdapterValidationError,
   type PackageAdapter,
 } from "./mapping-compatibility.ts";
 
@@ -125,4 +126,54 @@ test("explains a component rule that requires an accompanying plugin mapping", (
 test("rejects an inverted availability range", () => {
   const inverted: PackageAdapter = { ...skills, introduced: "2.0.12", before: "1.0.0" };
   assert.equal(adapterSupportsHarness(inverted, claude), false);
+});
+
+test("validates an edited harness availability range", () => {
+  const edited: PackageAdapter = {
+    ...skills,
+    introduced: "2.0.12",
+    before: "2.1.0",
+  };
+  assert.equal(packageAdapterValidationError(edited, claude), undefined);
+});
+
+test("reports malformed and inverted edited availability ranges", () => {
+  assert.match(
+    packageAdapterValidationError({ ...skills, introduced: "not-semver" }, claude) ?? "",
+    /invalid availability range/,
+  );
+  assert.match(
+    packageAdapterValidationError(
+      { ...skills, introduced: "2.0.12", before: "2.0.12" },
+      claude,
+    ) ?? "",
+    /invalid availability range/,
+  );
+});
+
+test("rejects a layout variant outside an edited availability range", () => {
+  const edited: PackageAdapter = {
+    ...skills,
+    introduced: "2.0.12",
+    variants: [{ introduced: "2.0.0", skills_dir: "legacy/skills" }],
+  };
+  assert.match(
+    packageAdapterValidationError(edited, claude) ?? "",
+    /layout interval outside its availability range/,
+  );
+});
+
+test("skips capability compatibility for a disabled harness mapping", () => {
+  assert.equal(packageAdapterValidationError(skills, claude, false), undefined);
+});
+
+test("still validates the range shape for a disabled harness mapping", () => {
+  assert.match(
+    packageAdapterValidationError(
+      { ...skills, introduced: "2.0.12", before: "2.0.12" },
+      claude,
+      false,
+    ) ?? "",
+    /invalid availability range/,
+  );
 });

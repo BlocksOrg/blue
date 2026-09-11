@@ -193,6 +193,80 @@ export function adapterSupportsHarness(
   return !harnessMappingIssue(adapter, harness);
 }
 
+/// Validate the complete version shape of one package adapter. This is shared
+/// by the add and edit flows so an existing custom extension cannot be left in
+/// a state that the create dialog would reject.
+export function packageAdapterValidationError(
+  adapter: PackageAdapter,
+  harness: HarnessMetadata,
+  checkCompatibility = true,
+): string | undefined {
+  const label = harness.label;
+  const availabilityStart = semverTuple(adapter.introduced ?? "0.0.0");
+  const availabilityEnd = adapter.before ? semverTuple(adapter.before) : undefined;
+  if (
+    !availabilityStart
+    || (adapter.before && !availabilityEnd)
+    || (availabilityEnd && compareSemver(availabilityStart, availabilityEnd) >= 0)
+  ) return `${label} has an invalid availability range.`;
+
+  const intervals = (adapter.variants ?? []).map((variant) => ({
+    variant,
+    start: semverTuple(variant.introduced),
+    end: variant.before ? semverTuple(variant.before) : undefined,
+  }));
+  if (
+    intervals.some(({ variant, start, end }) =>
+      !start || (variant.before && !end) || (end && compareSemver(start, end) >= 0),
+    )
+  ) return `${label} has an invalid adapter interval boundary.`;
+  if (
+    intervals.some((interval, index) =>
+      index > 0 && compareSemver(intervals[index - 1].start!, interval.start!) >= 0,
+    )
+  ) return `${label} adapter intervals must be ordered by introduced version.`;
+
+  for (let index = 1; index < intervals.length; index += 1) {
+    const previous = intervals[index - 1];
+    if (!previous.end || compareSemver(previous.end, intervals[index].start!) > 0)
+      return `${label} adapter intervals overlap at ${intervals[index].variant.introduced}.`;
+  }
+  if (
+    intervals.some(({ start, end }) =>
+      compareSemver(start!, availabilityStart) < 0
+      || (availabilityEnd && (!end || compareSemver(end, availabilityEnd) > 0)),
+    )
+  ) return `${label} has a layout interval outside its availability range.`;
+
+  const hasFallback = Boolean(
+    adapter.plugin_dir
+      || adapter.skills_dir
+      || adapter.agents_dir
+      || adapter.hooks_file
+      || adapter.plugins?.length
+      || Object.keys(adapter.helpers ?? {}).length,
+  );
+  if (!hasFallback && intervals.length) {
+    const last = intervals.at(-1)!;
+    if (
+      compareSemver(intervals[0].start!, availabilityStart) !== 0
+      || (availabilityEnd
+        ? !last.end || compareSemver(last.end, availabilityEnd) !== 0
+        : Boolean(last.end))
+    ) return `${label} layout intervals must cover its complete availability range when no fallback is defined.`;
+    for (let index = 1; index < intervals.length; index += 1) {
+      if (
+        !intervals[index - 1].end
+        || compareSemver(intervals[index - 1].end!, intervals[index].start!) !== 0
+      ) return `${label} adapter intervals contain a gap before ${intervals[index].variant.introduced}.`;
+    }
+  }
+
+  if (!checkCompatibility) return undefined;
+  const issue = harnessMappingIssue(adapter, harness);
+  return issue ? describeMappingIssue(issue, adapter, harness) : undefined;
+}
+
 export function describeMappingIssue(
   issue: MappingIssue,
   adapter: PackageAdapter,
