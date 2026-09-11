@@ -1028,7 +1028,7 @@ test.describe.serial("Blue deployment journey", () => {
     await page.getByRole("button", { name: "Actions for Codex" }).click();
     await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
     await page.getByLabel("Allowed harness versions").fill(">=0.0.0");
-    await page.getByLabel("Allow unverified versions").click();
+    await page.getByRole("checkbox", { name: "Allow unverified versions" }).check();
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
     const uncappedLaunch = await runCli(home, ["codex", "--dashboard-uncapped-check"]);
