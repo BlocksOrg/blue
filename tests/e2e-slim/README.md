@@ -15,7 +15,9 @@ governance-only stack just runs it with `command: ["control-api"]`.
 ## What's tested
 
 Every test runs against a **live** control-api + Postgres + MinIO (real service
-binary, real database, real object storage).
+binary, real database, real object storage). The MinIO server and client use
+pinned release images from the project's Quay registry so CI does not depend on
+mutable or retired Docker Hub tags.
 
 | Test | What it exercises | Needs a real agent CLI? | Needs the gateway path? |
 | --- | --- | --- | --- |
