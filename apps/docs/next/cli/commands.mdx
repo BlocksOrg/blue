@@ -12,7 +12,7 @@ The binary is named `blue`. Run `blue --help` for the arguments supported by you
 | `blue version` / `blue --version` | Print the installed Blue metaharness version. |
 | `blue setup` | Clear the stored session, reconfigure the Control API connection through deployment discovery, and complete login. |
 | `blue reset [--yes]` | Disconnect the active deployment, remove Blue-managed agent overlays, and retain non-secret tenant state for a later reconnect. |
-| `blue login [--force]` | Verify the stored session with the service and, when it is missing or rejected, complete OAuth device authorization. `--force` revokes the stored session and re-authorizes even when it is still valid. |
+| `blue login [--force]` | Verify the stored session with the service and, when it is missing or rejected, complete OAuth device authorization. `--force` re-authorizes even when the session is still valid, revoking both the gateway session and the stored refresh token. |
 | `blue logout` | Revoke the refresh family when reachable and remove local tokens. |
 | `blue doctor` | Show detected harness paths, versions, and policy allow or deny state. |
 | `blue agent [NAME]` | Choose the preferred eligible agent used by bare `blue`. |

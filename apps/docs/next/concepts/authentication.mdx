@@ -38,7 +38,7 @@ The device grant is bound to the browser session that approved it, and gateway m
 
 `blue login` verifies with the service rather than trusting the local expiry, so it reports a rejected session instead of "Already logged in". When the deployment uses device authorization, it starts a new one; `blue` does the same at launch. An unreachable service is reported as unverified and never triggers a browser flow.
 
-Use `blue login --force` to re-authorize while a session is still valid — switching accounts, or replacing a session you no longer trust. It revokes the stored refresh token before starting the new flow, so no grant is left live server-side.
+Use `blue login --force` to re-authorize while a session is still valid — switching accounts, or replacing a session you no longer trust. It revokes the gateway session before starting the new flow and the stored refresh token once the replacement exists, so neither the old grant nor any inference token minted from it is left live server-side. Cancelling at the browser leaves the existing session intact.
 
 ## Scopes
 
