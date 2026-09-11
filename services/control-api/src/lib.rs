@@ -719,6 +719,17 @@ fn configured_gateway_policy(kind: Option<&str>) -> Option<gh_service::GatewayCo
     })
 }
 
+/// Force the gateway block to whatever this deployment is configured for, then
+/// re-stamp the capability floor so the document still declares the
+/// capabilities the gateway implies. The two always travel together: the server
+/// decides gateway mode on its own authority, so it also owns the
+/// `gateway_inference_jwt` capability that `validate_complete_governance` then
+/// requires.
+fn apply_deployment_gateway_policy(config: &mut gh_service::GovernanceConfig, kind: Option<&str>) {
+    config.gateway = configured_gateway_policy(kind);
+    stamp_version_aware_client_floor(config);
+}
+
 fn package_source_connections(
     settings: &Option<serde_yaml::Value>,
 ) -> Result<Vec<PackageSourceConnection>, ApiError> {
@@ -6177,12 +6188,12 @@ async fn update_governance_config(
             .map_err(|error| {
                 ApiError::bad_request(format!("invalid governance config: {error}"))
             })?;
-    next.gateway = configured_gateway_policy(state.config.gateway_kind.as_deref());
     let current_document: gh_service::GovernanceConfig = serde_json::from_value(current.document)
         .map_err(|error| {
         ApiError::internal(format!("decoding stored governance config: {error}"))
     })?;
     merge_current_extensions(&mut next, current_document);
+    apply_deployment_gateway_policy(&mut next, state.config.gateway_kind.as_deref());
     let merged_yaml = serde_yaml::to_string(&next)
         .map_err(|error| ApiError::internal(format!("serializing governance config: {error}")))?;
     let row = insert_governance_revision(
@@ -10737,6 +10748,41 @@ mod tests {
             "revision: r1\ngateway:\n  type: litellm\n  model: gpt-5\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn deployment_gateway_policy_stamps_the_inference_jwt_capability() {
+        // A `managed_yaml` round-trip as the dashboard/CLI sends it: the client
+        // echoes back a document whose stored revision was written without the
+        // gateway capability (a governance-only control-api reconciled it away).
+        let managed_yaml =
+            "revision: r1\nallowed_harnesses:\n  - codex\ngateway:\n  type: litellm\n";
+        let mut config =
+            gh_service::source::parse_config(std::path::Path::new("config.yaml"), managed_yaml)
+                .unwrap();
+        assert!(validate_complete_governance(&config)
+            .unwrap_err()
+            .contains("gateway_inference_jwt"));
+
+        apply_deployment_gateway_policy(&mut config, Some("litellm"));
+        assert_eq!(config.gateway.as_ref().unwrap().kind, "litellm");
+        assert!(config
+            .required_capabilities
+            .iter()
+            .any(|capability| capability == "gateway_inference_jwt"));
+        assert!(validate_complete_governance(&config).is_ok());
+
+        // Governance-only deployments clear the gateway instead, and stamp nothing.
+        let mut governance_only =
+            gh_service::source::parse_config(std::path::Path::new("config.yaml"), managed_yaml)
+                .unwrap();
+        apply_deployment_gateway_policy(&mut governance_only, None);
+        assert!(governance_only.gateway.is_none());
+        assert!(!governance_only
+            .required_capabilities
+            .iter()
+            .any(|capability| capability == "gateway_inference_jwt"));
+        assert!(validate_complete_governance(&governance_only).is_ok());
     }
 
     #[test]
