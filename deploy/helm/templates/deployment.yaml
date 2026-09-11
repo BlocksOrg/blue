@@ -123,7 +123,7 @@ spec:
           envFrom: [{ secretRef: { name: {{ .Values.blue.existingSecret }} } }]
           ports:
             - { name: control-api, containerPort: 8080 }
-            - { name: gateway-internal, containerPort: 8082 }
+            - { name: gw-internal, containerPort: 8082 }
           startupProbe:
             exec: { command: ["/usr/local/bin/blue-healthcheck"] }
             {{- toYaml .Values.startupProbe | nindent 12 }}
