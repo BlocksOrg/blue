@@ -102,8 +102,12 @@ Wrapped-launch update suppression is also generation-owned. Each named
 `Operations` set declares how its harness version disables native update checks
 or automatic installation. The same operation decorates both a newly reconciled
 plan and the read-only launch path, preventing their environment and arguments
-from diverging. If a vendor changes or removes its update control, add a new
-operation set at that version boundary rather than changing a shipped set.
+from diverging. Blue applies the operation when the organization range has a
+maximum or the effective limit is the compiled certification ceiling. It skips
+the operation only when `allow_unverified_versions: true` accompanies an
+explicit range without an upper bound. If a vendor changes or removes its update
+control, add a new operation set at that version boundary rather than changing a
+shipped set.
 
 Every generation declares two different upper bounds. `before` is the optional
 breaking-format boundary used for dispatch. `verified_before` is the mandatory
