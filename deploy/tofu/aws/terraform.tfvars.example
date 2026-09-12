@@ -1,6 +1,18 @@
 aws_region                         = "us-west-2"
 name                               = "blue"
 environment                        = "production"
+
+# Each dependency is optional; the defaults below create all three. Turn one off
+# to source it elsewhere — the Helm chart bundles evaluation-grade PostgreSQL and
+# MinIO. Nothing in Blue reads HARNESS_REDIS_URL (it is there for the
+# organization-operated LiteLLM gateway), so governance-only deployments should
+# set include_redis = false. The chart rejects its bundled datastores in
+# production, so a production stack keeps the database and buckets here. See
+# README.md.
+# include_database                   = true
+# include_bucket                     = true
+# include_redis                      = true
+
 eks_cluster_name                   = "platform-production"
 vpc_id                             = "vpc-0123456789abcdef0"
 private_subnet_ids                 = ["subnet-0123456789abcdef0", "subnet-abcdef01234567890"]
