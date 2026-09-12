@@ -2678,6 +2678,7 @@ async fn reconcile_deployment_governance(
             &source_yaml,
             "bootstrap",
             None,
+            None,
         )
         .await?;
         let baseline =
@@ -3320,6 +3321,7 @@ async fn insert_governance_revision(
     user_id: Option<Uuid>,
     yaml: &str,
     origin: &str,
+    expected_base_revision: Option<&str>,
     package_audiences: Option<&BTreeMap<String, PackageAudience>>,
 ) -> Result<ConfigRow, ApiError> {
     let mut config = gh_service::source::parse_config(std::path::Path::new("config.yaml"), yaml)
@@ -3340,10 +3342,22 @@ async fn insert_governance_revision(
     let document = serde_json::to_value(&config)
         .map_err(|error| ApiError::internal(format!("serializing config: {error}")))?;
     let mut transaction = pool.begin().await?;
+    let _organization_lock = sqlx::query_scalar!(
+        "SELECT id FROM organizations WHERE id=$1 FOR UPDATE",
+        org_id
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
     let previous_revision: Option<String> = sqlx::query_scalar!("SELECT revision FROM governance_config_revisions WHERE organization_id=$1 ORDER BY id DESC LIMIT 1",
         org_id)
     .fetch_optional(&mut *transaction)
     .await?;
+    if expected_base_revision.is_some_and(|expected| previous_revision.as_deref() != Some(expected))
+    {
+        return Err(ApiError::conflict(
+            "governance configuration changed; reload before saving",
+        ));
+    }
     let row = sqlx::query_as!(ConfigRow,
         "INSERT INTO governance_config_revisions \
          (organization_id, revision, yaml, document, created_by, origin) VALUES ($1,$2,$3,$4,$5,$6) \
@@ -6261,6 +6275,7 @@ async fn update_governance_config(
         Some(who.user_id),
         &merged_yaml,
         "dashboard",
+        Some(&input.base_revision),
         None,
     )
     .await?;
@@ -7857,6 +7872,7 @@ async fn update_harness_managed_config(
         Some(who.user_id),
         &yaml,
         "dashboard",
+        Some(&input.base_revision),
         None,
     )
     .await?;
@@ -8192,6 +8208,7 @@ async fn update_governance_extensions(
         Some(who.user_id),
         &yaml,
         "dashboard",
+        Some(&input.base_revision),
         Some(&input.package_audiences),
     )
     .await?;

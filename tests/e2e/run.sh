@@ -12,7 +12,7 @@ compose_file="$repo_root/tests/e2e/docker-compose.yml"
 project="${BLUE_E2E_PROJECT:-blue-e2e-${GITHUB_RUN_ID:-local}-$$}"
 compose_args=(-p "$project" -f "$compose_file" --profile build)
 artifact_dir="$repo_root/tests/e2e/artifacts"
-mkdir -p "$artifact_dir"
+mkdir -p "$artifact_dir/provisioner"
 chmod -R a+rwX "$artifact_dir"
 
 # Prebuilt mode: the authoritative deployment + rust-artifacts images were built

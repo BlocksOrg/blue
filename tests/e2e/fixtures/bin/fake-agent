@@ -23,6 +23,11 @@ if [[ "$agent" == "opencode" ]] && [[ "${1:-}" == "import" ]]; then
   exit 0
 fi
 
+# The supervisor's graceful-stop path sends SIGTERM and then waits for the
+# harness status. Model a native CLI that handles that signal and exits through
+# its normal cleanup path so /quit can prove the exact status is propagated.
+trap 'exit "${E2E_AGENT_EXIT_CODE:-0}"' TERM
+
 log_dir="${E2E_AGENT_LOG_DIR:-/tmp/blue-e2e/agent-log}"
 mkdir -p "$log_dir"
 {

@@ -5,7 +5,12 @@
   },
   "cli": {
     "commands": ["version", "help", "setup", "login", "logout", "doctor", "agent", "status", "verify", "reset", "run", "config", "gateway", "apply", "daemon", "shim", "session-upload", "external-subcommand"],
-    "test": "journey.spec.ts"
+    "test": "journey.spec.ts",
+    "behavioral_tests": [
+      "unchanged-revision reconciliation is byte- and digest-idempotent",
+      "interactive reset cancellation preserves state and confirmation archives state and revokes access",
+      "supervisor status, health, version, gateway, doctor, agent, apply, help, and quit commands preserve child lifecycle"
+    ]
   },
   "harnesses": {
     "keys": ["codex", "claude", "kimi", "opencode"],
@@ -18,5 +23,21 @@
     "test": "journey.spec.ts",
     "filtering_test": "zz-dashboard-filtering.spec.ts",
     "excluded": []
+  },
+  "gateway": {
+    "test": "gateway-m2m.spec.ts",
+    "behavioral_tests": [
+      "valid credentials are reused without another provisioner invocation",
+      "upstream 400, 429, 500, disconnect, malformed JSON, and interrupted SSE behavior",
+      "hop-by-hop request and response headers are stripped, including Connection-nominated headers",
+      "request logs omit inference credentials, prompts, and URL queries"
+    ]
+  },
+  "governance": {
+    "test": "journey.spec.ts",
+    "behavioral_tests": [
+      "same-base concurrent updates produce one revision and one conflict",
+      "invalid YAML, runtime gateway fields, and unsupported harnesses do not publish revisions"
+    ]
   }
 }

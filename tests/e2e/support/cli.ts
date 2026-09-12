@@ -165,21 +165,36 @@ export async function waitForOutput(
 ): Promise<string> {
   let output = "";
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${pattern}; output: ${output}`)), timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stdout.off("data", inspect);
+      child.stderr.off("data", inspect);
+      child.off("exit", exited);
+    };
     const inspect = (chunk: Buffer) => {
       output += chunk.toString();
-      const match = output.match(pattern);
+      // Ratatui redraws by moving the cursor between fragments of a visible
+      // word (for example `Auth<CSI>entication`). Match the rendered text as
+      // well as the raw stream so PTY assertions are about what a user sees,
+      // not the backend's exact paint sequence.
+      const rendered = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+      const match = output.match(pattern) ?? rendered.match(pattern);
       if (match) {
-        clearTimeout(timer);
+        cleanup();
         resolve(match[0]);
       }
     };
+    const exited = (code: number | null) => {
+      cleanup();
+      reject(new Error(`blue exited with ${code} before producing ${pattern}; output: ${output}`));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timed out waiting for ${pattern}; output: ${output}`));
+    }, timeoutMs);
     child.stdout.on("data", inspect);
     child.stderr.on("data", inspect);
-    child.once("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`blue exited with ${code} before producing ${pattern}; output: ${output}`));
-    });
+    child.once("exit", exited);
   });
 }
 

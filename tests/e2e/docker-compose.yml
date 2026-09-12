@@ -186,6 +186,7 @@ services:
       - package-fixture:/fixtures:ro
       - mtls-certs:/certs:ro
       - ../e2e-slim/fixtures/jwks:/gateway-jwt:ro
+      - ./artifacts/provisioner:/e2e-provisioner-state
     depends_on:
       mtls-certs: { condition: service_completed_successfully }
       migrate: { condition: service_completed_successfully }
