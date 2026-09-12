@@ -84,6 +84,30 @@ createServer(async (request, response) => {
   const toolNamespace = namespacedTool?.namespace;
   const needsToolCall = Boolean(toolName) && !JSON.stringify(input).includes("BLUE_MCP_OK");
   requests.push({ method: request.method, path: url.pathname, query: url.search, authorization: credential, body: input, headers: request.headers });
+  if (url.pathname.startsWith("/v1/e2e/status/")) {
+    const status = Number(url.pathname.split("/").at(-1));
+    if (![400, 429, 500].includes(status)) return json(response, 404, { error: { message: "unknown deterministic status" } });
+    response.setHeader("connection", "x-e2e-upstream-hop");
+    response.setHeader("x-e2e-upstream-hop", "must-not-be-forwarded");
+    response.setHeader("x-e2e-end-to-end", "preserved");
+    if (status === 429) response.setHeader("retry-after", "11");
+    return json(response, status, { error: { message: `e2e upstream ${status}` } });
+  }
+  if (url.pathname === "/v1/e2e/disconnect") {
+    response.destroy();
+    return;
+  }
+  if (url.pathname === "/v1/e2e/malformed-json") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"incomplete":');
+    return;
+  }
+  if (url.pathname === "/v1/e2e/interrupted-sse") {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write('data: {"type":"response.output_text.delta","delta":"partial"}\n\n');
+    response.destroy();
+    return;
+  }
   if (url.pathname === "/v1/e2e/error") {
     response.setHeader("retry-after", "7");
     return json(response, 429, { error: { message: "e2e upstream rate limit" } });

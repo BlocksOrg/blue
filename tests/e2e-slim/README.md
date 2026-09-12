@@ -12,6 +12,12 @@ image built once by `images.yml` (the same one the full suite loads) rather than
 compiling an image of its own. control-api ships in that image, so the
 governance-only stack just runs it with `command: ["control-api"]`.
 
+Stateful browser/PTY behaviors, concurrent governance revision updates,
+executable-provisioner invocation reuse and failure controls, and deterministic
+proxy/upstream failures remain in the full `tests/e2e` suite. Keeping those
+cases there preserves this suite's control-api-only topology and secret-free PR
+tier.
+
 ## What's tested
 
 Every test runs against a **live** control-api + Postgres + MinIO (real service

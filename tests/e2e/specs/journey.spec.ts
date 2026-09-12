@@ -167,6 +167,14 @@ test.describe.serial("Blue deployment journey", () => {
     expect(result.stdout).toContain("status          : ready");
     expect(result.stdout).toContain("alias           : e2e");
     expect(result.stdout).toContain("gateway id      : e2e-executable");
+
+    const invocationPath = "/work/tests/e2e/artifacts/provisioner/invocations.jsonl";
+    const invocationsBefore = (await readFile(invocationPath, "utf8")).trim().split("\n").length;
+    const reused = await runCli(home, ["gateway"]);
+    expect(reused.code, reused.stderr).toBe(0);
+    expect(reused.stdout).toContain("status          : ready");
+    const invocationsAfter = (await readFile(invocationPath, "utf8")).trim().split("\n").length;
+    expect(invocationsAfter).toBe(invocationsBefore);
   });
 
   test("@smoke /direct tears down gateway wiring and offers an agent reload", async ({ page }) => {
@@ -322,6 +330,23 @@ test.describe.serial("Blue deployment journey", () => {
     expect(await readClientFile(home, ".codex/blue.config.toml")).toContain("gpt-e2e");
     await expect(stat(path.join(home, ".config", "blue", "runtime", "kimi", "config.toml"))).rejects.toThrow();
     await expect(stat(path.join(home, ".config", "blue", "runtime", "opencode", "opencode.json"))).rejects.toThrow();
+  });
+
+  test("reapplying an unchanged revision preserves managed bytes and digests", async () => {
+    const managedPath = path.join(home, ".codex", "blue.config.toml");
+    const statePath = path.join(home, ".config", "blue", "applied-state.json");
+    const beforeManaged = await readFile(managedPath);
+    const beforeState = JSON.parse(await readFile(statePath, "utf8"));
+
+    const reapplied = await runCli(home, ["apply", "--yes"]);
+    expect(reapplied.code, reapplied.stderr).toBe(0);
+
+    const afterManaged = await readFile(managedPath);
+    const afterState = JSON.parse(await readFile(statePath, "utf8"));
+    expect(afterManaged.equals(beforeManaged)).toBe(true);
+    expect(afterState.revision).toBe(beforeState.revision);
+    expect(afterState.files).toEqual(beforeState.files);
+    expect(afterState.harnesses).toEqual(beforeState.harnesses);
   });
 
   test("@smoke hostile package sources fail closed and a clean package revision still applies", async ({ page }) => {
@@ -602,6 +627,53 @@ test.describe.serial("Blue deployment journey", () => {
     expect(exitedAt).toBeGreaterThan(enabledAt);
     for (const reset of ["\u001b[r", "\u001b[?1003l", "\u001b[?1006l", "\u001b[?1004l", "\u001b[?2004l", "\u001b[<u", "\u001b[=0u", "\u001b[?25h"]) {
       expect(launched.stdout.lastIndexOf(reset), `missing terminal reset ${JSON.stringify(reset)}`).toBeGreaterThan(exitedAt);
+    }
+  });
+
+  test("supervisor commands report live state without terminating the agent", async () => {
+    const child = spawnCliInPty(home, "blue run claude -- supervisor-commands", {
+      E2E_AGENT_READ_STDIN: "1",
+      E2E_AGENT_EXIT_CODE: "23",
+    });
+    const completion = collect(child);
+    try {
+      await waitForOutput(child, /Ctrl-\] Control/);
+      child.stdin.write("\u001d");
+      await waitForOutput(child, /Command/);
+
+      const commands: Array<[string, RegExp]> = [
+        ["/status", /Overall/],
+        ["/health", /healthy/],
+        ["/version", /metaharness/],
+        ["/gateway", /alias/],
+        ["/doctor", /Harnesses/],
+        ["/help", /Commands:/],
+      ];
+      for (const [command, output] of commands) {
+        child.stdin.write(`${command}\r`);
+        await waitForOutput(child, output);
+        expect(child.exitCode, `${command} terminated the running agent`).toBeNull();
+      }
+
+      child.stdin.write("/agent\r");
+      await waitForOutput(child, /default/);
+      expect(child.exitCode).toBeNull();
+      child.stdin.write("\r");
+      await waitForOutput(child, /already/);
+
+      child.stdin.write("/apply\r");
+      await waitForOutput(child, /configuration/);
+      child.stdin.write("\u001b[B\r");
+      await waitForOutput(child, /applied/);
+      expect(child.exitCode).toBeNull();
+
+      child.stdin.write("/quit\r");
+      await waitForOutput(child, /exit/);
+      child.stdin.write("\u001b[B\r");
+      const result = await completion;
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(23);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGTERM");
     }
   });
 
@@ -1010,6 +1082,64 @@ test.describe.serial("Blue deployment journey", () => {
     await expect.poll(() => page.evaluate(() => localStorage.getItem("blue-theme"))).toBe("light");
   });
 
+  test("governance updates are atomic under conflicts and validation failures", async ({ page }) => {
+    await loginAsAdmin(page, { fresh: true });
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const originalResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(originalResponse.status(), await originalResponse.text()).toBe(200);
+    const original = await originalResponse.json();
+    const historyBefore = await (await page.request.get(`${control}/admin/governance-config/revisions`)).json();
+    const documents = ["conflict-a", "conflict-b"].map((suffix) => {
+      const document = YAML.parse(original.managed_yaml);
+      document.harnesses.codex.managed_config.model = `gpt-${suffix}-${Date.now()}`;
+      return YAML.stringify(document);
+    });
+
+    try {
+      const raced = await Promise.all(documents.map((managed_yaml) =>
+        page.request.put(`${control}/admin/governance-config`, {
+          data: { base_revision: original.revision, managed_yaml },
+        })
+      ));
+      expect(raced.map((response) => response.status()).sort()).toEqual([200, 409]);
+
+      const winnerResponse = await page.request.get(`${control}/admin/governance-config`);
+      const winner = await winnerResponse.json();
+      const winningDocument = YAML.parse(documents[raced.findIndex((response) => response.status() === 200)]);
+      expect(winner.document.harnesses.codex.managed_config.model).toBe(
+        winningDocument.harnesses.codex.managed_config.model,
+      );
+      const historyAfterRace = await (await page.request.get(`${control}/admin/governance-config/revisions`)).json();
+      expect(historyAfterRace).toHaveLength(historyBefore.length + 1);
+      expect(historyAfterRace.filter((entry: { revision: string }) => entry.revision === winner.revision)).toHaveLength(1);
+
+      const invalidDocuments = [
+        "harnesses: [",
+        YAML.stringify({ ...winner.document, gateway: { type: "litellm", token: "must-not-persist" } }),
+        YAML.stringify({
+          ...winner.document,
+          allowed_harnesses: [...winner.document.allowed_harnesses, "unsupported-e2e"],
+          harnesses: { ...winner.document.harnesses, "unsupported-e2e": { managed_config: {} } },
+        }),
+      ];
+      for (const managed_yaml of invalidDocuments) {
+        const rejected = await page.request.put(`${control}/admin/governance-config`, {
+          data: { base_revision: winner.revision, managed_yaml },
+        });
+        expect(rejected.status(), await rejected.text()).toBe(400);
+        const stillCurrent = await (await page.request.get(`${control}/admin/governance-config`)).json();
+        expect(stillCurrent.revision).toBe(winner.revision);
+        expect(stillCurrent.managed_yaml).toBe(winner.managed_yaml);
+      }
+    } finally {
+      const current = await (await page.request.get(`${control}/admin/governance-config`)).json();
+      const restored = await page.request.put(`${control}/admin/governance-config`, {
+        data: { base_revision: current.revision, managed_yaml: original.managed_yaml },
+      });
+      expect(restored.status(), await restored.text()).toBe(200);
+    }
+  });
+
   test("dashboard harness editor publishes configuration consumed by the CLI", async ({ page }) => {
     await loginAsAdmin(page, { fresh: true });
     await page.getByRole("link", { name: "Harnesses" }).click();
@@ -1028,7 +1158,7 @@ test.describe.serial("Blue deployment journey", () => {
     await page.getByRole("button", { name: "Actions for Codex" }).click();
     await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
     await page.getByLabel("Allowed harness versions").fill(">=0.0.0");
-    await page.getByLabel("Allow unverified versions").click();
+    await page.getByRole("checkbox", { name: "Allow unverified versions" }).click();
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
     const uncappedLaunch = await runCli(home, ["codex", "--dashboard-uncapped-check"]);
@@ -1215,7 +1345,7 @@ test.describe.serial("Blue deployment journey", () => {
         headers: {
           authorization: `Bearer ${memberOauth.token}`,
           "x-blue-contract-version": "3",
-          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt",
+          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,unverified_harness_versions",
         },
       });
       expect(memberConfig.status(), await memberConfig.text()).toBe(200);
@@ -1337,6 +1467,98 @@ test.describe.serial("Blue deployment journey", () => {
     const logout = await runCli(home, ["logout"]);
     expect(logout.code, logout.stderr).toBe(0);
     await expect(readFile(path.join(home, ".config", "blue", "session.json"), "utf8")).rejects.toThrow();
+  });
+
+  test("interactive reset cancels without changes, then archives state and revokes gateway access", async ({ page }) => {
+    await loginAsAdmin(page);
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const originalResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(originalResponse.status(), await originalResponse.text()).toBe(200);
+    const original = await originalResponse.json();
+    const originalDocument = YAML.parse(original.managed_yaml);
+    const enabledGatewayForTest = !originalDocument.gateway;
+    if (enabledGatewayForTest) {
+      originalDocument.gateway = { type: "litellm" };
+      const enabled = await page.request.put(`${control}/admin/governance-config`, {
+        data: { base_revision: original.revision, managed_yaml: YAML.stringify(originalDocument) },
+      });
+      expect(enabled.status(), await enabled.text()).toBe(200);
+    }
+    const resetHome = await prepareClient(`interactive-reset-${Date.now()}`);
+    const loggedIn = await approveDeviceFlow(page, spawnCli(resetHome, ["login"]));
+    expect(loggedIn.code, `${loggedIn.stdout}\n${loggedIn.stderr}`).toBe(0);
+    expect((await runCli(resetHome, ["agent", "codex"])).code).toBe(0);
+    expect((await runCli(resetHome, ["gateway"])).code).toBe(0);
+    expect((await runCli(resetHome, ["apply", "--yes"])).code).toBe(0);
+
+    const watched = [
+      ".config/blue/blue.toml",
+      ".config/blue/session.json",
+      ".config/blue/applied-state.json",
+      ".codex/blue.config.toml",
+    ];
+    const optionalPackageState = path.join(resetHome, ".config/blue/package-state.json");
+    await expect(stat(optionalPackageState)).rejects.toThrow();
+    const before = new Map<string, Buffer>();
+    for (const relative of watched) before.set(relative, await readFile(path.join(resetHome, relative)));
+
+    const cancelled = spawnCliInPty(resetHome, "blue reset");
+    const cancelledCompletion = collect(cancelled);
+    await waitForOutput(cancelled, /Reset Blue and disconnect/);
+    cancelled.stdin.write("n\r");
+    const cancelledResult = await cancelledCompletion;
+    expect(cancelledResult.code, cancelledResult.stderr).toBe(0);
+    expect(`${cancelledResult.stdout}\n${cancelledResult.stderr}`).toContain("Reset cancelled");
+    for (const [relative, bytes] of before) {
+      expect((await readFile(path.join(resetHome, relative))).equals(bytes), relative).toBe(true);
+    }
+    await expect(stat(optionalPackageState)).rejects.toThrow();
+
+    const launched = await runCli(resetHome, ["run", "codex", "--", "before-reset"]);
+    expect(launched.code, launched.stderr).toBe(0);
+    const gatewayEnvironment = await readClientFile(resetHome, "agent-log/codex.env");
+    const inferenceToken = gatewayEnvironment.match(/^env_HARNESS_CODEX_KEY=(eyJ\S+)$/m)?.[1] ?? "";
+    expect(inferenceToken).toBeTruthy();
+
+    const confirmed = spawnCliInPty(resetHome, "blue reset");
+    const confirmedCompletion = collect(confirmed);
+    await waitForOutput(confirmed, /Reset Blue and disconnect/);
+    confirmed.stdin.write("y\r");
+    const confirmedResult = await confirmedCompletion;
+    expect(confirmedResult.code, confirmedResult.stderr).toBe(0);
+    expect(`${confirmedResult.stdout}\n${confirmedResult.stderr}`).toContain("Blue reset complete");
+    for (const relative of [".config/blue/blue.toml", ".config/blue/session.json", ".codex/blue.config.toml"]) {
+      await expect(readFile(path.join(resetHome, relative))).rejects.toThrow();
+    }
+    const archives = await readdir(path.join(resetHome, ".config", "blue", "tenants"));
+    expect(archives).toHaveLength(1);
+    const archive = path.join(resetHome, ".config", "blue", "tenants", archives[0]);
+    expect(JSON.parse(await readFile(path.join(archive, "manifest.json"), "utf8"))).toMatchObject({
+      schema_version: 1,
+      canonical_url: process.env.E2E_CONTROL_API_URL,
+    });
+    expect(await readFile(path.join(archive, "state", "applied-state.json"))).toEqual(
+      before.get(".config/blue/applied-state.json"),
+    );
+    await expect.poll(async () => (
+      await page.request.post("http://blue:8081/v1/chat/completions", {
+        headers: { authorization: `Bearer ${inferenceToken}` },
+        data: { model: "gpt-e2e", messages: [{ role: "user", content: "after-reset" }] },
+      })
+    ).status()).toBe(401);
+
+    const repeated = await runCli(resetHome, ["reset", "--yes"]);
+    expect(repeated.code, repeated.stderr).toBe(0);
+    expect(repeated.stdout).toContain("already reset");
+    expect(await readdir(path.join(resetHome, ".config", "blue", "tenants"))).toEqual(archives);
+
+    if (enabledGatewayForTest) {
+      const current = await (await page.request.get(`${control}/admin/governance-config`)).json();
+      const restored = await page.request.put(`${control}/admin/governance-config`, {
+        data: { base_revision: current.revision, managed_yaml: original.managed_yaml },
+      });
+      expect(restored.status(), await restored.text()).toBe(200);
+    }
   });
 
   test("declining replacement authorization leaves an ordinarily retired session signed out", async ({ page }) => {

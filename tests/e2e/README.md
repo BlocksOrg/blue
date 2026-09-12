@@ -27,14 +27,29 @@ tests/e2e/run.sh mtls
 The smoke suite covers deployment health, dashboard password authentication,
 OAuth device approval, policy reconciliation, custom-provisioner invocation,
 encrypted gateway provisioning, managed packages, a governed Codex launch, and
-revision drift repair. The component reads its credential from inherited
+revision drift repair. It also proves that a valid provisioned credential is
+reused without another executable invocation and that an unchanged apply keeps
+managed bytes and recorded digests stable. The component reads its credential from inherited
 runtime environment and stamps its returned alias; the journey asserts that
 marker, so module loading, invocation, and credential use must all work. The full suite
 adds every OpenAPI route/authentication boundary, all four harness adapters,
 PTY behavior, session capture through MinIO, inference credential swapping and
 request logs, administrator workflows, SCIM lifecycle, shims, critical
 dashboard pages, and browser-level filtering behavior for members, invitations,
-sessions, clients, and gateway request logs.
+sessions, clients, and gateway request logs. Behavioral cases additionally drive
+the supervisor command surface through a live PTY, exercise cancel/confirm reset
+and gateway revocation, race governance revisions, reject invalid revisions
+without mutation, and verify deterministic upstream status, disconnect,
+malformed-body, and interrupted-stream handling. The proxy assertions cover
+`Connection`-nominated hop headers and confirm that credentials, prompts, and
+URL queries are absent from persisted request logs.
+
+The executable provisioner fixture records invocations under
+`artifacts/provisioner/` and accepts a `mode` control file with `success`,
+`timeout`, `malformed`, `incomplete`, `unavailable`, `protocol-mismatch`,
+`nonzero`, and `revocation-failure` modes. The fake upstream exposes matching
+deterministic error and broken-transport routes; these controls are test-only
+and do not alter production service interfaces.
 
 Per-agent native certification (launching the real, locked agent CLIs and
 driving real inference) lives in `tests/e2e-slim` — see

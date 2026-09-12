@@ -281,6 +281,81 @@ test.describe.serial("Gateway M2M auth", () => {
     expect(ok.status(), await ok.text()).toBe(200);
   });
 
+  test("preserves deterministic upstream failures without leaking transport metadata", async ({ page }) => {
+    await loginAsAdmin(page);
+    expect(inferenceToken).toBeTruthy();
+    await page.request.post(`${UPSTREAM}/_e2e/reset`);
+    const marker = `private-prompt-${Date.now()}`;
+    const querySecret = `query-secret-${Date.now()}`;
+
+    for (const [status, retryAfter] of [[400, undefined], [429, "11"], [500, undefined]] as const) {
+      const response = await page.request.post(
+        `${PROXY}/v1/e2e/status/${status}?api_key=${querySecret}`,
+        {
+          headers: {
+            authorization: `Bearer ${inferenceToken}`,
+            connection: "x-e2e-request-hop",
+            "x-e2e-request-hop": "must-not-reach-upstream",
+            "x-e2e-end-to-end": "preserved",
+            "x-harness-agent": "codex",
+          },
+          data: { model: "gpt-e2e", messages: [{ role: "user", content: marker }] },
+        },
+      );
+      expect(response.status()).toBe(status);
+      expect(await response.json()).toEqual({ error: { message: `e2e upstream ${status}` } });
+      expect(response.headers()["x-e2e-end-to-end"]).toBe("preserved");
+      expect(response.headers()["x-e2e-upstream-hop"]).toBeUndefined();
+      expect(response.headers()["connection"]).toBeUndefined();
+      expect(response.headers()["retry-after"]).toBe(retryAfter);
+    }
+
+    const malformed = await page.request.post(`${PROXY}/v1/e2e/malformed-json`, {
+      headers: { authorization: `Bearer ${inferenceToken}` },
+      data: { model: "gpt-e2e" },
+    });
+    expect(malformed.status()).toBe(200);
+    expect(await malformed.text()).toBe('{"incomplete":');
+
+    const disconnected = await page.request.post(`${PROXY}/v1/e2e/disconnect`, {
+      headers: { authorization: `Bearer ${inferenceToken}` },
+      data: { model: "gpt-e2e" },
+    });
+    expect(disconnected.status()).toBe(502);
+    expect(await disconnected.text()).toBe("upstream request failed");
+
+    const interrupted = await page.request.post(`${PROXY}/v1/e2e/interrupted-sse`, {
+      headers: { authorization: `Bearer ${inferenceToken}` },
+      data: { model: "gpt-e2e", stream: true },
+    });
+    expect(interrupted.status()).toBe(502);
+    expect(await interrupted.text()).toBe("upstream request failed");
+
+    const upstreamRequests = await (await page.request.get(`${UPSTREAM}/_e2e/requests`)).json();
+    const forwarded = upstreamRequests.find((item: { path: string }) => item.path === "/v1/e2e/status/400");
+    expect(forwarded.headers["x-e2e-request-hop"]).toBeUndefined();
+    expect(forwarded.headers["connection"]).toBeUndefined();
+    expect(forwarded.headers["x-e2e-end-to-end"]).toBe("preserved");
+    expect(forwarded.authorization).not.toBe(inferenceToken);
+
+    await expect.poll(async () => {
+      const response = await page.request.get(`${CONTROL}/gateway/request-logs?per_page=50`);
+      const items = (await response.json()).items as Array<{ path: string; http_status: number | null }>;
+      return items.filter((item) => item.path.startsWith("/v1/e2e/"));
+    }).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "/v1/e2e/status/400", http_status: 400 }),
+      expect.objectContaining({ path: "/v1/e2e/status/429", http_status: 429 }),
+      expect.objectContaining({ path: "/v1/e2e/status/500", http_status: 500 }),
+      expect.objectContaining({ path: "/v1/e2e/disconnect", http_status: null }),
+      expect.objectContaining({ path: "/v1/e2e/interrupted-sse", http_status: null }),
+    ]));
+    const logs = await (await page.request.get(`${CONTROL}/gateway/request-logs?per_page=50`)).text();
+    expect(logs).not.toContain(inferenceToken);
+    expect(logs).not.toContain(marker);
+    expect(logs).not.toContain(querySecret);
+    expect(logs).not.toContain("api_key");
+  });
+
   test("enforces TLS, the trusted proxy certificate, and OAuth independently", async ({ page }) => {
     const [clientCert, clientKey, rogueCert, rogueKey] = await Promise.all([
       readFile("/certs/client.crt"),
