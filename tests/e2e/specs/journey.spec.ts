@@ -1142,6 +1142,11 @@ test.describe.serial("Blue deployment journey", () => {
 
   test("dashboard harness editor publishes configuration consumed by the CLI", async ({ page }) => {
     await loginAsAdmin(page, { fresh: true });
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const snapshotResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(snapshotResponse.status(), await snapshotResponse.text()).toBe(200);
+    const snapshot = await snapshotResponse.json();
+
     await page.getByRole("link", { name: "Harnesses" }).click();
     await expect(page).toHaveURL(/\/harnesses$/);
     await page.getByRole("button", { name: "Actions for Codex" }).click();
@@ -1158,7 +1163,7 @@ test.describe.serial("Blue deployment journey", () => {
     await page.getByRole("button", { name: "Actions for Codex" }).click();
     await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
     await page.getByLabel("Allowed harness versions").fill(">=0.0.0");
-    await page.getByRole("checkbox", { name: "Allow unverified versions" }).click();
+    await page.getByRole("checkbox", { name: "Allow unverified versions" }).check();
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
     const uncappedLaunch = await runCli(home, ["codex", "--dashboard-uncapped-check"]);
@@ -1173,6 +1178,16 @@ test.describe.serial("Blue deployment journey", () => {
     const cappedLaunch = await runCli(home, ["codex", "--dashboard-capped-check"]);
     expect(cappedLaunch.code, cappedLaunch.stderr).toBe(0);
     expect(await readClientFile(home, "agent-log/codex.env")).toContain("check_for_update_on_startup=false");
+
+    const currentResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(currentResponse.status(), await currentResponse.text()).toBe(200);
+    const restoreResponse = await page.request.put(`${control}/admin/governance-config`, {
+      data: {
+        base_revision: (await currentResponse.json()).revision,
+        managed_yaml: snapshot.managed_yaml,
+      },
+    });
+    expect(restoreResponse.status(), await restoreResponse.text()).toBe(200);
   });
 
   test("administrator API supports branding and invitation lifecycle", async ({ page }) => {
