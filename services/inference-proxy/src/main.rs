@@ -3,7 +3,7 @@
 //! Session-bound credential resolutions are cached briefly and invalidated through the
 //! Control API event stream. Request metadata is delivered in bounded batches.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1316,6 +1316,18 @@ fn is_hop_by_hop(name: &str) -> bool {
             | "upgrade"
     )
 }
+
+fn connection_header_names(headers: &HeaderMap) -> HashSet<String> {
+    headers
+        .get_all(axum::http::header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
 fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
@@ -1905,6 +1917,7 @@ fn copy_forwarded_headers(
     headers: &HeaderMap,
     credential_header: &HeaderName,
 ) -> reqwest::RequestBuilder {
+    let connection_headers = connection_header_names(headers);
     for (name, value) in headers {
         let lower = name.as_str().to_ascii_lowercase();
         if matches!(
@@ -1912,6 +1925,7 @@ fn copy_forwarded_headers(
             "authorization" | "x-api-key" | "host" | "content-length"
         ) || name == credential_header
             || is_hop_by_hop(&lower)
+            || connection_headers.contains(&lower)
         {
             continue;
         }
@@ -2022,10 +2036,14 @@ async fn proxy(
                                 classification: reason.legacy_classification().map(str::to_owned),
                             });
                         }
+                        let connection_headers = connection_header_names(&response_headers);
                         let mut builder = Response::builder().status(status);
                         for (name, value) in &response_headers {
                             let lower = name.as_str().to_ascii_lowercase();
-                            if lower != "content-length" && !is_hop_by_hop(&lower) {
+                            if lower != "content-length"
+                                && !is_hop_by_hop(&lower)
+                                && !connection_headers.contains(&lower)
+                            {
                                 builder = builder.header(name, value);
                             }
                         }
@@ -2038,10 +2056,14 @@ async fn proxy(
                     }
                 }
             }
+            let connection_headers = connection_header_names(response.headers());
             let mut builder = Response::builder().status(status);
             for (name, value) in response.headers() {
                 let lower = name.as_str().to_ascii_lowercase();
-                if lower != "content-length" && !is_hop_by_hop(&lower) {
+                if lower != "content-length"
+                    && !is_hop_by_hop(&lower)
+                    && !connection_headers.contains(&lower)
+                {
                     builder = builder.header(name, value);
                 }
             }
@@ -2210,6 +2232,21 @@ mod tests {
         assert_eq!(metadata.path, "/v1/responses");
         assert_eq!(metadata.model.as_deref(), Some("gpt-5"));
         assert_eq!(metadata.harness.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn connection_header_names_are_case_insensitive_and_trimmed() {
+        let mut headers = HeaderMap::new();
+        headers.append("connection", "keep-alive, X-Private-Hop".parse().unwrap());
+        headers.append("connection", "x-another-hop".parse().unwrap());
+        assert_eq!(
+            connection_header_names(&headers),
+            HashSet::from([
+                "keep-alive".to_owned(),
+                "x-private-hop".to_owned(),
+                "x-another-hop".to_owned(),
+            ])
+        );
     }
 
     #[test]
