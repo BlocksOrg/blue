@@ -11,6 +11,13 @@ from `blue.existingSecret`; required keys also use non-optional `secretKeyRef`
 entries so Kubernetes reports missing keys before a workload starts.
 Offline `helm template` cannot inspect keys inside that externally managed
 Secret; it validates the Secret name and renders mandatory key references.
+Key *values* are never validated by Helm: the dashboard rejects a
+`BETTER_AUTH_SECRET` or `HARNESS_BOOTSTRAP_ADMIN_PASSWORD` shorter than 32 bytes
+at startup, which surfaces only as a crash-looping pod while `--wait` waits.
+The Secret also carries the S3 credentials the Control API and worker need for
+`control_api.blob_storage` when `auth.mode: iam` has no pod identity to use —
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` reach every workload through
+`envFrom`. On EKS with IRSA, omit them and annotate the service account instead.
 
 ```bash
 helm upgrade --install blue-prerequisites ./deploy/helm-prerequisites \
@@ -30,9 +37,26 @@ pre-install hook. Uninstall the application release first and prerequisites
 last.
 
 Production is the chart default. It rejects mutable image tags, a missing
-externally managed Secret, disabled migrations, disabled NetworkPolicy, and more
-than one worker replica. For evaluation only, layer
+externally managed Secret, disabled migrations, disabled NetworkPolicy, a bundled
+database, and more than one worker replica. For evaluation only, layer
 `-f deploy/helm/values-evaluation.yaml`.
+
+`database.deployStandalone=true` renders a single-instance PostgreSQL StatefulSet
+in the release and points every workload and the migration Job at it, so an
+evaluation cluster needs no external database and no `HARNESS_DATABASE_URL` key.
+It has no replication, no backups, and no failover; production validation rejects
+it. An empty `database.auth.password` generates one on first install and reuses
+the stored value on upgrades. Because the database is a release resource rather
+than a hook, this mode also drops the migration Job's hook annotations and adds
+an init container that waits for the database instead.
+
+`minio.deployStandalone=true` does the same for object storage: a
+single-instance MinIO StatefulSet plus a Job that creates the session and package
+buckets, and `HARNESS_BLOB_*` wiring injected into the Control API and worker.
+The Control API only ever HEADs its buckets, so that Job is what makes the
+release self-contained; like the database it is a plain release resource, not a
+hook. Production validation rejects this mode too — there, point the chart at S3
+or another S3-compatible store.
 
 The pre-install/pre-upgrade migration Job uses the release image, SQLx migration
 lock, a ten-minute deadline, and one retry. Serving replicas never migrate:

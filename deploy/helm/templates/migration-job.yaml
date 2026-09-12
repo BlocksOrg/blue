@@ -7,10 +7,12 @@ metadata:
   labels:
     {{- include "blue.labels" . | nindent 4 }}
     app.kubernetes.io/component: migration
+  {{- if not .Values.database.deployStandalone }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+  {{- end }}
 spec:
   activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
   backoffLimit: {{ .Values.migrations.backoffLimit }}
@@ -26,6 +28,25 @@ spec:
       serviceAccountName: {{ include "blue.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.database.deployStandalone }}
+      # The bundled database is a release resource, so it is created in the same
+      # phase as this Job rather than before it: wait instead of failing.
+      initContainers:
+        - name: wait-for-database
+          image: {{ printf "%s:%s" .Values.database.image.repository .Values.database.image.tag | quote }}
+          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          command: ["sh", "-ec"]
+          args:
+            - until pg_isready -h {{ include "blue.fullname" . }}-database -p 5432
+              -U {{ .Values.database.auth.username | quote }}; do sleep 2; done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+      {{- end }}
       containers:
         - name: migrate
           image: {{ include "blue.image" . | quote }}
@@ -37,7 +58,7 @@ spec:
             - name: HARNESS_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.blue.existingSecret | quote }}
+                  name: {{ include "blue.databaseSecretName" . | quote }}
                   key: HARNESS_DATABASE_URL
                   optional: false
           resources:
