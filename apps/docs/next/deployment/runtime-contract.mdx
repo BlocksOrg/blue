@@ -13,7 +13,7 @@ This page defines what a production platform must provide. It does not prescribe
 Pin the Blue image by immutable digest:
 
 ```text
-ghcr.io/blocksorg/governance-harness@sha256:RELEASE_IMAGE_DIGEST
+ghcr.io/blocksorg/blue@sha256:RELEASE_IMAGE_DIGEST
 ```
 
 The image contains the Control API, dashboard, inference proxy, entrypoint, and health-check helper. Its default command is `all`; pass a component command to run one workload per container. Each GitHub Release also provides a deployment bundle containing `blue.yaml`, the Helm chart, an AWS OpenTofu starter, and optional gateway-provisioner examples.

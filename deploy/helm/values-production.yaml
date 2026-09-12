@@ -4,7 +4,7 @@ blue:
   existingSecret: blue-runtime
 
 image:
-  repository: ghcr.io/blocksorg/governance-harness
+  repository: ghcr.io/blocksorg/blue
   tag: ""
   digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
