@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/blocksorg/governance-harness
+  repository: ghcr.io/blocksorg/blue
   # Replace this placeholder with the immutable digest for the selected release.
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 

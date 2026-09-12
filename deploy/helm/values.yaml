@@ -1,7 +1,7 @@
 replicaCount: 1 # development compatibility only; production components use replicas below
 
 image:
-  repository: ghcr.io/blocksorg/governance-harness
+  repository: ghcr.io/blocksorg/blue
   pullPolicy: IfNotPresent
   tag: ""
   digest: ""
