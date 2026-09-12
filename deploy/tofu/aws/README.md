@@ -13,8 +13,10 @@ backend. Generated credentials are stored in state, so restrict state access.
 
 ## Optional components
 
-Each dependency is separately switchable, so a deployment can source it
-elsewhere:
+The database and object-store toggles let the Helm chart deploy its bundled
+evaluation components instead of this module's AWS resources (or use
+dependencies managed elsewhere). Redis can be omitted in governance-only
+deployments:
 
 | Variable | Default | Creates | Turn it off when |
 |---|---|---|---|
