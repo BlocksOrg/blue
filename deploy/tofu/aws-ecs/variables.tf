@@ -21,13 +21,13 @@ variable "bootstrap_admin_email" {
 # ---------------------------------------------------------------------------
 variable "image" {
   type        = string
-  default     = "ghcr.io/blocksorg/governance-harness:latest"
+  default     = "ghcr.io/blocksorg/blue:latest"
   description = "Blue application image (control-api, dashboard, inference-proxy, migrate)"
 }
 
 variable "website_image" {
   type        = string
-  default     = "ghcr.io/blocksorg/governance-harness-website:latest"
+  default     = "ghcr.io/blocksorg/blue-website:latest"
   description = "Separate landing-page (website) image"
 }
 

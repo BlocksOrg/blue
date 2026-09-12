@@ -38,8 +38,8 @@ separate landing-page image:
 
 - OpenTofu 1.8+ and an **encrypted remote state backend** (generated database,
   auth, and admin credentials are stored in state — restrict access).
-- Pullable images: `ghcr.io/blocksorg/governance-harness` (app) and, when
-  `enable_website = true`, `ghcr.io/blocksorg/governance-harness-website`
+- Pullable images: `ghcr.io/blocksorg/blue` (app) and, when
+  `enable_website = true`, `ghcr.io/blocksorg/blue-website`
   (landing page). Both are published by the repo's release workflow. For a
   private registry, set `image_pull_secret_arn`.
 - A Route53 hosted zone if you use a domain.

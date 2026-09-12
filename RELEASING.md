@@ -9,7 +9,7 @@ Before the first public release:
 
 - Make the repository public and enable immutable GitHub Releases.
 - Allow GitHub Actions to publish packages with the repository `GITHUB_TOKEN`.
-- Make `ghcr.io/blocksorg/governance-harness` and the Blue OCI chart package
+- Make `ghcr.io/blocksorg/blue` and the Blue OCI chart package
   publicly readable. Container packages can remain private even when their
   source repository is public.
 - Protect `main`, require CI and Documentation checks, and restrict creation of

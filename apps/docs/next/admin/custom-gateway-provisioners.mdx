@@ -252,7 +252,7 @@ USER 1000:1000
 For example, extend the Control API runtime image separately:
 
 ```dockerfile
-FROM ghcr.io/blocksorg/governance-harness@sha256:REPLACE_WITH_BLUE_IMAGE_DIGEST
+FROM ghcr.io/blocksorg/blue@sha256:REPLACE_WITH_BLUE_IMAGE_DIGEST
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
