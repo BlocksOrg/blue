@@ -1,5 +1,6 @@
 aws_region                         = "us-west-2"
-name                               = "blue-production"
+name                               = "blue"
+environment                        = "production"
 eks_cluster_name                   = "platform-production"
 vpc_id                             = "vpc-0123456789abcdef0"
 private_subnet_ids                 = ["subnet-0123456789abcdef0", "subnet-abcdef01234567890"]
@@ -7,6 +8,5 @@ database_client_security_group_ids = ["sg-0123456789abcdef0"]
 redis_client_security_group_ids    = ["sg-0123456789abcdef0"]
 kubernetes_namespace               = "blue"
 kubernetes_service_account         = "blue"
-bootstrap_admin_email               = "operator@example.com"
-package_noncurrent_retention_days   = 90
-tags = { Environment = "production", Application = "blue" }
+bootstrap_admin_email              = "operator@example.com"
+package_noncurrent_retention_days  = 90
