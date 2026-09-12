@@ -141,3 +141,37 @@ helm template blue "$chart" -f "$chart/values-evaluation.yaml" \
   --set blue.gatewayType=litellm \
   --set blue.internalTransport.mode=insecure-http \
   > /tmp/blue-gateway-evaluation.yaml
+
+# Bundled evaluation database: rejected in production, self-contained in evaluation.
+if helm template blue "$chart" "${production_network[@]}" \
+  --set blue.existingSecret=blue-runtime --set image.digest="$digest" \
+  --set database.deployStandalone=true >/dev/null 2>&1; then
+  echo "production render unexpectedly accepted database.deployStandalone" >&2
+  exit 1
+fi
+helm template blue "$chart" -f "$chart/values-evaluation.yaml" \
+  --set database.deployStandalone=true > /tmp/blue-standalone-database.yaml
+grep -q 'kind: StatefulSet' /tmp/blue-standalone-database.yaml
+grep -q 'name: "blue-blue-database"' /tmp/blue-standalone-database.yaml
+grep -q 'name: wait-for-database' /tmp/blue-standalone-database.yaml
+if grep -q 'key: HARNESS_DATABASE_URL' <(grep -A1 'name: "blue-evaluation-runtime"' /tmp/blue-standalone-database.yaml); then
+  echo "bundled database render still reads HARNESS_DATABASE_URL from blue.existingSecret" >&2
+  exit 1
+fi
+
+# Bundled evaluation object store: rejected in production, self-contained in evaluation.
+if helm template blue "$chart" "${production_network[@]}" \
+  --set blue.existingSecret=blue-runtime --set image.digest="$digest" \
+  --set minio.deployStandalone=true >/dev/null 2>&1; then
+  echo "production render unexpectedly accepted minio.deployStandalone" >&2
+  exit 1
+fi
+helm template blue "$chart" -f "$chart/values-evaluation.yaml" \
+  --set minio.deployStandalone=true > /tmp/blue-standalone-minio.yaml
+grep -q 'name: blue-blue-minio' /tmp/blue-standalone-minio.yaml
+grep -q 'app.kubernetes.io/component: minio-buckets' /tmp/blue-standalone-minio.yaml
+grep -q 'value: "http://blue-blue-minio:9000"' /tmp/blue-standalone-minio.yaml
+# The Control API HEADs its buckets and never creates them, so the seeding Job
+# must name both of them.
+grep -q 'mc mb --ignore-existing blue/raw-sessions' /tmp/blue-standalone-minio.yaml
+grep -q 'mc mb --ignore-existing blue/package-artifacts' /tmp/blue-standalone-minio.yaml

@@ -151,6 +151,66 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Evaluation only: render a single-instance PostgreSQL in this release and point
+# every workload at it instead of an external database. Production validation
+# rejects it — there, supply HARNESS_DATABASE_URL through blue.existingSecret.
+database:
+  deployStandalone: false
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  auth:
+    username: blue
+    database: blue
+    # Empty generates a password on first install and reuses it on upgrades.
+    password: ""
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 1, memory: 1Gi }
+
+# Evaluation only: render a single-instance MinIO in this release and point the
+# Control API and worker at it instead of external S3-compatible storage. The
+# Control API never creates its buckets, so a Job seeds them. Production
+# validation rejects it — there, supply the bucket configuration and credentials
+# through blue.existingSecret or blue.env.
+minio:
+  deployStandalone: false
+  image:
+    repository: quay.io/minio/minio
+    tag: RELEASE.2025-09-07T16-13-09Z
+    pullPolicy: IfNotPresent
+  mcImage:
+    repository: quay.io/minio/mc
+    tag: RELEASE.2025-08-13T08-35-41Z
+    pullPolicy: IfNotPresent
+  auth:
+    rootUser: blue
+    # Empty generates a password on first install and reuses it on upgrades.
+    rootPassword: ""
+  region: us-east-1
+  buckets:
+    session: raw-sessions
+    package: package-artifacts
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 1, memory: 2Gi }
+  bucketJob:
+    activeDeadlineSeconds: 300
+    backoffLimit: 3
+    ttlSecondsAfterFinished: 86400
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
 migrations:
   enabled: true
   activeDeadlineSeconds: 600

@@ -110,12 +110,13 @@ spec:
               value: {{ .Values.blue.publicUrls.docs | quote }}
             - name: HARNESS_DATABASE_URL
               valueFrom:
-                secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_DATABASE_URL, optional: false }
+                secretKeyRef: { name: {{ include "blue.databaseSecretName" . | quote }}, key: HARNESS_DATABASE_URL, optional: false }
             {{- if .Values.blue.enableInferenceProxy }}
             - name: HARNESS_GATEWAY_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_GATEWAY_ENCRYPTION_KEY, optional: false }
             {{- end }}
+            {{- include "blue.storageEnv" . | nindent 12 }}
             {{- range $name, $value := .Values.blue.env }}
             - name: {{ $name }}
               value: {{ $value | quote }}

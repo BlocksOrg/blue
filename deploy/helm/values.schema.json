@@ -113,6 +113,103 @@
         }
       }]
     },
+    "database": {
+      "type": "object",
+      "required": ["deployStandalone"],
+      "properties": {
+        "deployStandalone": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "required": ["username", "database"],
+          "properties": {
+            "username": { "type": "string", "minLength": 1 },
+            "database": { "type": "string", "minLength": 1 },
+            "password": { "type": "string" }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "minLength": 1 },
+            "storageClass": { "type": "string" }
+          }
+        },
+        "resources": { "type": "object" }
+      }
+    },
+    "minio": {
+      "type": "object",
+      "required": ["deployStandalone"],
+      "properties": {
+        "deployStandalone": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "mcImage": {
+          "type": "object",
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "tag": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "required": ["rootUser"],
+          "properties": {
+            "rootUser": { "type": "string", "minLength": 3 },
+            "rootPassword": { "type": "string" }
+          }
+        },
+        "region": { "type": "string", "minLength": 1 },
+        "buckets": {
+          "type": "object",
+          "required": ["session", "package"],
+          "properties": {
+            "session": { "type": "string", "minLength": 3 },
+            "package": { "type": "string", "minLength": 3 }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "minLength": 1 },
+            "storageClass": { "type": "string" }
+          }
+        },
+        "resources": { "type": "object" },
+        "bucketJob": {
+          "type": "object",
+          "required": ["activeDeadlineSeconds", "backoffLimit", "ttlSecondsAfterFinished"],
+          "properties": {
+            "activeDeadlineSeconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
+            "backoffLimit": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "ttlSecondsAfterFinished": { "type": "integer", "minimum": 0 },
+            "resources": { "type": "object" }
+          }
+        }
+      }
+    },
     "migrations": {
       "type": "object",
       "required": ["enabled", "activeDeadlineSeconds", "backoffLimit", "ttlSecondsAfterFinished"],
@@ -146,6 +243,12 @@
         "image": {
           "properties": { "digest": { "pattern": "^sha256:[a-f0-9]{64}$" } },
           "required": ["digest"]
+        },
+        "database": {
+          "properties": { "deployStandalone": { "const": false } }
+        },
+        "minio": {
+          "properties": { "deployStandalone": { "const": false } }
         },
         "migrations": {
           "properties": { "enabled": { "const": true } }
