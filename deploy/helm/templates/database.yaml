@@ -1,0 +1,103 @@
+{{- include "blue.validate" . -}}
+{{- if .Values.database.deployStandalone }}
+{{- $name := printf "%s-database" (include "blue.fullname" .) }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+{{- $password := .Values.database.auth.password }}
+{{- if not $password }}
+{{- $password = (get ($existing.data | default dict) "POSTGRES_PASSWORD" | b64dec) | default (randAlphaNum 32) }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: {{ $password | quote }}
+  HARNESS_DATABASE_URL: {{ printf "postgres://%s:%s@%s:5432/%s" .Values.database.auth.username $password $name .Values.database.auth.database | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "blue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+  ports: [{ name: postgres, port: 5432, targetPort: postgres }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      {{- include "blue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: database
+        blue.blocks.org/migration-access: "true"
+    spec:
+      securityContext:
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: {{ printf "%s:%s" .Values.database.image.repository .Values.database.image.tag | quote }}
+          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+          env:
+            - { name: POSTGRES_USER, value: {{ .Values.database.auth.username | quote }} }
+            - { name: POSTGRES_DB, value: {{ .Values.database.auth.database | quote }} }
+            # initdb refuses a non-empty directory, so keep PGDATA below the mount.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $name }}, key: POSTGRES_PASSWORD, optional: false }
+          ports: [{ name: postgres, containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", {{ .Values.database.auth.username | quote }}, "-d", {{ .Values.database.auth.database | quote }}] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.database.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      {{- if not .Values.database.persistence.enabled }}
+      volumes:
+        - { name: data, emptyDir: {} }
+      {{- end }}
+  {{- if .Values.database.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.database.persistence.size | quote }}
+        {{- with .Values.database.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,162 @@
+{{- include "blue.validate" . -}}
+{{- if .Values.minio.deployStandalone }}
+{{- $name := printf "%s-minio" (include "blue.fullname" .) }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+{{- $secretKey := .Values.minio.auth.rootPassword }}
+{{- if not $secretKey }}
+{{- $secretKey = (get ($existing.data | default dict) "MINIO_ROOT_PASSWORD" | b64dec) | default (randAlphaNum 40) }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: {{ .Values.minio.auth.rootUser | quote }}
+  MINIO_ROOT_PASSWORD: {{ $secretKey | quote }}
+  # The Control API reaches MinIO through the AWS SDK's default credential
+  # chain, so the root credentials are published under their AWS names too.
+  AWS_ACCESS_KEY_ID: {{ .Values.minio.auth.rootUser | quote }}
+  AWS_SECRET_ACCESS_KEY: {{ $secretKey | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "blue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+  ports:
+    - { name: api, port: 9000, targetPort: api }
+    - { name: console, port: 9001, targetPort: console }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  replicas: 1
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      {{- include "blue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      securityContext:
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: {{ printf "%s:%s" .Values.minio.image.repository .Values.minio.image.tag | quote }}
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          args: ["server", "/data", "--console-address", ":9001"]
+          envFrom: [{ secretRef: { name: {{ $name }} } }]
+          ports:
+            - { name: api, containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: api }
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: api }
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      {{- if not .Values.minio.persistence.enabled }}
+      volumes:
+        - { name: data, emptyDir: {} }
+      {{- end }}
+  {{- if .Values.minio.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size | quote }}
+        {{- with .Values.minio.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}
+---
+# The Control API only ever HEADs its buckets — nothing in the release creates
+# them — so an evaluation cluster needs this Job. Like the bundled database it
+# is a release resource rather than a hook, because MinIO itself is created in
+# the same phase: the Job waits for the service instead of failing ahead of it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-buckets-{{ .Release.Revision }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-buckets
+spec:
+  activeDeadlineSeconds: {{ .Values.minio.bucketJob.activeDeadlineSeconds }}
+  backoffLimit: {{ .Values.minio.bucketJob.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.minio.bucketJob.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "blue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio-buckets
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: buckets
+          image: {{ printf "%s:%s" .Values.minio.mcImage.repository .Values.minio.mcImage.tag | quote }}
+          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          envFrom: [{ secretRef: { name: {{ $name }} } }]
+          env:
+            # mc writes its alias config on every invocation; the root
+            # filesystem is read-only, so keep it on the scratch volume.
+            - { name: MC_CONFIG_DIR, value: /tmp/mc }
+          command: ["/bin/sh", "-ec"]
+          args:
+            - >-
+              until mc alias set blue http://{{ $name }}:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do sleep 2; done;
+              mc mb --ignore-existing blue/{{ .Values.minio.buckets.session }};
+              mc mb --ignore-existing blue/{{ .Values.minio.buckets.package }}
+          resources:
+            {{- toYaml .Values.minio.bucketJob.resources | nindent 12 }}
+          volumeMounts:
+            - { name: scratch, mountPath: /tmp }
+      volumes:
+        - { name: scratch, emptyDir: {} }
+{{- end }}

@@ -40,7 +40,10 @@ spec:
             # HARNESS_PROXY_OAUTH_CLIENT_SECRET is supplied via `blue.existingSecret`.
             - { name: HARNESS_INFERENCE_PROXY_CLIENT_ID, value: {{ .Values.blue.inferenceProxyClientId | quote }} }
             - { name: DOCS_URL, value: {{ .Values.blue.publicUrls.docs | quote }} }
-            {{- range $name := list "HARNESS_DATABASE_URL" "BETTER_AUTH_SECRET" "HARNESS_BOOTSTRAP_ADMIN_PASSWORD" }}
+            - name: HARNESS_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: {{ include "blue.databaseSecretName" . | quote }}, key: HARNESS_DATABASE_URL, optional: false }
+            {{- range $name := list "BETTER_AUTH_SECRET" "HARNESS_BOOTSTRAP_ADMIN_PASSWORD" }}
             - name: {{ $name }}
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.blue.existingSecret | quote }}, key: {{ $name }}, optional: false }
