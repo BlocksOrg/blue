@@ -3342,11 +3342,12 @@ async fn insert_governance_revision(
     let document = serde_json::to_value(&config)
         .map_err(|error| ApiError::internal(format!("serializing config: {error}")))?;
     let mut transaction = pool.begin().await?;
-    let _organization_lock =
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM organizations WHERE id=$1 FOR UPDATE")
-            .bind(org_id)
-            .fetch_one(&mut *transaction)
-            .await?;
+    let _organization_lock = sqlx::query_scalar!(
+        "SELECT id FROM organizations WHERE id=$1 FOR UPDATE",
+        org_id
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
     let previous_revision: Option<String> = sqlx::query_scalar!("SELECT revision FROM governance_config_revisions WHERE organization_id=$1 ORDER BY id DESC LIMIT 1",
         org_id)
     .fetch_optional(&mut *transaction)
