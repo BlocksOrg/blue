@@ -1,5 +1,5 @@
 aws_region                         = "us-west-2"
-name                               = "blue"
+name                               = "blue-eks"
 environment                        = "production"
 
 # Each dependency is optional; the defaults below create all three. Turn one off
@@ -13,11 +13,25 @@ environment                        = "production"
 # include_bucket                     = true
 # include_redis                      = true
 
-eks_cluster_name                   = "platform-production"
-vpc_id                             = "vpc-0123456789abcdef0"
-private_subnet_ids                 = ["subnet-0123456789abcdef0", "subnet-abcdef01234567890"]
-database_client_security_group_ids = ["sg-0123456789abcdef0"]
-redis_client_security_group_ids    = ["sg-0123456789abcdef0"]
+# Cluster and network are create-or-reuse. Left unset, this module creates the
+# EKS cluster (Auto Mode), the VPC, and its subnets, and wires the cluster
+# security group into the datastores itself — nothing below is needed.
+#
+# Uncomment this block to attach to a platform cluster and VPC someone else
+# operates. The cluster must already have an IAM OIDC provider, the subnets must
+# span at least two AZs, and the security groups are the ones your pods run in.
+# eks_cluster_name                   = "platform-production"
+# vpc_id                             = "vpc-0123456789abcdef0"
+# private_subnet_ids                 = ["subnet-0123456789abcdef0", "subnet-abcdef01234567890"]
+# public_subnet_ids                  = ["subnet-0fedcba9876543210", "subnet-1fedcba9876543210"]
+# database_client_security_group_ids = ["sg-0123456789abcdef0"]
+# redis_client_security_group_ids    = ["sg-0123456789abcdef0"]
+
+# Narrow the public Kubernetes API endpoint to operator and CI egress, or close
+# it entirely where the VPC is reachable directly.
+# cluster_endpoint_public_access_cidrs = ["203.0.113.0/24"]
+# cluster_endpoint_public_access       = false
+
 kubernetes_namespace               = "blue"
 kubernetes_service_account         = "blue"
 bootstrap_admin_email              = "operator@example.com"

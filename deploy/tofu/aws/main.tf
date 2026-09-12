@@ -1,6 +1,13 @@
-data "aws_eks_cluster" "this" { name = var.eks_cluster_name }
+# Read only when attaching to a cluster this module did not create; see eks.tf.
+data "aws_eks_cluster" "this" {
+  count = local.create_cluster ? 0 : 1
+  name  = var.eks_cluster_name
+}
 
-data "aws_iam_openid_connect_provider" "eks" { url = local.oidc_issuer }
+data "aws_iam_openid_connect_provider" "eks" {
+  count = local.create_cluster ? 0 : 1
+  url   = local.oidc_issuer
+}
 
 resource "aws_kms_key" "blue" {
   description             = "Blue deployment data"
@@ -92,22 +99,34 @@ resource "aws_s3_bucket_lifecycle_configuration" "packages" {
 resource "aws_db_subnet_group" "blue" {
   count      = var.include_database ? 1 : 0
   name       = local.name_prefix
-  subnet_ids = var.private_subnet_ids
+  subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "database" {
   count       = var.include_database ? 1 : 0
   name_prefix = "${local.name_prefix}-database-"
   description = "PostgreSQL access from Blue workloads"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.vpc_id
 }
 resource "aws_vpc_security_group_ingress_rule" "database" {
-  for_each                     = var.include_database ? var.database_client_security_group_ids : []
+  for_each                     = local.database_client_sgs
   security_group_id            = aws_security_group.database[0].id
   referenced_security_group_id = each.value
   from_port                    = 5432
   to_port                      = 5432
   ip_protocol                  = "tcp"
   description                  = "PostgreSQL from an approved Blue workload security group"
+}
+
+# Pods live in the cluster security group, so a created cluster grants itself
+# access. A count keeps the unknown-at-plan-time id out of a for_each.
+resource "aws_vpc_security_group_ingress_rule" "database_cluster" {
+  count                        = local.create_cluster && var.include_database ? 1 : 0
+  security_group_id            = aws_security_group.database[0].id
+  referenced_security_group_id = aws_eks_cluster.blue[0].vpc_config[0].cluster_security_group_id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+  description                  = "PostgreSQL from the Blue EKS cluster security group"
 }
 
 # ---------------------------------------------------------------------------
@@ -118,22 +137,32 @@ resource "aws_vpc_security_group_ingress_rule" "database" {
 resource "aws_elasticache_subnet_group" "blue" {
   count      = var.include_redis ? 1 : 0
   name       = local.name_prefix
-  subnet_ids = var.private_subnet_ids
+  subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "redis" {
   count       = var.include_redis ? 1 : 0
   name_prefix = "${local.name_prefix}-redis-"
   description = "Redis access from Blue workloads"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.vpc_id
 }
 resource "aws_vpc_security_group_ingress_rule" "redis" {
-  for_each                     = var.include_redis ? var.redis_client_security_group_ids : []
+  for_each                     = local.redis_client_sgs
   security_group_id            = aws_security_group.redis[0].id
   referenced_security_group_id = each.value
   from_port                    = 6379
   to_port                      = 6379
   ip_protocol                  = "tcp"
   description                  = "Redis TLS from an approved Blue workload security group"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "redis_cluster" {
+  count                        = local.create_cluster && var.include_redis ? 1 : 0
+  security_group_id            = aws_security_group.redis[0].id
+  referenced_security_group_id = aws_eks_cluster.blue[0].vpc_config[0].cluster_security_group_id
+  from_port                    = 6379
+  to_port                      = 6379
+  ip_protocol                  = "tcp"
+  description                  = "Redis TLS from the Blue EKS cluster security group"
 }
 
 resource "random_password" "database" {
@@ -240,7 +269,7 @@ data "aws_iam_policy_document" "assume" {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
       type        = "Federated"
-      identifiers = [data.aws_iam_openid_connect_provider.eks.arn]
+      identifiers = [local.oidc_provider_arn]
     }
     condition {
       test     = "StringEquals"
