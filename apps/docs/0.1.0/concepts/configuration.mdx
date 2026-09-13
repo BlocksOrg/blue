@@ -1,0 +1,57 @@
+---
+title: "Configuration lifecycle"
+description: "Understand policy revisions, caching, personalization, additive merges, and launch-scoped overlays."
+icon: "sliders"
+---
+
+Configuration moves through four stages: an administrator saves an organization policy, the Control API versions it, the authenticated client receives a personalized response, and the CLI reconciles harness-specific overlays.
+
+## Policy and runtime values
+
+The dashboard owns managed harness settings, MCP entries, and extension packages. The mounted `blue.yaml` owns allowed harnesses, session-upload policy, the gateway section, and the optional curated package catalog. The Control API binds inference access to the source OAuth session while keeping the provisioned gateway credential server-side.
+
+```yaml
+control_api:
+  gateway_request_logs:
+    retention_days: 30
+
+gateway:
+  type: litellm
+  url: env://HARNESS_GATEWAY_URL
+  inference_proxy_url: env://HARNESS_INFERENCE_PROXY_URL
+  internal_allowed_client_id: blue-inference-proxy
+  secret_encryption:
+    provider: aws-kms
+    key_id: arn:aws:kms:us-west-2:123456789012:key/example
+  provisioner:
+    type: company-litellm
+    executable_path: /var/run/blue/provisioner/provisioner
+    executable_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    policy_revision: company-litellm-v1
+
+governance:
+  harnesses:
+    codex:
+      managed_config:
+        model: gpt-5.6-sol
+        reasoning_effort: medium
+        fast_mode: false
+```
+
+The Control API projects `gateway.type` into policy and adds `gateway.proxy_url` and the runtime-only `gateway.token` only to the delivered client response. Server credentials never enter the governance document. The token is a session-bound inference JWT and is never persisted by the Control API. The gateway has no model field; each agent uses its managed model when present or leaves model selection to the agent. `gateway.provisioner.type` selects the built-in LiteLLM implementation or the pinned executable. Gateway-specific key models, teams, budgets, resets, and API behavior belong in that implementation, not in `blue.yaml`.
+
+## Revisions and caching
+
+Every successful dashboard save creates a new immutable revision. Clients cache the most recently fetched response and honor `ttl_seconds`. A running governed wrapper watches the optional server-sent revision stream and displays a desktop notification when a restart is needed; older or BYO services fall back to a 60-second check. The active agent is never interrupted or rewritten. Login only stores authentication. Run `blue apply` or `blue daemon` to keep the default agent current; another agent is reconciled when explicitly launched through Blue.
+
+## Merge behavior
+
+- Existing native user configuration remains authoritative outside governed launches.
+- Remote MCP entries are additive. A local MCP with the same name wins and is never overwritten or removed.
+- Existing configuration changes prompt for review unless `--yes` or the explicit noninteractive policy allows them.
+- Identical reconciliations do not prompt again.
+- Writes are atomic, and changed files receive recoverable backups.
+- Package archives are SHA-256 verified and activate independently. An affected governed launch fails closed when one of its required packages cannot activate.
+- Removed managed packages are unregistered; modified owned content is quarantined instead of deleted.
+
+Version-aware reconciliation resolves the installed native CLI to a maintained renderer before any files are changed. See [Harness version compatibility](/0.1.0/concepts/harness-version-compatibility) for pinning, breaking boundaries, and package variants, or [Governance configuration](/0.1.0/reference/governance-config) for the complete shape.

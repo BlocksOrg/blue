@@ -1,0 +1,142 @@
+---
+title: "Deployment contract"
+description: "Run Blue on Kubernetes, a container scheduler, or virtual machines by implementing its platform-neutral workload contract."
+icon: "list-check"
+---
+
+Blue does not require Kubernetes. The release image exposes independent process commands that can run on ECS, Nomad, Docker Swarm, virtual machines, or another platform chosen by your operations team. The Helm chart is the maintained Kubernetes implementation of this contract.
+
+This page defines what a production platform must provide. It does not prescribe scheduling, service discovery, secret-management, ingress, or infrastructure tooling.
+
+## Release artifacts
+
+Pin the Blue image by immutable digest:
+
+```text
+ghcr.io/blocksorg/blue@sha256:RELEASE_IMAGE_DIGEST
+```
+
+The image contains the Control API, dashboard, inference proxy, entrypoint, and health-check helper. Its default command is `all`; pass a component command to run one workload per container. Each GitHub Release also provides a deployment bundle containing `blue.yaml`, the Helm chart, an AWS OpenTofu starter, and optional gateway-provisioner examples.
+
+## Workload topology
+
+| Workload | Image command | Container ports | Replicas | Required mode |
+| --- | --- | --- | --- | --- |
+| Dashboard | `dashboard` | `3000` | One or more | All deployments |
+| Control API | `control-api` | `8080`; private `8082` for gateway mode | One or more | All deployments |
+| Worker | `control-api` | `8080` for private health checks | Exactly one | All deployments |
+| Inference proxy | `inference-proxy` | `8081` | One or more | Gateway mode only |
+
+Run the Control API replicas with `HARNESS_RUN_BACKGROUND_JOBS=false`. Run the singleton worker with `HARNESS_RUN_BACKGROUND_JOBS=true`, do not route public API traffic to it, and give it the same configuration, database, storage access, and secrets as the Control API.
+
+The Control API, dashboard, and inference proxy are independently scalable. Keep the worker singleton so cleanup, reconciliation, and other background loops do not run concurrently.
+
+### All-in-one process
+
+Leaving the image command empty, or setting it to `all`, runs the Control API and dashboard in one container and optionally starts the inference proxy when `BLUE_ENABLE_INFERENCE_PROXY=true`.
+
+Use all-in-one mode for local evaluation. A production platform should normally run separate workloads so it can isolate failures, scale components independently, and maintain a singleton worker lifecycle.
+
+## External dependencies
+
+Every deployment requires:
+
+- PostgreSQL for authentication, governance revisions, users, clients, gateway selections, and session metadata
+- A non-expiring S3-compatible bucket for immutable package artifacts
+- A separate S3-compatible bucket for session objects, with lifecycle retention that matches your policy
+- Workload identity or storage credentials with least-privilege access to those buckets
+- DNS and TLS for every public endpoint
+
+Gateway mode also requires an organization-operated LiteLLM service. Blue does not deploy or hard-depend on LiteLLM, Redis, or another gateway in governance-only mode.
+
+## Configuration and secrets
+
+Mount the same `blue.yaml` read-only into the Control API and worker. The release image defaults `BLUE_CONFIG_FILE` to:
+
+```text
+/etc/blue/blue.yaml
+```
+
+The file contains server runtime settings, the governance baseline, the optional gateway definition, and the optional package catalog. Values may be literals or environment references. Direct environment variables take precedence.
+
+`BLUE_CONFIG_OVERLAY_FILES` may contain a comma-separated list of additional
+YAML files. The Control API applies them in order: mappings merge recursively,
+while scalar and sequence values replace the base value. Use small overlays for
+optional deployment features; keep shared configuration in the canonical file.
+
+Keep credentials in your platform's secret store and inject them at runtime. A password-mode governance-only deployment needs at least:
+
+| Setting | Consumers | Purpose |
+| --- | --- | --- |
+| `HARNESS_DATABASE_URL` | Dashboard, Control API, worker | Shared PostgreSQL connection |
+| `BETTER_AUTH_SECRET` | Dashboard | Persistent authentication encryption and signing secret |
+| `HARNESS_BOOTSTRAP_ADMIN_EMAIL` | Dashboard, Control API, worker | Protected initial administrator identity |
+| `HARNESS_BOOTSTRAP_ADMIN_PASSWORD` | Dashboard | Initial administrator password |
+| Session and package bucket settings | Control API, worker | Object storage locations and access behavior |
+| Storage identity or credentials | Control API, worker | Access to both object-storage buckets |
+
+Keep `BETTER_AUTH_SECRET` stable after the initial deployment. Follow [Configure blue.yaml](/0.1.0/deployment/blue-yaml) for the full environment mapping, authentication contract, storage endpoints, managed repositories, and gateway secrets.
+
+An absent `BLUE_ENVIRONMENT` is production. Only local development may set it
+to `development`, which permits the documented sample authentication values.
+Gateway deployments also set `BLUE_GATEWAY_ENABLED=true` on the dashboard so it
+requires the inference proxy's OAuth client secret before opening a listener.
+Helm owns both flags; do not inject either through `blue.env`.
+
+## Service networking
+
+Publish only the endpoints required by users and clients:
+
+| Route | Exposure | Consumer |
+| --- | --- | --- |
+| Dashboard port `3000` | Public HTTPS | Administrators and browser authentication |
+| Control API port `8080` | Public HTTPS | Dashboard server and workstation clients |
+| Control API port `8082` | Private; gateway mode only | Inference proxy resolver and event traffic |
+| Inference proxy port `8081` | Public HTTPS; gateway mode only | Governed native agents |
+| Worker port `8080` | Private health checks only | Deployment platform |
+
+Configure the dashboard with an internal Control API URL and the public Control API origin. Configure the Control API's authentication session and JWKS URLs to reach the dashboard over the private network. The public issuer and audience must exactly match the externally reachable dashboard and Control API origins.
+
+Do not expose port `8082` through a public load balancer. In gateway mode, restrict it to inference-proxy workloads and use the documented mTLS and OAuth client-credentials controls.
+
+The Control API's `/governance-config/events` route is a server-sent event stream with a 15-second heartbeat. Disable response buffering for that route and set the upstream idle timeout above the heartbeat interval. Clients fall back to polling when the stream is unavailable.
+
+## Health checks
+
+| Workload | Liveness | Readiness |
+| --- | --- | --- |
+| Dashboard | `GET /api/health` on `3000` | `GET /api/health` on `3000` |
+| Control API | `GET /health` on `8080` | `GET /ready` on `8080` |
+| Worker | `GET /health` on `8080` | `GET /health` on `8080` |
+| Inference proxy | `GET /health` on `8081` | `GET /ready` on `8081` |
+
+The Control API readiness endpoint verifies database connectivity. A successful liveness response alone does not prove that PostgreSQL or object storage is usable; after deployment, sign in and use the dashboard or CLI dependency-health view as an end-to-end check.
+
+## Rollout responsibilities
+
+Your deployment implementation should:
+
+1. Provision PostgreSQL, both buckets, workload identity, secrets, DNS, and certificates.
+2. Deploy the pinned image and mounted configuration with the workload topology above.
+3. Wait for readiness before directing traffic to new replicas.
+4. Preserve the singleton worker invariant during deploys and restarts.
+5. Drain inference-proxy connections during gateway-mode rollouts.
+6. Back up PostgreSQL and both storage domains before upgrades.
+7. Monitor authentication failures, dependency health, worker failures, stale clients, and gateway failures when enabled.
+
+Use [Kubernetes with Helm](/0.1.0/deployment/production) for a concrete implementation, or translate this contract into your platform's service, task, job, and load-balancer resources.
+
+## Optional inference proxy
+
+Gateway mode adds the `inference-proxy` workload and private Control API port `8082`. It also requires:
+
+- A top-level `gateway` section in `blue.yaml`
+- Matching gateway type settings in the Control API and inference proxy
+- An upstream LiteLLM URL and user identities whose emails match Blue users
+- Credential encryption using AWS KMS or another supported provider
+- A built-in provisioner or digest-pinned deployment-trusted executable
+- OAuth client-credentials between the proxy and dashboard token endpoint
+- mTLS certificates between the inference proxy and private Control API listener
+- Streaming-aware public ingress and connection draining
+
+See [Bring your own gateway](/0.1.0/concepts/gateway-mode), [Gateway access](/0.1.0/admin/gateway-access), and [Custom gateway provisioners](/0.1.0/admin/custom-gateway-provisioners) for the complete contract.

@@ -1,0 +1,122 @@
+---
+title: "Local development with Docker Compose"
+description: "Run Blue's reference services locally for development and end-to-end evaluation."
+icon: "docker"
+---
+
+This workflow is for repository maintainers and contributors. Follow the [Quickstart workstation steps](/0.1.0/quickstart#install-the-workstation-cli) if your organization already operates Blue. Operators designing a deployment should start with the platform-neutral [Deployment contract](/0.1.0/deployment/runtime-contract); the Compose defaults are not a production baseline.
+
+## Prerequisites
+
+- A checkout of the Blue source repository
+- Docker with Compose v2
+
+## Core stack
+
+```bash
+cd deploy
+docker compose up -d --build
+docker compose ps
+```
+
+Run Compose from `deploy/` so it loads `deploy/.env`. Running `docker compose
+-f deploy/docker-compose.yml` from the repository root reads a root `.env`
+instead and can silently select the password-mode defaults.
+
+| Service | Local address | Purpose |
+| --- | --- | --- |
+| Dashboard | `http://127.0.0.1:3000` | Login and administration UI |
+| Control API | `http://127.0.0.1:8080` | Policy, gateway, client, and session API |
+| PostgreSQL | `127.0.0.1:5433` | Authentication and control-plane state |
+| MinIO API | `http://127.0.0.1:9000` | Raw-session object storage |
+| MinIO console | `http://127.0.0.1:9001` | Local storage administration |
+
+Create `deploy/.env` before testing authentication or sharing a development environment:
+
+```dotenv
+HARNESS_BOOTSTRAP_ADMIN_EMAIL=operator@example.com
+HARNESS_BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-long-random-password
+BETTER_AUTH_SECRET=replace-with-at-least-32-random-bytes
+MINIO_ROOT_USER=replace-local-storage-user
+MINIO_ROOT_PASSWORD=replace-local-storage-password
+# Version label displayed beside the dashboard logo; release builds inject this into the image.
+BLUE_DEPLOYMENT_VERSION=0.1.0
+# Optional: override the dashboard sidebar documentation destination.
+HARNESS_DOCS_URL=https://docs.bluee.sh
+```
+
+The dashboard's **Documentation** sidebar link opens the centrally hosted documentation by default.
+
+The version beside the dashboard logo identifies the self-hosted deployment image. It is intentionally independent from the centrally distributed `blue` metaharness version shown by `blue version`.
+
+Compose mounts `deploy/blue.yaml` by default. It is governance-only: gateway routing and session capture are both disabled. Its `package_catalog` section includes a Ponytail recipe pinned to an immutable upstream commit and RTK's official platform-specific release archives; clients verify every archive's SHA-256 before activation.
+
+## Gateway profile
+
+The gateway overlay is explicit and selects both the server gateway block and the inference-proxy profile. Blue does not include the upstream gateway in this stack. The Control API recursively merges mappings from `BLUE_CONFIG_OVERLAY_FILES`; overlay scalars and sequences replace their base values.
+
+To enable gateway mode, start your LiteLLM gateway first. LiteLLM is the first and currently supported gateway integration. Its HTTP API must be available on host port `4001`, and its master key must be present as `LITELLM_MASTER_KEY` in the environment file. Then start Blue with the inference-proxy profile:
+
+```bash
+COMPOSE_PROFILES=gateway \
+BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.gateway.yaml \
+docker compose \
+  --env-file /path/to/ai-gateway/.env \
+  up -d --build
+```
+
+The inference proxy listens on `http://127.0.0.1:8081` and forwards to the gateway expected on host port `4001`.
+
+The Compose defaults set the other required runtime values:
+
+```dotenv
+HARNESS_GATEWAY_TYPE=litellm
+HARNESS_GATEWAY_URL=http://host.docker.internal:4001
+LITELLM_MASTER_KEY=replace-with-the-running-gateway-master-key
+HARNESS_PROXY_OAUTH_CLIENT_SECRET=replace-with-a-long-random-internal-secret
+HARNESS_GATEWAY_ENCRYPTION_KEY=replace-with-a-base64-encoded-32-byte-key
+HARNESS_GATEWAY_REQUEST_LOG_RETENTION_DAYS=30
+```
+
+The inference proxy requires `HARNESS_GATEWAY_TYPE`; Compose defaults it to
+`litellm`. When testing another compiled adapter, set this variable to the same
+value as top-level `gateway.type` in the `blue.gateway.yaml` overlay.
+`HARNESS_LITELLM_BASE_URL` remains a binary-level compatibility alias for one
+release, but the shipped Compose configuration uses `HARNESS_GATEWAY_URL`.
+
+The inference proxy authenticates to the Control API with a short-lived OAuth2 client-credentials token from better-auth. The same `HARNESS_PROXY_OAUTH_CLIENT_SECRET` is passed to the dashboard (to seed the `blue-inference-proxy` confidential client) and to the inference proxy (to obtain tokens). Compose also points `HARNESS_GATEWAY_LOG_URL` at the internal request-log ingestion endpoint. The example uses the pinned `/etc/blue/local-gateway-provisioner.mjs` local executable rather than the built-in provisioner. Editing that file changes its digest and prevents startup until `executable_sha256` in `deploy/blue.gateway.yaml` is updated. Create a LiteLLM user with the same email as the dashboard/CLI identity, then open **Gateway** or run `blue gateway` to provision the user's managed key.
+
+## Session-capture variants
+
+Session capture remains independent from gateway routing. Select the capture-only configuration with:
+
+```bash
+BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.capture.yaml \
+  docker compose up -d --build
+```
+
+To enable both features, select both overlays together with the gateway profile:
+
+```bash
+COMPOSE_PROFILES=gateway \
+BLUE_CONFIG_OVERLAY_FILES=/etc/blue/blue.gateway.yaml,/etc/blue/blue.capture.yaml \
+docker compose \
+  --env-file /path/to/ai-gateway/.env \
+  up -d --build
+```
+
+The local Compose stack explicitly uses
+`HARNESS_INTERNAL_TRANSPORT_MODE=insecure-http` between the proxy and Control
+API to avoid local certificate setup. M2M authentication is still required, but
+resolved virtual keys are plaintext on the Docker network. This is a development
+convenience, not the production default. Use Helm's `mtls` mode outside a trusted
+local environment, or deliberately accept and document the trusted-network risk.
+
+## Stop the stack
+
+```bash
+cd deploy
+docker compose down
+```
+
+Named volumes retain PostgreSQL and MinIO data. Adding `--volumes` deletes local state and should be used only when a full reset is intended.

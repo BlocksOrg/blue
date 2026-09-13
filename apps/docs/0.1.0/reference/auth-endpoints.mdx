@@ -1,0 +1,35 @@
+---
+title: "Authentication endpoints"
+description: "Reference the dashboard-origin endpoints used by browser sessions and OAuth device authorization."
+icon: "fingerprint"
+---
+
+Better Auth is mounted below `/api/auth` on the dashboard origin. These routes are distinct from the Control API endpoints in the generated API reference.
+
+## CLI device flow
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /api/auth/device/code` | Issue a device code, user code, verification URL, polling interval, and expiry. |
+| `GET /device/{browser-token}` | Display the short-lived, read-only browser approval screen. |
+| `GET, POST /api/device/{browser-token}` | Claim and approve or deny the linked request without accepting an editable user code from the browser. |
+| `GET /api/auth/device?user_code=…` | Resolve a pending user code for approval. |
+| `POST /api/auth/device/approve` | Approve the device grant using the authenticated browser session. |
+| `POST /api/auth/device/deny` | Deny the device grant using the authenticated browser session. |
+| `POST /api/auth/oauth2/token` | Exchange a device code or refresh token for audience-bound tokens. |
+| `POST /api/auth/oauth2/revoke` | Revoke the refresh-token family during logout. |
+
+The public native client ID is `blue-cli`. It uses no client secret and requests the Control API URL as its OAuth resource. The device-code response retains the standard `verification_uri_complete` field, but the bundled dashboard rewrites it to an opaque temporary link instead of placing the user code in the query string.
+
+## Dashboard sessions
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /api/auth/sign-in/email` | Create a dashboard browser session. |
+| `POST /api/auth/sign-out` | End the current browser session. |
+| `GET /api/auth/get-session` | Resolve the HTTP-only dashboard session for server-side API authorization. |
+| `GET /api/auth/jwks` | Publish keys used by the Control API to validate CLI access tokens. |
+
+<Warning>
+  Better Auth owns the detailed request and response contract. Treat these paths as integration endpoints for the bundled dashboard and CLI, not as a general-purpose identity API.
+</Warning>

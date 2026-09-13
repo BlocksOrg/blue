@@ -50,22 +50,159 @@
       "display": "simple"
     },
     "examples": {
-      "languages": ["curl", "javascript", "python"],
+      "languages": [
+        "curl",
+        "javascript",
+        "python"
+      ],
       "defaults": "required"
     }
   },
   "navigation": {
     "versions": [
       {
+        "version": "0.1.0",
+        "groups": [
+          {
+            "group": "Start here",
+            "pages": [
+              "0.1.0/introduction",
+              "0.1.0/quickstart"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "0.1.0/deployment/runtime-contract",
+              "0.1.0/deployment/production",
+              "0.1.0/deployment/blue-yaml",
+              "0.1.0/deployment/managed-repositories"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "0.1.0/concepts/architecture",
+              "0.1.0/concepts/configuration",
+              "0.1.0/concepts/harness-version-compatibility",
+              "0.1.0/concepts/gateway-mode",
+              "0.1.0/concepts/authentication"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "0.1.0/cli/commands",
+              "0.1.0/cli/harnesses",
+              "0.1.0/cli/windows-paths",
+              "0.1.0/cli/troubleshooting"
+            ]
+          },
+          {
+            "group": "Administration",
+            "pages": [
+              "0.1.0/admin/dashboard",
+              "0.1.0/admin/user-management",
+              "0.1.0/admin/identity-provisioning",
+              "0.1.0/admin/managed-packages",
+              "0.1.0/admin/configuration",
+              "0.1.0/admin/gateway-access",
+              "0.1.0/admin/custom-gateway-provisioners",
+              "0.1.0/admin/session-capture"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "0.1.0/development/local-compose",
+              "0.1.0/development/contributing",
+              "0.1.0/development/harness-adapter-architecture",
+              "0.1.0/development/gateway-adapter-architecture"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "0.1.0/reference/governance-config",
+              "0.1.0/reference/auth-endpoints"
+            ]
+          },
+          {
+            "group": "API reference",
+            "openapi": {
+              "source": "/openapi/0.1.0.yaml",
+              "directory": "0.1.0/api-reference"
+            }
+          }
+        ]
+      },
+      {
         "version": "Next",
         "groups": [
-          { "group": "Start here", "pages": ["next/introduction", "next/quickstart"] },
-          { "group": "Deployment", "pages": ["next/deployment/runtime-contract", "next/deployment/production", "next/deployment/blue-yaml", "next/deployment/managed-repositories"] },
-          { "group": "Concepts", "pages": ["next/concepts/architecture", "next/concepts/configuration", "next/concepts/harness-version-compatibility", "next/concepts/gateway-mode", "next/concepts/authentication"] },
-          { "group": "CLI", "pages": ["next/cli/commands", "next/cli/harnesses", "next/cli/windows-paths", "next/cli/troubleshooting"] },
-          { "group": "Administration", "pages": ["next/admin/dashboard", "next/admin/user-management", "next/admin/identity-provisioning", "next/admin/managed-packages", "next/admin/configuration", "next/admin/gateway-access", "next/admin/custom-gateway-provisioners", "next/admin/session-capture"] },
-          { "group": "Development", "pages": ["next/development/local-compose", "next/development/contributing", "next/development/harness-adapter-architecture", "next/development/gateway-adapter-architecture"] },
-          { "group": "Reference", "pages": ["next/reference/governance-config", "next/reference/auth-endpoints"] },
+          {
+            "group": "Start here",
+            "pages": [
+              "next/introduction",
+              "next/quickstart"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "next/deployment/runtime-contract",
+              "next/deployment/production",
+              "next/deployment/blue-yaml",
+              "next/deployment/managed-repositories"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "next/concepts/architecture",
+              "next/concepts/configuration",
+              "next/concepts/harness-version-compatibility",
+              "next/concepts/gateway-mode",
+              "next/concepts/authentication"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "next/cli/commands",
+              "next/cli/harnesses",
+              "next/cli/windows-paths",
+              "next/cli/troubleshooting"
+            ]
+          },
+          {
+            "group": "Administration",
+            "pages": [
+              "next/admin/dashboard",
+              "next/admin/user-management",
+              "next/admin/identity-provisioning",
+              "next/admin/managed-packages",
+              "next/admin/configuration",
+              "next/admin/gateway-access",
+              "next/admin/custom-gateway-provisioners",
+              "next/admin/session-capture"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "next/development/local-compose",
+              "next/development/contributing",
+              "next/development/harness-adapter-architecture",
+              "next/development/gateway-adapter-architecture"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "next/reference/governance-config",
+              "next/reference/auth-endpoints"
+            ]
+          },
           {
             "group": "API reference",
             "openapi": {
