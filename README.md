@@ -14,7 +14,7 @@
 [![End-to-end](https://github.com/BlocksOrg/blue/actions/workflows/e2e.yml/badge.svg)](https://github.com/BlocksOrg/blue/actions/workflows/e2e.yml)
 [![Documentation](https://github.com/BlocksOrg/blue/actions/workflows/docs.yml/badge.svg)](https://github.com/BlocksOrg/blue/actions/workflows/docs.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/BlocksOrg/blue)](https://github.com/BlocksOrg/blue/releases/latest)
-[![License](https://img.shields.io/github/license/BlocksOrg/blue)](https://github.com/BlocksOrg/blue/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/BlocksOrg/blue/blob/main/LICENSE)
 
 </div>
 
