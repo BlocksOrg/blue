@@ -1,0 +1,152 @@
+---
+title: "Kubernetes with Helm"
+description: "Implement Blue's deployment contract on Kubernetes with the maintained Helm chart and optional AWS OpenTofu starter."
+icon: "server"
+---
+
+This guide implements Blue's platform-neutral [Deployment contract](/0.1.0/deployment/runtime-contract) on Kubernetes. Follow the [Quickstart](/0.1.0/quickstart) to choose a deployment path and complete the first workstation connection.
+
+The chart deploys the pinned Blue image with a secret-safe `blue.yaml` and managed PostgreSQL and S3-compatible storage. It runs the dashboard, Control API, inference proxy, and background worker as independently managed workloads. Kubernetes is the maintained reference deployment, not a requirement for running Blue.
+
+## Domain topology
+
+Publish the dashboard and Control API through HTTPS on organization-owned domains:
+
+| Public endpoint | Example | Used by |
+| --- | --- | --- |
+| Dashboard and authentication | `https://blue.example.com` | Administrators and browser sign-in |
+| Control API | `https://api.blue.example.com` | The `blue` CLI and dashboard server |
+| Inference proxy | `https://inference.blue.example.com` | Governed coding-agent inference traffic in gateway mode |
+| Documentation | `https://docs.example.com` | Optional dashboard documentation link |
+
+Developers enter the Control API origin, such as `https://api.blue.example.com`, when they run `blue setup`. DNS and certificates must be active before inviting users.
+
+## Prerequisites
+
+- An existing Kubernetes cluster, ingress controller, DNS zone, and TLS certificate issuer
+- Managed PostgreSQL and S3-compatible object storage, or AWS access to provision them with the included OpenTofu starter
+- A container registry if you publish an optional custom gateway-provisioner image
+- A secret delivery system for runtime credentials
+- An organization-operated LiteLLM gateway if you enable gateway mode; Blue does not deploy the upstream gateway
+
+## Download the deployment bundle
+
+Each GitHub Release contains `blue-deployment-vX.Y.Z.tar.gz` with a consumer Dockerfile, `blue/blue.yaml`, shell and Python executable examples, the Helm chart, an AWS OpenTofu starter, and GitHub Actions templates.
+
+```bash
+VERSION=0.1.0
+curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/blue-deployment-v${VERSION}.tar.gz"
+tar -xzf "blue-deployment-v${VERSION}.tar.gz"
+cd "blue-deployment-${VERSION}"
+```
+
+The consumer image contains only the provisioner executable. Helm copies
+it into a read-only volume before the unchanged stock Control API starts:
+
+```dockerfile
+FROM busybox:1.37.0-musl
+COPY --chown=1000:1000 provisioner.sh /executable/provisioner
+RUN chmod 0555 /executable/provisioner
+USER 1000:1000
+```
+
+Keep only literals and environment references in `blue.yaml`. Supply credentials through the Helm chart's `blue.existingSecret` value. Set `blue.config.existingConfigMap`; without it the chart does not mount `blue.yaml`.
+
+## Helm and AWS OpenTofu
+
+The Helm chart deploys separate workloads and Services, optional Ingress, health probes, workload identity, autoscaling, and disruption controls. Proxy autoscaling requires an external metrics adapter for `gateway_proxy_active_streams`, and streaming ingress must use a suitable timeout. The AWS starter attaches to an existing EKS cluster and VPC and provisions PostgreSQL, package/session S3 buckets, KMS encryption, a runtime secret, and a least-privilege IRSA role.
+
+EKS, networking, ingress, DNS/certificates, an encrypted OpenTofu state backend, and optional LiteLLM remain external prerequisites. Apply OpenTofu first, sync its runtime secret through your secret delivery system, then pass its `helm_values` output to `helm upgrade --install`.
+
+## Deployment sequence
+
+<Steps>
+  <Step title="Create a deployment repository">
+    Extract the release bundle into a private repository owned by your organization. Keep the included Dockerfile, `blue/blue.yaml`, provisioner scripts, Helm chart, OpenTofu starter, and GitHub Actions workflows together so image and infrastructure changes can be reviewed as one deployment.
+  </Step>
+  <Step title="Set your domains and policy">
+    Replace `blue.example.com`, `api.blue.example.com`, and organization placeholders in `values.yaml` and `blue/blue.yaml`. Keep credentials out of both files; use environment references in `blue/blue.yaml` and store their values in your secret system. Follow [Configure blue.yaml](/0.1.0/deployment/blue-yaml) for every runtime and policy section.
+  </Step>
+  <Step title="Provision service dependencies">
+    Configure an encrypted remote OpenTofu backend, fill in `infra/aws/terraform.tfvars`, and review `tofu plan`. The AWS starter creates PostgreSQL, package and session buckets, KMS encryption, a runtime secret, and workload identity for an existing EKS cluster.
+  </Step>
+  <Step title="Optionally build a custom provisioner">
+    Skip this step for governance-only deployments or when using the built-in LiteLLM provisioner. Otherwise, implement the versioned JSON stdin/stdout contract in `provisioner.py` or `provisioner.sh`, build and hash `/executable/provisioner`, pin the file and OCI digests, then publish the included provisioner Dockerfile. Its administrator credentials come from the runtime Secret and are never baked into the image. See [Custom gateway provisioners](/0.1.0/admin/custom-gateway-provisioners).
+  </Step>
+  <Step title="Deploy with Helm">
+    Sync the generated runtime secret into Kubernetes, set `blue.config.existingConfigMap`, then install the chart with your values and OpenTofu outputs. Gateway mode also requires `blue.enableInferenceProxy: true` and `HARNESS_PROXY_OAUTH_CLIENT_SECRET` in the shared runtime Secret. The included GitHub deployment workflow performs these operations using an environment-scoped AWS role.
+  </Step>
+  <Step title="Verify and invite users">
+    Confirm the dashboard and API health endpoints through their public HTTPS domains. Sign in as the bootstrap administrator, configure identity and policy, then give developers the Control API origin to use with `blue setup`.
+  </Step>
+</Steps>
+
+## Components
+
+- Independently scalable dashboard, Control API, inference proxy, and singleton worker workloads
+- PostgreSQL with `auth` and control-plane schemas
+- S3-compatible object storage for managed package artifacts and, when enabled, session capture
+- Your external LiteLLM gateway when gateway mode is enabled
+
+## Runtime configuration
+
+The image sets `BLUE_CONFIG_FILE=/etc/blue/blue.yaml`; mount `blue.yaml` at that path. Changing `blue.config.mountPath` without rebuilding the image with a matching environment value silently breaks configuration loading. The file contains `control_api`, server-only `gateway`, client-delivered `governance`, and `package_catalog` sections. Scalar values may be literals, `os.environ/NAME`, or `env://NAME`; direct environment variables take precedence. Only `governance` is delivered to clients.
+
+See [Configure blue.yaml](/0.1.0/deployment/blue-yaml) for a production starting point, field-by-field runtime settings, secret reference rules, governance reconciliation, package catalogs, and rollout validation.
+
+After the initial seed, startup performs a three-way reconciliation between the previous deployment baseline, the current database revision, and the newly mounted `governance` section. Non-conflicting deployment changes create a new revision. Saved dashboard values win conflicts and are reported as path-only startup notices. Members, clients, sessions, gateway selections, artifacts, and other accumulated records are outside this reconciliation.
+
+| Area | Required settings |
+| --- | --- |
+| Database | `HARNESS_DATABASE_URL` |
+| Public auth | `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `HARNESS_AUTH_PUBLIC_URL`, bootstrap identity, issuer, audience, JWKS and session URLs |
+| Managed identity | Optional `HARNESS_AUTH_MODE=oidc`, OIDC issuer/client credentials, SCIM bearer token, and JSON group-role mappings |
+| Blob storage | Bucket, region, optional endpoint/public endpoint, path style, retention, and ambient AWS credentials or role |
+| Gateway | Matching `gateway.type` and required proxy `HARNESS_GATEWAY_TYPE`, gateway and inference-proxy URLs, pinned executable provisioner, encrypted-secret provider, proxy authentication, and request-log retention |
+| Package catalog | Optional `package_catalog.packages` section in `blue.yaml` |
+| Package artifacts | Dedicated non-expiring `HARNESS_PACKAGE_BUCKET` used for immutable mirrored archives |
+| Repository connections | GitHub App ID/private-key references or Bitbucket read-only access-token references, enterprise base URLs/CA bundles when needed, and per-organization namespace allowlists |
+
+Use separate internal and public object-storage endpoints when containers address storage differently from developer machines. In AWS, omit custom endpoints and use workload identity or IAM roles instead of static keys.
+
+The optional `/governance-config/events` endpoint is a long-lived server-sent event stream. Configure the API ingress to disable response buffering for that path and keep idle connections open for more than the 15-second heartbeat interval. Clients fall back to periodic configuration checks when an ingress does not support the stream.
+
+`HARNESS_AUTH_PUBLIC_URL` is the browser-reachable dashboard origin used in invitation acceptance links. The reference implementation logs those links from the Control API; connect the same delivery boundary to SMTP or a transactional mail provider before relying on invitations in production.
+
+## Security baseline
+
+### Internal proxy transport
+
+Keep `blue.internalTransport.mode: mtls` unless your threat model explicitly
+accepts plaintext east-west credentials. The processes check mounted certificate
+files every 30 seconds, adopt valid rotations without dropping in-flight
+requests, and retain the last-known-good configuration after an invalid update.
+
+Set both `blue.internalTransport.serverSecret` and `blue.internalTransport.clientSecret`; empty names render unusable Secret volumes.
+
+`blue.internalTransport.mode: insecure-http` is supported for fully private,
+trusted networks. OAuth M2M remains mandatory and port 8082 must stay restricted
+to inference-proxy pods, but resolved virtual keys are not encrypted in transit.
+A VPC, ClusterIP, or ingress API gateway does not prevent a compromised workload
+or node from observing this hop. Verify NetworkPolicy enforcement and tightly
+control workload, namespace, and node access; never expose port 8082 through an
+Ingress or load balancer.
+
+- Terminate TLS for dashboard, API, inference, and object-storage URLs.
+- Restrict the internal gateway resolver to the inference proxy and rotate its OAuth client secret; the proxy authenticates with a short-lived client-credentials token verified against the better-auth JWKS.
+- Use least-privilege database roles and object-storage permissions.
+- Keep default-deny egress enabled and allow only approved package/provider CIDRs. Application-level DNS validation and address pinning protect public package requests; NetworkPolicy remains defense in depth. A public package host must resolve to public addresses from each client's resolver as well: Blue rejects the entire DNS answer set when any address in it is private, so on-prem split-horizon DNS needs a [managed package source connection](/0.1.0/deployment/managed-repositories) rather than a public archive URL.
+- Encrypt database backups and session objects.
+- Publish collection and retention policy before enabling session upload.
+- Monitor failed JWT authentication, failed session-bound credential resolution, upload completion failures, and stale client revisions.
+- Keep provider and LiteLLM keys server-side.
+- Restrict request logs to metadata, set a retention period, and monitor failed best-effort egress.
+- Keep repository credentials in deployment secret storage, grant read-only repository access, enforce organization namespace allowlists, and review executable hooks/plugins/helpers before publication.
+
+## Backups and upgrades
+
+Back up PostgreSQL, the non-expiring package-artifact bucket, and the raw-session bucket as separate consistency domains. Before upgrading, validate the new OpenAPI and governance schema, run database migrations, deploy the new workload, then reconcile clients. Preserve prior CLI and documentation versions during the rollout.
+
+<Note>
+  The AWS starter creates the session-bucket lifecycle rule. For other storage backends, configure equivalent expiration that matches the documented retention period.
+</Note>
