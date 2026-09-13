@@ -72,7 +72,7 @@ npm run release:docs -- 0.1.0
 
 The command refuses version mismatches and existing releases, freezes the MDX and API contract, and makes the new stable release the default Mintlify version. Do not edit a frozen release except to correct a material documentation or security error.
 
-Commit the generated `apps/docs/<version>` directory, OpenAPI snapshot, and `docs.json` update. A release doesn't need a documentation snapshot; make one only when you want a frozen docs version. Run `npm run check:release -- <version>` to confirm it still matches `Next`.
+Commit the generated `apps/docs/<version>` directory, OpenAPI snapshot, and `docs.json` update before creating the release tag. The release workflow validates that the committed version is an exact snapshot of `Next` and stops before publishing binaries or images when it is missing or stale.
 
 ## Extend the product
 

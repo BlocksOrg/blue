@@ -19,7 +19,8 @@ Before the first public release:
 ## Version preparation
 
 Update the workspace, CLI, OpenAPI, Helm chart, consumer image, and docs to the
-same `MAJOR.MINOR.PATCH`, then verify locally:
+same `MAJOR.MINOR.PATCH`. Commit the immutable documentation snapshot before
+tagging, then verify locally:
 
 ```bash
 scripts/check-release-version.sh v0.1.0
