@@ -54,7 +54,7 @@ whose number of bound values is genuinely dynamic.
 Run it locally with the reference backend:
 
 ```bash
-cd deploy && docker compose up --build   # dashboard :3000, docs :3001, Control API :8080
+cd deploy && docker compose up --build   # dashboard :3000, Control API :8080
 ```
 
 Before changing cross-service behavior, run the hermetic E2E journeys:
