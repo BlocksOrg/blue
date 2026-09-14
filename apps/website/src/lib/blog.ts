@@ -5,12 +5,3 @@ export function newestFirst(posts: CollectionEntry<"blog">[]) {
     (left, right) => right.data.publishDate.getTime() - left.data.publishDate.getTime(),
   );
 }
-
-export function formatBlogDate(date: Date) {
-  return new Intl.DateTimeFormat("en", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    timeZone: "UTC",
-  }).format(date);
-}
