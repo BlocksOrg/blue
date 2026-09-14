@@ -142,5 +142,31 @@ Sync the JSON object at `runtime_secret_arn` to a Kubernetes Secret named by
 `blue.existingSecret`, using External Secrets or your existing secret delivery
 system. Do not commit the secret value or rendered Kubernetes Secret.
 
+## Gateway JWT signing keys
+
+In gateway mode the Control API signs the tokens the inference proxy accepts.
+Set `generate_gateway_jwt_key = true` and this module generates that RSA key and
+stores it in its own secret, `gateway_jwt_secret_arn`. It is kept out of the
+runtime secret because every pod loads that one, and only the Control API may
+hold this key. You never write a public key or JWKS: the Control API works it
+out from the private key.
+
+Sync `gateway_jwt_secret_arn` to a Kubernetes Secret with its keys mapped one to
+one (`signing-key.pem`, plus `previous-signing-key.pem` during a rotation). Name
+it as `helm_values` says in `blue.inferenceJwt.secret`. This module does not turn
+on gateway mode itself: the rest of the chart's gateway settings are still yours
+to set.
+
+To rotate the key:
+
+1. Put a new version first, for example `gateway_jwt_key_versions = ["2", "1"]`,
+   apply, and sync. Key 2 signs new tokens, and key 1 stays published so tokens
+   it already signed keep working.
+2. After the token lifetime has passed (12 hours by default), remove the old
+   version, `["2"]`, apply, and sync again.
+
+The private keys are stored in OpenTofu state, like the generated passwords.
+Keep state encrypted and access-controlled.
+
 For a self-contained deployment that runs Blue on **ECS Fargate behind an ALB**
 (no Kubernetes), see the sibling [`../aws-ecs/`](../aws-ecs/README.md) module.

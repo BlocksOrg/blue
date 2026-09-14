@@ -45,8 +45,8 @@ endpoint that serves that public test key. There is no dashboard.
 
 On the gateway path, the user JWT carries a `sid` and the harness creates the
 matching Better Auth user/session rows. The control API uses the same test-only
-RSA fixture as its dedicated gateway signing ring, publishes `/gateway/jwks`,
-and mints the session-bound inference JWT consumed by the proxy.
+RSA fixture as its gateway signing key, publishes the `/gateway/jwks` it derives
+from that key, and mints the session-bound inference JWT consumed by the proxy.
 
 ## Two paths
 
@@ -143,8 +143,8 @@ that *issues* those tokens (the dashboard's Better Auth).
 
 So the suite self-serves auth:
 
-- A committed **test-only** RSA keypair lives in `fixtures/jwks/`
-  (`jwt-signing-key.pem` private, `jwks.json` public). See that folder's README
+- A committed **test-only** RSA keypair lives in `tests/fixtures/jwt/`
+  (`signing-key.pem` private, `jwks.json` public). See that folder's README
   — the keys grant no access to anything real and must never be reused.
 - A tiny `jwks-server.mjs` sidecar serves the public JWK set in-network at
   `HARNESS_AUTH_JWKS_URL`.

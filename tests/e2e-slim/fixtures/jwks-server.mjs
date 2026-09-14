@@ -1,5 +1,5 @@
 // Minimal auth sidecar for the e2e-slim stack. Serves two things, both backed by
-// the committed, test-only RSA keypair in ./jwks:
+// the committed, test-only RSA keypair in tests/fixtures/jwt (mounted at ./jwt):
 //
 //   GET  /jwks         — the public JWK set, so control-api can verify the RS256
 //                        user tokens the Rust test minter signs (no dashboard /
@@ -20,9 +20,9 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { createPrivateKey, createSign } from "node:crypto";
 
-const jwks = readFileSync(new URL("./jwks/jwks.json", import.meta.url));
+const jwks = readFileSync(new URL("./jwt/jwks.json", import.meta.url));
 const signingKey = createPrivateKey(
-  readFileSync(new URL("./jwks/jwt-signing-key.pem", import.meta.url)),
+  readFileSync(new URL("./jwt/signing-key.pem", import.meta.url)),
 );
 const port = Number(process.env.PORT || 8080);
 

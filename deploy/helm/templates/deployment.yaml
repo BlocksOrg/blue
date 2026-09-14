@@ -100,9 +100,10 @@ spec:
               value: {{ .Values.blue.inferenceProxyClientId | quote }}
             - { name: HARNESS_GATEWAY_JWT_ISSUER, value: {{ .Values.blue.publicUrls.controlApi | quote }} }
             - { name: HARNESS_GATEWAY_JWT_AUDIENCE, value: {{ .Values.blue.inferenceJwt.audience | quote }} }
-            - { name: HARNESS_GATEWAY_JWT_ACTIVE_KID, value: {{ required "blue.inferenceJwt.activeKid is required when blue.enableInferenceProxy=true" .Values.blue.inferenceJwt.activeKid | quote }} }
             - { name: HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE, value: /var/run/blue/gateway-jwt/signing-key.pem }
-            - { name: HARNESS_GATEWAY_JWT_JWKS_FILE, value: /var/run/blue/gateway-jwt/jwks.json }
+            {{- if .Values.blue.inferenceJwt.includePreviousKey }}
+            - { name: HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_FILE, value: /var/run/blue/gateway-jwt/previous-signing-key.pem }
+            {{- end }}
             {{- end }}
             - name: CONTROL_API_URL
               value: http://{{ include "blue.fullname" . }}-control-api:{{ .Values.service.ports.controlApi }}

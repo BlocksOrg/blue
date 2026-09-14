@@ -22,11 +22,15 @@ blue:
   # the dashboard and inference-proxy pods).
   inferenceProxyClientId: blue-inference-proxy
   inferenceJwt:
-    # Secret containing signing-key.pem (active private key) and jwks.json
-    # (the active public key plus retained rotation keys).
+    # Secret holding signing-key.pem, the active RSA private key. The Control
+    # API derives the published verification keys from it; there is no JWKS.
+    # Keep this Secret separate from existingSecret, which every pod loads.
     secret: ""
-    activeKid: ""
     audience: blue-inference-proxy
+    # During a key rotation, set true and add previous-signing-key.pem (the
+    # retired key) to the Secret. Its public key stays published so tokens it
+    # signed keep verifying until they expire; it never signs.
+    includePreviousKey: false
   internalTransport:
     # mtls (recommended/default) or insecure-http (trusted private networks only).
     mode: mtls

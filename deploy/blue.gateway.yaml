@@ -9,9 +9,8 @@ gateway:
   inference_jwt:
     issuer: os.environ/HARNESS_GATEWAY_JWT_ISSUER
     audience: os.environ/HARNESS_GATEWAY_JWT_AUDIENCE
-    active_kid: os.environ/HARNESS_GATEWAY_JWT_ACTIVE_KID
+    # The public JWKS is derived from this key; there is no JWKS file.
     private_key_file: os.environ/HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE
-    jwks_file: os.environ/HARNESS_GATEWAY_JWT_JWKS_FILE
     # Clamped to the remaining browser session. The token is baked into the
     # agent's environment at spawn with no in-flight rotation, so lowering this
     # shortens how long an agent run can keep working.

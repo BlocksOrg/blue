@@ -113,9 +113,24 @@ gateway's address.
 bearer token plus the dashboard's `HARNESS_OIDC_*` provider settings, which
 this module has no inputs for; supply the whole config via `blue_config_yaml`.
 
+## Gateway JWT signing keys
+
+In gateway mode the Control API signs the tokens the inference proxy accepts.
+This module generates that RSA key and passes it to the Control API only. You
+never write a public key or JWKS: the Control API works it out from the private
+key.
+
+To rotate the key:
+
+1. Put a new version first, for example `gateway_jwt_key_versions = ["2", "1"]`,
+   and apply. Key 2 signs new tokens, and key 1 stays published so tokens it
+   already signed keep working.
+2. After the token lifetime has passed (12 hours by default), remove the old
+   version, `["2"]`, and apply again.
+
 ## Secrets in state
 
 All generated credentials (database, auth, bootstrap admin, Redis auth, and —
-in gateway mode — the proxy OAuth client secret and gateway encryption key) are
-stored in the runtime Secrets Manager secret and in OpenTofu state. Use an
-encrypted remote backend and restrict access.
+in gateway mode — the proxy OAuth client secret, gateway encryption key, and
+gateway JWT signing keys) are stored in the runtime Secrets Manager secret and
+in OpenTofu state. Use an encrypted remote backend and restrict access.

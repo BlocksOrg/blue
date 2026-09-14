@@ -179,3 +179,22 @@ variable "deletion_protection" {
   type    = bool
   default = true
 }
+variable "generate_gateway_jwt_key" {
+  type        = bool
+  default     = false
+  description = "Gateway mode only: generate the gateway inference JWT signing key into its own Secrets Manager secret, for the Helm chart's blue.inferenceJwt.secret"
+}
+variable "gateway_jwt_key_versions" {
+  type        = list(string)
+  default     = ["1"]
+  description = "Gateway inference JWT signing keys to generate, newest first. The first key signs. A second key, kept during a rotation, is only published so tokens it signed keep verifying."
+  validation {
+    condition = (
+      length(var.gateway_jwt_key_versions) >= 1 &&
+      length(var.gateway_jwt_key_versions) <= 2 &&
+      length(distinct(var.gateway_jwt_key_versions)) == length(var.gateway_jwt_key_versions) &&
+      alltrue([for version in var.gateway_jwt_key_versions : trimspace(version) != ""])
+    )
+    error_message = "gateway_jwt_key_versions must hold one or two distinct, non-empty entries."
+  }
+}

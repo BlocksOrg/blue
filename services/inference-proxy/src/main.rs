@@ -2355,10 +2355,9 @@ mod tests {
 
     async fn spawn_gateway_jwks_server() -> String {
         async fn handler() -> axum::Json<serde_json::Value> {
-            let mut set: serde_json::Value = serde_json::from_str(include_str!(
-                "../../../tests/e2e-slim/fixtures/jwks/jwks.json"
-            ))
-            .unwrap();
+            let mut set: serde_json::Value =
+                serde_json::from_str(include_str!("../../../tests/fixtures/jwt/jwks.json"))
+                    .unwrap();
             let mut retained = set["keys"][0].clone();
             retained["kid"] = "retained-key".into();
             set["keys"].as_array_mut().unwrap().push(retained);
@@ -2378,10 +2377,8 @@ mod tests {
         async fn handler(State(counter): State<Arc<AtomicUsize>>) -> axum::Json<serde_json::Value> {
             counter.fetch_add(1, Ordering::SeqCst);
             axum::Json(
-                serde_json::from_str(include_str!(
-                    "../../../tests/e2e-slim/fixtures/jwks/jwks.json"
-                ))
-                .unwrap(),
+                serde_json::from_str(include_str!("../../../tests/fixtures/jwt/jwks.json"))
+                    .unwrap(),
             )
         }
         let app = Router::new()
@@ -2460,7 +2457,7 @@ mod tests {
 
     fn sign_gateway_claims(claims: &GatewayInferenceClaims, kid: &str) -> String {
         let key = jsonwebtoken::EncodingKey::from_rsa_pem(include_bytes!(
-            "../../../tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem"
+            "../../../tests/fixtures/jwt/signing-key.pem"
         ))
         .unwrap();
         let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
