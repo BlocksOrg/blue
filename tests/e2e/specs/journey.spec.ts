@@ -316,17 +316,48 @@ test.describe.serial("Blue deployment journey", () => {
     await expect(stat(path.join(setupHome, ".config", "blue", "runtime", "opencode", "opencode.json"))).rejects.toThrow();
   });
 
-  test("@smoke declining first-run version repair does not persist the selected agent", async () => {
+  test("@smoke first-run agent choice persists only after version repair succeeds", async () => {
     const repairHome = await prepareClient("declined-first-run-repair");
     await copyFile(
       path.join(home, ".config", "blue", "session.json"),
       path.join(repairHome, ".config", "blue", "session.json"),
     );
+    const repairBin = path.join(repairHome, "repair-bin");
+    const versionFile = path.join(repairHome, "codex-version");
+    const installLog = path.join(repairHome, "npm-install.log");
+    await mkdir(repairBin, { recursive: true });
+    await writeFile(versionFile, "999.0.0\n");
+    await writeFile(
+      path.join(repairBin, "codex"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "--version" ]] || [[ "\${1:-}" == "version" ]]; then
+  printf 'codex %s\\n' "$(cat "$E2E_CODEX_VERSION_FILE")"
+  exit 0
+fi
+printf 'fake-codex-ok\\n'
+`,
+    );
+    await writeFile(
+      path.join(repairBin, "npm"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" > "$E2E_INSTALL_LOG"
+printf '0.145.0\\n' > "$E2E_CODEX_VERSION_FILE"
+`,
+    );
+    await Promise.all([
+      chmod(path.join(repairBin, "codex"), 0o755),
+      chmod(path.join(repairBin, "npm"), 0o755),
+    ]);
     const incompatibleVersions = {
       E2E_CODEX_VERSION: "999.0.0",
       E2E_CLAUDE_VERSION: "999.0.0",
       E2E_KIMI_VERSION: "999.0.0",
       E2E_OPENCODE_VERSION: "999.0.0",
+      E2E_CODEX_VERSION_FILE: versionFile,
+      E2E_INSTALL_LOG: installLog,
+      PATH: `${repairBin}:/usr/local/bin:${process.env.PATH ?? ""}`,
     };
 
     const declined = spawnCliInPty(repairHome, "blue", incompatibleVersions);
@@ -347,11 +378,13 @@ test.describe.serial("Blue deployment journey", () => {
       "preferred_harness",
     );
 
-    const retried = spawnCliInPty(repairHome, "blue");
+    const retried = spawnCliInPty(repairHome, "blue", incompatibleVersions);
     const retriedCompletion = collect(retried);
     try {
       await waitForOutput(retried, /Choose your coding agent/);
       retried.stdin.write("\r");
+      await waitForOutput(retried, /Install a policy-supported Codex version now\?/);
+      retried.stdin.write("y\r");
       const result = await retriedCompletion;
       expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
       expect(result.stdout).toContain("fake-codex-ok");
@@ -359,6 +392,8 @@ test.describe.serial("Blue deployment journey", () => {
       if (retried.exitCode === null) retried.kill("SIGTERM");
     }
 
+    expect(await readFile(versionFile, "utf8")).toBe("0.145.0\n");
+    expect(await readFile(installLog, "utf8")).toContain("@openai/codex");
     expect(await readClientFile(repairHome, ".config/blue/blue.toml")).toContain(
       'preferred_harness = "codex"',
     );
