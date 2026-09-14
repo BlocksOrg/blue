@@ -316,6 +316,54 @@ test.describe.serial("Blue deployment journey", () => {
     await expect(stat(path.join(setupHome, ".config", "blue", "runtime", "opencode", "opencode.json"))).rejects.toThrow();
   });
 
+  test("@smoke declining first-run version repair does not persist the selected agent", async () => {
+    const repairHome = await prepareClient("declined-first-run-repair");
+    await copyFile(
+      path.join(home, ".config", "blue", "session.json"),
+      path.join(repairHome, ".config", "blue", "session.json"),
+    );
+    const incompatibleVersions = {
+      E2E_CODEX_VERSION: "999.0.0",
+      E2E_CLAUDE_VERSION: "999.0.0",
+      E2E_KIMI_VERSION: "999.0.0",
+      E2E_OPENCODE_VERSION: "999.0.0",
+    };
+
+    const declined = spawnCliInPty(repairHome, "blue", incompatibleVersions);
+    const declinedCompletion = collect(declined);
+    try {
+      await waitForOutput(declined, /Choose your coding agent/);
+      declined.stdin.write("\r");
+      await waitForOutput(declined, /Install a policy-supported Codex version now\?/);
+      declined.stdin.write("\r");
+      const result = await declinedCompletion;
+      expect(result.code, `${result.stdout}\n${result.stderr}`).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain("Codex installation declined");
+    } finally {
+      if (declined.exitCode === null) declined.kill("SIGTERM");
+    }
+
+    expect(await readClientFile(repairHome, ".config/blue/blue.toml")).not.toContain(
+      "preferred_harness",
+    );
+
+    const retried = spawnCliInPty(repairHome, "blue");
+    const retriedCompletion = collect(retried);
+    try {
+      await waitForOutput(retried, /Choose your coding agent/);
+      retried.stdin.write("\r");
+      const result = await retriedCompletion;
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain("fake-codex-ok");
+    } finally {
+      if (retried.exitCode === null) retried.kill("SIGTERM");
+    }
+
+    expect(await readClientFile(repairHome, ".config/blue/blue.toml")).toContain(
+      'preferred_harness = "codex"',
+    );
+  });
+
   test("@smoke CLI applies policy, reports health, and launches Codex transparently", async () => {
     for (const args of [["version"], ["help"], ["doctor"], ["config"], ["apply", "--yes"], ["status"], ["verify"]]) {
       const result = await runCli(home, args);

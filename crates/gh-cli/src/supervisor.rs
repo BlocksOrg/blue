@@ -464,6 +464,45 @@ fn option(label: &str, hint: &str, action: PromptAction) -> PromptOption {
     }
 }
 
+fn agent_repair_guidance(names: &[String]) -> Option<String> {
+    let first = names.first()?;
+    Some(format!(
+        "Version repair required for: {}. Run `blue agent {first}` outside Blue to install one.",
+        names.join(", ")
+    ))
+}
+
+fn agent_selector(options: &commands::AgentOptions) -> Option<ControlPrompt> {
+    if options.eligible.is_empty() {
+        return None;
+    }
+    let current = options.current.as_deref();
+    let mut selector = ControlPrompt::new(
+        "Choose your default coding agent",
+        options
+            .eligible
+            .iter()
+            .map(|name| {
+                option(
+                    name,
+                    if current == Some(name) {
+                        "current default"
+                    } else {
+                        "installed and allowed"
+                    },
+                    PromptAction::SelectAgent(name.clone()),
+                )
+            })
+            .collect(),
+    );
+    selector.selected = options
+        .eligible
+        .iter()
+        .position(|name| current == Some(name.as_str()))
+        .unwrap_or(0);
+    Some(selector)
+}
+
 fn confirmation_prompt(
     title: &str,
     confirm_label: &str,
@@ -2934,44 +2973,18 @@ pub fn supervise(
                         "/agent" => {
                             match commands::agent_options() {
                                 Ok(options) => {
-                                    let current = options.current.as_deref();
-                                    let mut selector = ControlPrompt::new(
-                                        "Choose your default coding agent",
-                                        options
-                                            .eligible
-                                            .iter()
-                                            .map(|name| {
-                                                option(
-                                                    name,
-                                                    if current == Some(name) {
-                                                        "current default"
-                                                    } else {
-                                                        "installed and allowed"
-                                                    },
-                                                    PromptAction::SelectAgent(name.clone()),
-                                                )
-                                            })
-                                            .collect(),
-                                    );
-                                    selector.selected = options
-                                        .eligible
-                                        .iter()
-                                        .position(|name| current == Some(name.as_str()))
-                                        .unwrap_or(0);
                                     // Not selectable here — the installer the
                                     // repair runs would draw over the TUI — but
                                     // named, so they are not silently missing.
-                                    if !options.needs_repair.is_empty() {
+                                    if let Some(guidance) =
+                                        agent_repair_guidance(&options.needs_repair)
+                                    {
                                         append_transcript(
                                             &mut transcript,
-                                            format!(
-                                                "{} installed but needs a policy-supported version — run `blue agent {}` outside Blue to install one.",
-                                                options.needs_repair.join(", "),
-                                                options.needs_repair[0],
-                                            ),
+                                            guidance,
                                         );
                                     }
-                                    prompt = Some(selector);
+                                    prompt = agent_selector(&options);
                                 }
                                 Err(error) => append_transcript(
                                     &mut transcript,
@@ -3491,6 +3504,43 @@ mod tests {
             prompt.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(PromptAction::Cancel)
         );
+    }
+
+    #[test]
+    fn agent_repair_guidance_handles_one_or_many_agents() {
+        assert_eq!(agent_repair_guidance(&[]), None);
+        assert_eq!(
+            agent_repair_guidance(&["codex".into()]).as_deref(),
+            Some(
+                "Version repair required for: codex. Run `blue agent codex` outside Blue to install one."
+            )
+        );
+        assert_eq!(
+            agent_repair_guidance(&["codex".into(), "claude".into()]).as_deref(),
+            Some(
+                "Version repair required for: codex, claude. Run `blue agent codex` outside Blue to install one."
+            )
+        );
+    }
+
+    #[test]
+    fn agent_selector_is_absent_when_only_repairs_are_available() {
+        let repair_only = commands::AgentOptions {
+            eligible: Vec::new(),
+            needs_repair: vec!["codex".into()],
+            current: Some("codex".into()),
+        };
+        assert!(agent_selector(&repair_only).is_none());
+
+        let mixed = commands::AgentOptions {
+            eligible: vec!["claude".into()],
+            needs_repair: vec!["codex".into()],
+            current: Some("claude".into()),
+        };
+        let selector = agent_selector(&mixed).unwrap();
+        assert_eq!(selector.options.len(), 1);
+        assert_eq!(selector.options[0].label, "claude");
+        assert_eq!(selector.selected, 0);
     }
 
     #[test]
