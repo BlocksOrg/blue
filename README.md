@@ -69,7 +69,7 @@ blue codex       # launch Codex through Blue
 ```
 
 Replace `codex` with `claude`, `kimi`, or `opencode`. Running bare `blue`
-launches your preferred eligible agent.
+launches your preferred agent.
 
 For version pinning, custom installation directories, and the complete setup
 flow, read the [Quickstart](https://docs.bluee.sh/next/quickstart#install-the-workstation-cli).
@@ -177,7 +177,7 @@ Learn more in the documentation for
 
 | Command | Purpose |
 | --- | --- |
-| `blue` | Reconcile policy and launch the preferred eligible agent. |
+| `blue` | Reconcile policy and launch the preferred agent. |
 | `blue setup` | Connect or reconnect to a deployment. |
 | `blue reset [--yes]` | Disconnect the active deployment, retaining non-secret tenant state for a later reconnect. |
 | `blue login` / `blue logout` | Start or end the authenticated session. |
