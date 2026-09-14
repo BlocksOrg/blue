@@ -2958,6 +2958,19 @@ pub fn supervise(
                                         .iter()
                                         .position(|name| current == Some(name.as_str()))
                                         .unwrap_or(0);
+                                    // Not selectable here — the installer the
+                                    // repair runs would draw over the TUI — but
+                                    // named, so they are not silently missing.
+                                    if !options.needs_repair.is_empty() {
+                                        append_transcript(
+                                            &mut transcript,
+                                            format!(
+                                                "{} installed but needs a policy-supported version — run `blue agent {}` outside Blue to install one.",
+                                                options.needs_repair.join(", "),
+                                                options.needs_repair[0],
+                                            ),
+                                        );
+                                    }
                                     prompt = Some(selector);
                                 }
                                 Err(error) => append_transcript(
