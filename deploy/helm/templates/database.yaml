@@ -51,7 +51,6 @@ spec:
       labels:
         {{- include "blue.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: database
-        blue.blocks.org/migration-access: "true"
     spec:
       securityContext:
         fsGroup: 70

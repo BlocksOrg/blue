@@ -24,10 +24,18 @@ resource "aws_kms_alias" "blue" {
 # for evaluation clusters; production keeps S3.
 # ---------------------------------------------------------------------------
 resource "aws_s3_bucket" "packages" {
+  #checkov:skip=CKV_AWS_21:versioning is attached by aws_s3_bucket_versioning.blue; checkov drops graph edges into count-guarded resources
+  #checkov:skip=CKV_AWS_145:KMS SSE is attached by aws_s3_bucket_server_side_encryption_configuration.blue
+  #checkov:skip=CKV2_AWS_6:the public access block is attached by aws_s3_bucket_public_access_block.blue
+  #checkov:skip=CKV2_AWS_61:lifecycle rules are attached by aws_s3_bucket_lifecycle_configuration.packages
   count         = var.include_bucket ? 1 : 0
   bucket_prefix = "${local.bucket_name}-packages-"
 }
 resource "aws_s3_bucket" "sessions" {
+  #checkov:skip=CKV_AWS_21:versioning is attached by aws_s3_bucket_versioning.blue; checkov drops graph edges into count-guarded resources
+  #checkov:skip=CKV_AWS_145:KMS SSE is attached by aws_s3_bucket_server_side_encryption_configuration.blue
+  #checkov:skip=CKV2_AWS_6:the public access block is attached by aws_s3_bucket_public_access_block.blue
+  #checkov:skip=CKV2_AWS_61:lifecycle rules are attached by aws_s3_bucket_lifecycle_configuration.sessions
   count         = var.include_bucket ? 1 : 0
   bucket_prefix = "${local.bucket_name}-sessions-"
 }
@@ -102,6 +110,7 @@ resource "aws_db_subnet_group" "blue" {
   subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "database" {
+  #checkov:skip=CKV2_AWS_5:attached to aws_db_instance.blue via vpc_security_group_ids
   count       = var.include_database ? 1 : 0
   name_prefix = "${local.name_prefix}-database-"
   description = "PostgreSQL access from Blue workloads"
@@ -140,6 +149,7 @@ resource "aws_elasticache_subnet_group" "blue" {
   subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "redis" {
+  #checkov:skip=CKV2_AWS_5:attached to aws_elasticache_replication_group.blue via security_group_ids
   count       = var.include_redis ? 1 : 0
   name_prefix = "${local.name_prefix}-redis-"
   description = "Redis access from Blue workloads"
