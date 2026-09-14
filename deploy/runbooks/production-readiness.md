@@ -8,8 +8,6 @@ with an expired security exception or a missed recovery budget.
 
 - `blue.production=true`, `blue.existingSecret` names an externally managed
   Secret, and `image.digest` is the reviewed release digest.
-- The `blue-prerequisites` release is installed first in the same namespace;
-  it owns namespace default-deny and migration-only database access.
 - The runtime Secret contains `HARNESS_DATABASE_URL`, `BETTER_AUTH_SECRET`, and
   `HARNESS_BOOTSTRAP_ADMIN_PASSWORD`. Gateway mode also requires its upstream,
   OAuth client secret and encryption material; Better Auth signing/JWKS state

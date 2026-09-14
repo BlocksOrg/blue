@@ -20,21 +20,13 @@ The Secret also carries the S3 credentials the Control API and worker need for
 `envFrom`. On EKS with IRSA, omit them and annotate the service account instead.
 
 ```bash
-helm upgrade --install blue-prerequisites ./deploy/helm-prerequisites \
-  --namespace blue --create-namespace \
-  --set 'networkPolicy.databaseCidrs[0]=10.0.0.0/24'
-
 helm upgrade --install blue ./deploy/helm \
-  --namespace blue \
+  --namespace blue --create-namespace \
+  --set 'networkPolicy.databaseCidrs[0]=10.0.0.0/24' \
   --set image.repository=ghcr.io/your-org/blue-deployment \
   --set image.digest=sha256:REPLACE_WITH_RELEASE_DIGEST \
   --set blue.existingSecret=blue-runtime
 ```
-
-The prerequisite release is mandatory in production. It establishes default
-deny and migration-only database access before Helm executes the application's
-pre-install hook. Uninstall the application release first and prerequisites
-last.
 
 Production is the chart default. It rejects mutable image tags, a missing
 externally managed Secret, disabled migrations, disabled NetworkPolicy, a bundled
