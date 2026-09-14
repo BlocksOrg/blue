@@ -64,6 +64,7 @@ data "aws_elb_hosted_zone_id" "alb" {
 }
 
 resource "aws_route53_record" "blue" {
+  #checkov:skip=CKV2_AWS_23:the alias target is var.alb_hostname, an ALB created outside this module by the AWS Load Balancer Controller; checkov renders the variable to its "" default and so misses the check's own var. escape hatch
   for_each = var.include_domain && var.alb_hostname != "" ? {
     dashboard = local.dashboard_hostname
     api       = local.api_hostname
