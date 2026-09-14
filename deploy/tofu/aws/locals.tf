@@ -67,7 +67,11 @@ locals {
       HARNESS_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap_admin.result
     },
     var.include_database ? {
-      HARNESS_DATABASE_URL = "postgres://${var.database_username}:${random_password.database[0].result}@${aws_db_instance.blue[0].address}:${aws_db_instance.blue[0].port}/${var.database_name}"
+      # RDS refuses plaintext connections by default (rds.force_ssl), so every
+      # client is told to encrypt. `require` encrypts without verifying the
+      # server certificate, the same as libpq; the Rust services and the
+      # dashboard both read it that way.
+      HARNESS_DATABASE_URL = "postgres://${var.database_username}:${random_password.database[0].result}@${aws_db_instance.blue[0].address}:${aws_db_instance.blue[0].port}/${var.database_name}?sslmode=require"
     } : {},
     var.include_redis ? {
       HARNESS_REDIS_URL = "rediss://default:${random_password.redis_auth[0].result}@${aws_elasticache_replication_group.blue[0].primary_endpoint_address}:6379/0"
