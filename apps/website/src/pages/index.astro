@@ -1,15 +1,19 @@
 ---
+import { getCollection } from "astro:content";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import SiteHeader from "../components/SiteHeader.astro";
 import SiteFooter from "../components/SiteFooter.astro";
+import BlogPostCard from "../components/BlogPostCard.astro";
 import FeatureShowcase from "../components/FeatureShowcase.astro";
 import Terminal from "../components/Terminal.astro";
+import { newestFirst } from "../lib/blog";
 
 const docsBase = "https://docs.bluee.sh/next";
 const github = "https://github.com/BlocksOrg/blue";
 const externalLinkProps = { target: "_blank", rel: "noopener noreferrer" };
 const unixInstallCommand = "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BlocksOrg/blue/releases/latest/download/install.sh | sh";
 const windowsInstallCommand = "irm https://github.com/BlocksOrg/blue/releases/latest/download/install.ps1 | iex";
+const latestPosts = newestFirst(await getCollection("blog")).slice(0, 3);
 
 const agents = [
   { name: "Codex", icon: "/agents/codex.svg" },
@@ -170,6 +174,17 @@ const capabilities = [
         ))}
       </div>
       <a class="text-link" href={`${docsBase}/deployment/production`} {...externalLinkProps}>Read the deployment guide <span class="link-caret" aria-hidden="true"></span></a>
+    </section>
+
+    <section class="section latest-blog-section" aria-labelledby="latest-blog-heading">
+      <h2 id="latest-blog-heading">Latest from Blue.</h2>
+      <p class="section-lede">
+        Architecture, operations, and lessons from building a common control plane for coding agents.
+      </p>
+      <div class="blog-grid">
+        {latestPosts.map((post) => <BlogPostCard post={post} />)}
+      </div>
+      <a class="text-link" href="/blog/">See all posts <span class="link-caret" aria-hidden="true"></span></a>
     </section>
 
     <section class="section final-cta">
