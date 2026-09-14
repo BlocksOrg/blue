@@ -2,7 +2,6 @@
 import BaseLayout from "./BaseLayout.astro";
 import SiteHeader from "../components/SiteHeader.astro";
 import SiteFooter from "../components/SiteFooter.astro";
-import { formatBlogDate } from "../lib/blog";
 
 interface Props {
   title: string;
@@ -29,11 +28,6 @@ const { title, description, publishDate, author } = Astro.props;
         <a class="blog-back-link" href="/blog/"><span aria-hidden="true">←</span> Blog</a>
         <h1>{title}</h1>
         <p>{description}</p>
-        <div class="blog-post-meta">
-          <time datetime={publishDate.toISOString()}>{formatBlogDate(publishDate)}</time>
-          <span aria-hidden="true">·</span>
-          <span>{author}</span>
-        </div>
       </header>
 
       <div class="blog-prose">
