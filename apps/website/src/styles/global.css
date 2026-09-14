@@ -192,6 +192,18 @@ a { color: inherit; }
 .manifesto-close .manifesto-final-line { margin-top: 52px; color: var(--ink); font-size: clamp(1.35rem, 1.15rem + .75vw, 1.75rem); font-weight: 600; line-height: 1.5; text-align: center; }
 #footer.manifesto-footer { margin-top: 9rem; }
 
+.desktop-page { padding-top: 54px; }
+.desktop-teaser { width: min(760px, calc(100% - 40px)); margin: 0 auto; padding-top: clamp(110px, 17vh, 160px); }
+.desktop-teaser-header { text-align: center; }
+.desktop-teaser-header h1 { margin: 0; font-family: var(--serif); font-size: var(--type-display); font-weight: 500; line-height: 1.03; letter-spacing: -.025em; text-wrap: balance; }
+.desktop-teaser-lede { max-width: 62ch; margin: 30px auto 0; color: var(--muted); font-size: var(--type-lede); font-weight: 500; line-height: 1.65; text-wrap: balance; }
+.desktop-capabilities { margin-top: 88px; }
+.desktop-capabilities h2 { max-width: 620px; margin: 0; font-family: var(--serif); font-size: var(--type-section-heading); font-weight: 600; line-height: 1.18; letter-spacing: -.01em; text-wrap: balance; }
+.desktop-capabilities ul { margin: 42px 0 0; padding: 0; border-top: 1px solid var(--line); list-style: none; }
+.desktop-capabilities li { padding: 24px 0; border-bottom: 1px solid var(--line); color: var(--muted); font-size: var(--type-body); font-weight: 500; line-height: 1.6; }
+.desktop-capabilities strong { color: var(--ink); font-weight: 650; }
+#footer.desktop-footer { margin-top: 9rem; }
+
 #footer { --footer-inset: 1.3rem; --footer-column-gap: clamp(1rem, 2.5vw, 2rem); --footer-max-width: 952px; width: 100%; display: flex; flex-direction: column; align-items: flex-start; margin-top: 15rem; padding: 0 0 1.75rem; background: var(--paper); color: #676767; font-family: var(--sans); font-size: 15px; font-weight: 400; font-style: normal; letter-spacing: -.01em; }
 #footer::before { content: ""; display: block; width: calc(100% - 2 * var(--footer-inset)); max-width: var(--footer-max-width); height: 1px; margin: 0 auto 2rem; background: color-mix(in srgb, #676767 10%, transparent); }
 #footer * { font-family: inherit; }
@@ -244,6 +256,9 @@ a { color: inherit; }
   .manifesto-value-grid article { min-height: 270px; }
   .manifesto-value-grid h3 { margin-top: 58px; }
   .manifesto-principles { margin-top: 82px; padding-inline: 30px; }
+  .desktop-page { padding-top: 50px; }
+  .desktop-teaser { padding-top: 76px; }
+  .desktop-capabilities { margin-top: 68px; }
   #footer { margin-top: 14rem; }
   .footer-links { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 2rem; }
 }
