@@ -206,9 +206,16 @@ mod tests {
         std::fs::write(dir.join("codex"), "#!/bin/sh\nexec node codex.js \"$@\"\n").unwrap();
         std::fs::write(dir.join("codex.cmd"), "@node codex.js %*\r\n").unwrap();
 
-        assert_eq!(
-            which_all_in([dir.clone()], "codex"),
-            vec![dir.join("codex.cmd")]
+        // The candidate carries the casing of the `PATHEXT` entry it was built
+        // from, not the casing on disk; Windows resolves either.
+        let found = which_all_in([dir.clone()], "codex");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].parent(), Some(dir.as_path()));
+        assert!(
+            found[0]
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("codex.cmd")),
+            "{found:?}"
         );
 
         std::fs::remove_dir_all(dir).unwrap();
