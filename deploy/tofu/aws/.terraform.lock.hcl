@@ -5,7 +5,21 @@ provider "registry.opentofu.org/hashicorp/aws" {
   version     = "6.62.0"
   constraints = "~> 6.0"
   hashes = [
+    "h1:5x/4mMlIqSyeMJQ8tD0A+FTNynpdHW8IA7F2zqrgpwU=",
+    "h1:Etlx1tUvlB7sqFWPciSn9Yz1g50ctM+dGlyVMpu720I=",
+    "h1:FBnaqFZDf3DdVb4SVpCPoT+TZQUSChNmmDViEGPV1rw=",
+    "h1:MRIBAtFWiQAyo4kpbBUtIvxlSmpQ9Eel0nLMYCb6MH4=",
+    "h1:MeMP80kzq1meAJQ0l+kU6KVW1S+4EhIRSy6q3L++LPU=",
+    "h1:N8W8KgcjlG1kb9mPapfieH/vYzyNrJBsb4RS0axwg5Y=",
+    "h1:OB5obEZKuaX4gQ7DYxYvAMaf4I6v2keeKOPfOpFMkgI=",
+    "h1:WnhkO4yQc0QvVgx/xJFI+UbM1y8BC8yvApoDUlhb5XY=",
+    "h1:fN9PvxrT2/rAiT86Hen0vicyMbKXAZG6VC/TEP9ZpD8=",
     "h1:kRrdLje5ab/tmObt9lOKOi2KCyIB8B3xZCKhcfdS2K0=",
+    "h1:l5VASLhVAOCr2Q+7ywGqWb+JSEIJ5UjilOMBjFMdQ7U=",
+    "h1:mugvZRK3/kSysUmpt664tMNpOZtGbQd6nGKaM4p3kwo=",
+    "h1:nY4ct0BTUQ7se8gbnzXsPCN2tiP4mZsGnEw2juSpXNs=",
+    "h1:qRFHk1ksyfMj2KOrs9pEntzagM+Tzqm+qznJfxVrJj0=",
+    "h1:szVx4GPJr2hJt9t82VilK2Gu/N9WR/KbdeLZ9wb0Nek=",
     "zh:072d542e40ca0b8c5e081c9f834e3e41aa2ad31c01219522f314685d5c482823",
     "zh:0b2643473f5bb154d724e64e75632814d74acda5fd81b6488d0ed13f413152b2",
     "zh:108b3e175886e45c4e955f1ef323aa849dfd82fc450108238be2ab7c0d1f0c2e",
@@ -28,7 +42,21 @@ provider "registry.opentofu.org/hashicorp/random" {
   version     = "3.9.0"
   constraints = "~> 3.6"
   hashes = [
+    "h1:8EQU5KSxezcjo/phRSe69rDOI0lk4pSaggj7FsskYp8=",
+    "h1:Lw9im2VBBJQ3RyAbHPQ0rcvcmmcZWm3x+kIOpN+Tv9s=",
     "h1:U8KXqGCoNI9/guYbTvzgdtVk3fRthoG0UXwm1JoEpIs=",
+    "h1:YXaVd4p6qXPPVaxIBaIDNXmBwT02ZqDn0qD+tYpw8sA=",
+    "h1:cOpc03fphEt/G9Rfc4jLL/fW0D7tgvlXqiDKPF4vuww=",
+    "h1:g09RR7T1xWkeGrZwWvWMT9ncJrFGr1k3CBD585UmO7w=",
+    "h1:gGDdPPibmw2EWROx+sh1RGLjR5+nPwZyrf6/N9jXfeM=",
+    "h1:haE7/nXCOhXKP4oXeEnER3t5CaVQWqujz4nBnpeTUv4=",
+    "h1:ieSVpfZS2lKuMr05ph0QsOVpCzg7uk3cgKBaXR+Ikug=",
+    "h1:ig2s1IS9IzehorRjvVAnKIsUUj8fkgyxct1L/kswcc4=",
+    "h1:j3lS+ZEERFnoab8t1ppDrScGVP/cgWbzlCrEYKTCXYw=",
+    "h1:lxezrKmOiQIySHAM+os8qLVq7hqufDr8h3Hpzvsk+78=",
+    "h1:lzRqBJAG+NETxHbEZUJ/YP3RMEjZBinTX7VmgH3lw60=",
+    "h1:tdSNWK5ApqUsgbdYieyeYLTu6nIZUV3hR1oFqUfAuGo=",
+    "h1:xedet8yH/zI2CfdxsGlK0nlFWc/Bp61yrWsEa3fHB8g=",
     "zh:03f1114cc20b8913523735ab76e0f0a2b16ce13c92923a53304bf85f07fc0dbc",
     "zh:105b678ee72322a3067f105d7e05e940f6143238f377f6e87ff4ec909246ac2a",
     "zh:55f3bbf13ea18cbace61a706566a80f25f33fe2b1780b6f3d7b582af2a05b6d2",

@@ -1,0 +1,62 @@
+---
+title: "Blue"
+description: "Understand how Blue governs coding-agent configuration and dynamically distributes extensions."
+icon: "shield-halved"
+---
+
+Blue is an open-source wrapper for coding-agent command-line tools. It lets an organization publish one policy, dynamically distribute or revoke approved extensions and MCP servers, reconcile that policy onto developer machines, optionally route inference through its own inference gateway, and optionally capture native session transcripts. Blue does not bundle the upstream gateway: LiteLLM is the first and currently supported integration.
+
+It supports Codex, Claude Code, Kimi Code, and OpenCode. Developers keep each agent's native terminal experience: arguments, terminal UI, signals, and exit status pass through the wrapper.
+
+Blue lets an organization adopt multiple agents, model providers, and self-hosted inference while still managing policy, identity, credentials, and activity in one place. Read [Why Blue](https://bluee.sh/manifesto) for the full case for a metaharness and the principles that shape the project.
+
+<Columns cols={3}>
+  <Card title="Why Blue" icon="compass" href="https://bluee.sh/manifesto">
+    Understand the governance problem Blue is designed to solve.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/0.1.0/quickstart">
+    Deploy the services, connect the CLI, and launch a governed agent.
+  </Card>
+  <Card title="For operators" icon="server" href="/0.1.0/deployment/runtime-contract">
+    Map the workload contract onto Kubernetes, your scheduler, or virtual machines.
+  </Card>
+</Columns>
+
+## What it controls
+
+- Which supported harnesses are allowed.
+- Managed model, approval, sandbox, and harness-specific settings.
+- Additive organization-managed MCP server definitions.
+- Digest-pinned skills, plugins, hooks, subagent definitions, and helper binaries.
+- Gateway routing with session-bound inference JWTs.
+- Opt-in native session capture and upload to S3-compatible storage.
+
+## Dynamic extensions are a core capability
+
+Operators can publish extension and MCP changes from the dashboard without reinstalling Blue or the native coding agents. Each saved change creates a governance revision. Clients reconcile it during `blue apply`, before a governed launch, or during daemon polling; login only updates authentication.
+
+A revision can:
+
+- Add or remove organization-managed MCP servers from Blue's launch-scoped overlays. A developer's local MCP with the same name always wins and is never overwritten or removed.
+- Activate, update, or deactivate digest-pinned skills, native plugins, hooks, subagents, OpenCode plugin modules, and platform helper binaries.
+- Deploy an extension to everyone or selected members, with mappings and settings chosen for each compatible harness.
+- Repair missing or changed managed content. When an extension is removed, Blue unregisters it; unchanged Blue-owned content is cleaned up, while locally modified content is quarantined instead of deleted.
+
+See [Managed packages](/0.1.0/admin/managed-packages) for publishing and removal, and [Configuration lifecycle](/0.1.0/concepts/configuration) for reconciliation behavior.
+
+## What it does not control
+
+Blue is configuration governance, not an operating-system sandbox. A determined local user can still edit files or invoke an agent directly unless separate device-management controls prevent it. Direct agent invocations use native user configuration; governed overlays are loaded only through `blue` or installed shims.
+
+<Warning>
+  Session capture can contain prompts, responses, tool inputs, source paths, and secrets present in native transcripts. Operators must disclose collection and retention and restrict access to the stored artifacts.
+</Warning>
+
+## Choose an operating mode
+
+| Mode | Inference | Credentials on the client |
+| --- | --- | --- |
+| Governance-only | Agent talks directly to its configured provider | Native agent credentials |
+| Bring your own gateway | Agent talks to the Blue inference proxy, which forwards to your gateway | A session-bound inference JWT |
+
+Read [Architecture](/0.1.0/concepts/architecture) for the complete data flow.

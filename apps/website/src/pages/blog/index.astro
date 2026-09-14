@@ -1,0 +1,32 @@
+---
+import { getCollection } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import SiteHeader from "../../components/SiteHeader.astro";
+import SiteFooter from "../../components/SiteFooter.astro";
+import BlogPostCard from "../../components/BlogPostCard.astro";
+import { newestFirst } from "../../lib/blog";
+
+const posts = newestFirst(await getCollection("blog"));
+---
+
+<BaseLayout
+  title="Blog | Blue"
+  description="Ideas and practical guidance for governing coding agents, inference gateways, and the infrastructure around them."
+>
+  <SiteHeader current="blog" />
+
+  <main id="main-content" class="blog-index-page">
+    <header class="blog-index-hero reveal">
+      <h1>Notes on governing agentic coding.</h1>
+      <p>Architecture, operations, and lessons from building a common control plane for coding agents.</p>
+    </header>
+
+    <section class="blog-archive" aria-label="Blog posts">
+      <div class="blog-grid">
+        {posts.map((post) => <BlogPostCard post={post} />)}
+      </div>
+    </section>
+  </main>
+
+  <SiteFooter class="blog-footer" />
+</BaseLayout>

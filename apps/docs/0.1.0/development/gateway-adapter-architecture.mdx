@@ -1,0 +1,245 @@
+---
+title: "Gateway adapter architecture"
+description: "Add a compiled inference gateway integration across Blue's client, proxy, and credential lifecycle."
+icon: "route"
+---
+
+Blue uses one compiled `GatewayAdapter` registry for client configuration and
+inference-proxy behavior. Adding an adapter makes the gateway type recognizable;
+a production integration also needs a provisioner, deployment configuration,
+and end-to-end evidence.
+
+Gateway adapters are trusted, in-tree Rust code. An organization selects one
+with `gateway.type`, but policy cannot load executable adapter behavior at
+runtime. Unknown types fail during Control API and inference-proxy startup and
+again at the client boundary.
+
+## Two gateway flows
+
+The control plane turns an operator choice into agent configuration:
+
+```text
+blue.yaml gateway.type
+  → Control API validates the compiled registry
+  → personalized GatewayConfig { type, proxy_url, token, auth_style }
+  → client registry computes GatewayRoute { base_url, token }
+  → version-owned HarnessImplementation adds auth placement and wire API
+  → gh-config commits the ReconcilePlan
+```
+
+The data plane validates that inference JWT and resolves an upstream credential:
+
+```text
+agent request with session-bound inference JWT
+  → inference proxy selects HARNESS_GATEWAY_TYPE from the same registry
+  → Control API resolves the encrypted user credential
+  → adapter maps path and credential placement
+  → upstream gateway
+  → adapter classifies bounded invalid-credential responses
+  → Control API invalidates and reconciles the credential
+```
+
+<Warning>
+  `HARNESS_GATEWAY_TYPE` is required by the inference-proxy process. It must
+  match `gateway.type`; there is no implicit LiteLLM fallback.
+</Warning>
+
+## Contract ownership
+
+| Layer | Owns | Must not own |
+| --- | --- | --- |
+| `gh-service::GatewayConfig` | Shared client policy fields | Provider administrator credentials or executable behavior |
+| `gh-gateway::GatewayAdapter` | Registry identity, client route validation, upstream path/auth policy, and invalid-credential classification | Network I/O, harness files, or credential bytes |
+| `HarnessImplementation` | Version-specific inference-token placement and agent wire protocol | Gateway-type dispatch or upstream-provider behavior |
+| Inference proxy | Streaming, limits, credential resolution, request forwarding, and application of adapter decisions | Provider administrator operations |
+| `GatewayProvisioner` | Creating, retaining, rotating, and revoking upstream user credentials | Agent configuration or inference forwarding |
+| Control API | Server-selected gateway mode, policy personalization, encrypted credentials, and startup validation | Enabling gateway mode from client input |
+
+`gateway.type` selects the compiled adapter. `gateway.provisioner.type` selects
+credential lifecycle behavior and may use a different name.
+
+## Compiled adapter contract
+
+Every method is pure, so the same static adapter can be used safely by all Blue
+binaries:
+
+```rust
+pub trait GatewayAdapter: Send + Sync {
+    fn kind(&self) -> &'static str;
+    fn client_route(&self, gateway: &GatewayConfig) -> Result<GatewayRoute, GhError>;
+    fn upstream_path(&self, path_and_query: &str) -> Result<String, GhError>;
+    fn upstream_credential_placement(&self) -> UpstreamCredentialPlacement;
+    fn inspect_response_status(&self, status: u16) -> bool;
+    fn classify_invalid_credential(
+        &self,
+        status: u16,
+        body: &[u8],
+    ) -> Option<InvalidCredentialReason>;
+}
+```
+
+`GatewayRoute` contains only the Blue inference-proxy URL and inference JWT. The
+dispatcher attaches the harness-owned `AuthPlacement` and `wire_api` afterward,
+so a gateway cannot replace those decisions. Route and wiring debug output
+redacts the token.
+
+`UpstreamCredentialPlacement` declares bearer authentication or a named header;
+it never contains the credential itself. The proxy strips `Authorization`,
+`X-API-Key`, and the adapter-declared credential header before applying exactly
+one resolved credential. Named credential headers cannot be hop-by-hop headers,
+`Host`, or `Content-Length`.
+
+`InvalidCredentialReason` is a provider-neutral closed enum: `NotFound`,
+`Blocked`, or `Revoked`. Return a reason only when the upstream response proves
+the credential is unusable. Expiration remains a Control API decision.
+`inspect_response_status` prevents the proxy from buffering ordinary streaming
+responses. For selected statuses, the body is inspected only when its declared
+length is at most 64 KiB.
+
+<Note>
+  During the compatibility release, internal service payloads carry the new
+  `upstream_credential` and `reason` fields alongside the deprecated
+  `virtual_key` and `classification` fields. New services accept either shape
+  and reject conflicting dual values. Do not use the deprecated names in new
+  integrations.
+</Note>
+
+The source layout is:
+
+```text
+crates/gh-gateway/src/
+├── lib.rs       # contract, registry, lookup, dispatch, shared types
+├── litellm.rs   # complete LiteLLM behavior
+└── <gateway>.rs # one module for each additional compiled adapter
+```
+
+## Choose the integration path
+
+<Tabs>
+  <Tab title="Bearer-compatible gateway">
+    Use the existing bearer placement when the upstream accepts the resolved
+    credential as `Authorization: Bearer …`. Return the incoming path unchanged
+    when the gateway exposes the same API paths as the agent. You still must
+    define which response statuses are inspected and map only definitive
+    invalid-credential responses to `NotFound`, `Blocked`, or `Revoked`.
+  </Tab>
+  <Tab title="Different upstream behavior">
+    Select a named credential header or map the incoming path in the adapter.
+    If the existing pure output types cannot express the behavior, extend the
+    shared contract and the proxy application code together. Do not add a
+    gateway-name branch directly to the proxy or a harness writer.
+  </Tab>
+</Tabs>
+
+## Add a gateway
+
+<Steps>
+  <Step title="Specify the upstream behavior">
+    Choose a stable lowercase key. Record supported agent protocols, upstream
+    paths, credential placement, and the exact status/body evidence that proves
+    a credential is invalid. Treat rate limits, model denial, and transient
+    authentication infrastructure failures as ordinary upstream responses, not
+    invalid credentials.
+  </Step>
+  <Step title="Implement the complete adapter">
+    Add `crates/gh-gateway/src/<gateway>.rs` and implement every method. Validate
+    required client runtime fields in `client_route`; never perform I/O or store
+    administrator configuration in the adapter. Add one static instance to
+    `GATEWAY_ADAPTERS` in `lib.rs`.
+  </Step>
+  <Step title="Provide credential lifecycle support">
+    Prefer the existing digest-pinned executable protocol when it can implement
+    the provider's ensure and revoke calls. Follow
+    [Custom gateway provisioners](/0.1.0/admin/custom-gateway-provisioners). Add a
+    built-in `GatewayProvisioner` module and Control API Cargo feature only when
+    the provider integration must ship in the public server binary.
+  </Step>
+  <Step title="Extend policy only when necessary">
+    Reuse `type`, `proxy_url`, `token`, and `auth_style` when possible.
+    `auth_style` is retained for compatibility and must be `bearer`; it describes
+    agent-to-Blue authentication, not the adapter's upstream credential header.
+    New non-secret client fields require coordinated changes to `gh-service`,
+    the canonical OpenAPI contract, Control API personalization, and the docs
+    snapshot. Provider credentials never enter client policy.
+  </Step>
+  <Step title="Wire the deployment">
+    Set the same adapter key in `gateway.type` and `HARNESS_GATEWAY_TYPE`.
+    Compose passes the latter to the proxy. Helm uses `blue.gatewayType` and
+    injects it into both the Control API and proxy; the value is required when
+    `blue.enableInferenceProxy=true`. Add the upstream URL, provisioner
+    configuration, and secrets through the existing deployment mechanisms.
+  </Step>
+  <Step title="Certify the integration">
+    Add registry and adapter unit tests, proxy forwarding tests, provisioner
+    contract tests, deployment rendering checks, gateway-mode golden plans for
+    every harness, and an end-to-end request through the real gateway. Retain
+    governance-only coverage to prove it gains no gateway dependency.
+  </Step>
+</Steps>
+
+## Change checklist
+
+| Area | Required change |
+| --- | --- |
+| Shared adapter | New module, static registry entry, pure behavior tests, and supported-key assertion |
+| Control API | No dispatch branch; shared registry validation recognizes the new entry automatically |
+| Inference proxy | No gateway-name branch; extend only generic application code when the public adapter outputs are insufficient |
+| Provisioning | Executable provisioner artifact and digest, or a feature-gated built-in implementation |
+| Deployment | Matching gateway type, upstream URL, proxy settings, provisioner, secrets, and gateway-enabled fixtures |
+| Public contract | Update and synchronize OpenAPI only when the client policy shape changes |
+| Documentation | Configuration example, support statement, upstream prerequisites, and troubleshooting evidence |
+
+## Verification
+
+At minimum, demonstrate:
+
+- Unique, nonempty lowercase registry keys and lookup from all three consumers.
+- Rejection of unknown gateway types and non-`bearer` client `auth_style`.
+- Correct client route normalization without exposing an inference JWT in debug
+  output.
+- Correct upstream path and credential header, with incoming authentication
+  headers removed.
+- Unchanged streaming for uninspected responses and bounded inspection for
+  adapter-selected statuses.
+- Precise provider-neutral invalid-credential reasons without treating
+  authorization or availability errors as revoked credentials.
+- Replacement—not appending—of an attacker-supplied adapter credential header.
+- New-only, legacy-only, matching dual, and conflicting dual internal wire
+  payloads during the compatibility release.
+- Provision, retain, rotate, revoke, invalidate, and bounded-recovery behavior
+  without credentials in logs.
+- Successful inference and user attribution through every supported harness.
+
+Run focused checks while developing:
+
+```bash
+cargo test -p gh-gateway
+cargo test -p control-api --lib
+cargo test -p inference-proxy --bin inference-proxy
+cargo test -p gh-config --lib
+helm lint deploy/helm
+helm template blue deploy/helm \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.mode=insecure-http
+cd apps/docs
+npm run sync:contract # only after changing the canonical OpenAPI contract
+npm run validate
+```
+
+Before review, run the complete workspace checks from
+[Contributing](/0.1.0/development/contributing) and the relevant gateway E2E
+journey.
+
+## Invariants
+
+- The server decides whether gateway mode exists; a client may only downgrade
+  to governance-only mode.
+- `gh-config` remains the only writer of agent configuration files.
+- Session-bound inference JWTs may reach clients. Upstream credentials and administrator secrets
+  may not.
+- Adapter decisions are pure and contain no credential bytes.
+- Governance-only clients gain no hard dependency on the proxy, provisioner,
+  database, Redis, or upstream gateway.
+- Native CLI arguments, terminal behavior, signals, resize handling, and exit
+  codes remain unchanged.

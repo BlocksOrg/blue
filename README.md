@@ -77,9 +77,9 @@ flow, read the [Quickstart](https://docs.bluee.sh/next/quickstart#install-the-wo
 ## Deploy Blue
 
 Blue consists of the workstation CLI plus a self-hosted control plane. The
-reference deployment includes the dashboard, Control API, PostgreSQL-backed
-state, S3-compatible object storage, documentation, and an optional inference
-proxy.
+reference deployment includes the dashboard, Control API, a singleton
+background worker, PostgreSQL-backed state, S3-compatible object storage, and
+an optional inference proxy.
 
 ### Evaluate locally with Docker Compose
 
@@ -91,12 +91,16 @@ docker compose up --build
 
 Once the services are healthy:
 
-| Service | Local URL |
+| Service | Local address |
 | --- | --- |
 | Dashboard | <http://127.0.0.1:3000> |
-| Documentation | <http://127.0.0.1:3001> |
-| Website | <http://127.0.0.1:3002> |
 | Control API | <http://127.0.0.1:8080> |
+| PostgreSQL | `127.0.0.1:5433` |
+| MinIO API | <http://127.0.0.1:9000> |
+| MinIO console | <http://127.0.0.1:9001> |
+
+The optional inference proxy (<http://127.0.0.1:8081>) starts only with the
+`gateway` Compose profile.
 
 The local bootstrap account is `admin@example.com` with password
 `change-me-in-production`. Override
@@ -178,6 +182,7 @@ Learn more in the documentation for
 | `blue reset [--yes]` | Disconnect the active deployment, retaining non-secret tenant state for a later reconnect. |
 | `blue login` / `blue logout` | Start or end the authenticated session. |
 | `blue doctor` | Show detected harnesses, versions, and policy eligibility. |
+| `blue agent [name]` | Show or change the preferred coding agent. |
 | `blue status` | Show desired and applied revisions, package state, and health. |
 | `blue verify` | Exit non-zero when managed files or policy are stale. |
 | `blue <agent> [args]` | Launch a supported native CLI through Blue. |
@@ -196,7 +201,7 @@ backend services:
 crates/          Blue CLI, policy client, configuration adapters, launcher,
                  gateway integration, agent daemon, and telemetry
 services/        Control API and optional inference proxy
-apps/            Administration dashboard and Mintlify documentation
+apps/            Administration dashboard, Mintlify documentation, and website
 deploy/          Compose, Helm, OpenTofu, deployment starter, and OpenAPI
 tests/e2e/       Hermetic deployment and cross-service journeys
 ```

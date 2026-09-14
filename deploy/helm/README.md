@@ -64,6 +64,15 @@ startup and `/health/schema` verify every embedded migration and checksum. See
 [the migration policy](../runbooks/migrations.md) and the
 [production readiness runbook](../runbooks/production-readiness.md).
 
+`service.annotations` is applied to the dashboard, Control API, and
+inference-proxy Services, with `service.{dashboard,controlApi,inferenceProxy}.annotations`
+merged over it per Service. Cloud load balancers take their scheme, target type,
+and health checks from these, so `service.type=LoadBalancer` and some ingress
+controllers are unconfigurable without them. The two backends disagree on health
+path — the dashboard answers `/api/health`, the Control API `/ready` — which is
+what the per-Service maps are for. The internal Control API Service on port 8082
+carries none of them; it is never externally fronted.
+
 Production NetworkPolicies default-deny ingress and egress, then permit only the
 documented workload flows. Configure database, Redis, object-store, OIDC,
 package-host, and upstream-gateway CIDRs under `networkPolicy`; standard
