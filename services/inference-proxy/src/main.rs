@@ -2959,18 +2959,20 @@ mod tests {
 
     #[test]
     fn half_a_split_pair_names_the_missing_half() {
-        let missing_key = identity_from(&[("HARNESS_PROXY_CLIENT_CERT_FILE", CERT)])
-            .expect_err("cert without key must fail");
-        assert!(
-            missing_key.contains("HARNESS_PROXY_CLIENT_KEY_FILE"),
-            "{missing_key}"
-        );
-        let missing_cert = identity_from(&[("HARNESS_PROXY_CLIENT_KEY_FILE", KEY)])
-            .expect_err("key without cert must fail");
-        assert!(
-            missing_cert.contains("HARNESS_PROXY_CLIENT_CERT_FILE"),
-            "{missing_cert}"
-        );
+        for (configured, absent) in [
+            (
+                "HARNESS_PROXY_CLIENT_CERT_FILE",
+                "HARNESS_PROXY_CLIENT_KEY_FILE",
+            ),
+            (
+                "HARNESS_PROXY_CLIENT_KEY_FILE",
+                "HARNESS_PROXY_CLIENT_CERT_FILE",
+            ),
+        ] {
+            let error =
+                identity_from(&[(configured, CERT)]).expect_err("half a pair must be rejected");
+            assert!(error.contains(absent), "{error}");
+        }
     }
 
     #[test]
