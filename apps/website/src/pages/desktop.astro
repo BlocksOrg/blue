@@ -1,0 +1,37 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+import SiteFooter from "../components/SiteFooter.astro";
+---
+
+<BaseLayout
+  title="Blue Desktop | Coming soon"
+  description="Blue Desktop is an upcoming MIT-licensed desktop app for governed coding agents, metaharnesses, and organization-managed plugins."
+>
+  <SiteHeader />
+
+  <main id="main-content" class="desktop-page">
+    <article class="desktop-teaser">
+      <header class="desktop-teaser-header reveal">
+        <p class="section-label hero-subheader">Coming soon</p>
+        <h1>Blue Desktop</h1>
+        <p class="desktop-teaser-lede">
+          A desktop home for governed AI work. Blue Desktop will give organizations a familiar experience comparable to ChatGPT Desktop and Claude Desktop, while keeping agent choice and governance open.
+        </p>
+      </header>
+
+      <section class="desktop-capabilities reveal reveal-delay-1" aria-labelledby="desktop-capabilities-heading">
+        <h2 id="desktop-capabilities-heading">Built around the tools teams already use.</h2>
+        <ul>
+          <li><strong>Multiple metaharnesses.</strong> Support Blue and other metaharnesses that coordinate governed coding-agent workflows.</li>
+          <li><strong>Native agent binaries.</strong> Discover and launch existing coding-agent binaries on <code>PATH</code>, with optional arguments and commands.</li>
+          <li><strong>MIT open source.</strong> Inspect, adapt, and self-host the desktop app under the MIT License.</li>
+          <li><strong>A familiar desktop experience.</strong> Offer an open-source alternative to ChatGPT Desktop and Claude Desktop without locking teams into one provider.</li>
+          <li><strong>Compatible plugin hubs.</strong> Integrate with Blue-compatible plugin hubs for organization-approved plugins and tooling.</li>
+        </ul>
+      </section>
+    </article>
+  </main>
+
+  <SiteFooter class="desktop-footer" />
+</BaseLayout>
