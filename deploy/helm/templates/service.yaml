@@ -2,6 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "blue.fullname" . }}-dashboard
+  {{- include "blue.serviceAnnotations" (dict "shared" .Values.service.annotations "component" .Values.service.dashboard.annotations) }}
 spec:
   type: {{ .Values.service.type }}
   selector:
@@ -13,6 +14,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "blue.fullname" . }}-control-api
+  {{- include "blue.serviceAnnotations" (dict "shared" .Values.service.annotations "component" .Values.service.controlApi.annotations) }}
 spec:
   type: {{ .Values.service.type }}
   selector:
@@ -36,6 +38,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "blue.fullname" . }}-inference-proxy
+  {{- include "blue.serviceAnnotations" (dict "shared" .Values.service.annotations "component" .Values.service.inferenceProxy.annotations) }}
 spec:
   type: {{ .Values.service.type }}
   selector:
