@@ -7,6 +7,12 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+# An attached VPC's CIDR is not an input, so read it back for the vpc_cidr output.
+data "aws_vpc" "attached" {
+  count = local.create_vpc ? 0 : 1
+  id    = var.vpc_id
+}
+
 resource "aws_vpc" "this" {
   count                = local.create_vpc ? 1 : 0
   cidr_block           = var.vpc_cidr
