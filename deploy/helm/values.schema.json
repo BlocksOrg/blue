@@ -225,6 +225,7 @@
       "required": ["enabled", "databaseCidrs", "redisCidrs", "externalHttpsCidrs"],
       "properties": {
         "enabled": { "type": "boolean" },
+        "ingressCidrs": { "type": "array", "items": { "type": "string" } },
         "databaseCidrs": { "type": "array", "items": { "type": "string" } },
         "databasePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "redisCidrs": { "type": "array", "items": { "type": "string" } },
