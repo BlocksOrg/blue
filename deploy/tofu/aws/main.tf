@@ -1,12 +1,13 @@
-data "aws_eks_cluster" "this" { name = var.eks_cluster_name }
-
-locals {
-  oidc_issuer   = data.aws_eks_cluster.this.identity[0].oidc[0].issuer
-  oidc_subject  = "system:serviceaccount:${var.kubernetes_namespace}:${var.kubernetes_service_account}"
-  resource_name = substr(var.name, 0, 32)
+# Read only when attaching to a cluster this module did not create; see eks.tf.
+data "aws_eks_cluster" "this" {
+  count = local.create_cluster ? 0 : 1
+  name  = var.eks_cluster_name
 }
 
-data "aws_iam_openid_connect_provider" "eks" { url = local.oidc_issuer }
+data "aws_iam_openid_connect_provider" "eks" {
+  count = local.create_cluster ? 0 : 1
+  url   = local.oidc_issuer
+}
 
 resource "aws_kms_key" "blue" {
   description             = "Blue deployment data"
@@ -14,15 +15,33 @@ resource "aws_kms_key" "blue" {
   enable_key_rotation     = true
 }
 resource "aws_kms_alias" "blue" {
-  name          = "alias/${var.name}"
+  name          = "alias/${local.name_prefix}"
   target_key_id = aws_kms_key.blue.key_id
 }
 
-resource "aws_s3_bucket" "packages" { bucket_prefix = "${var.name}-packages-" }
-resource "aws_s3_bucket" "sessions" { bucket_prefix = "${var.name}-sessions-" }
+# ---------------------------------------------------------------------------
+# Object storage — var.include_bucket. The chart's bundled MinIO replaces this
+# for evaluation clusters; production keeps S3.
+# ---------------------------------------------------------------------------
+resource "aws_s3_bucket" "packages" {
+  #checkov:skip=CKV_AWS_21:versioning is attached by aws_s3_bucket_versioning.blue; checkov drops graph edges into count-guarded resources
+  #checkov:skip=CKV_AWS_145:KMS SSE is attached by aws_s3_bucket_server_side_encryption_configuration.blue
+  #checkov:skip=CKV2_AWS_6:the public access block is attached by aws_s3_bucket_public_access_block.blue
+  #checkov:skip=CKV2_AWS_61:lifecycle rules are attached by aws_s3_bucket_lifecycle_configuration.packages
+  count         = var.include_bucket ? 1 : 0
+  bucket_prefix = "${local.bucket_name}-packages-"
+}
+resource "aws_s3_bucket" "sessions" {
+  #checkov:skip=CKV_AWS_21:versioning is attached by aws_s3_bucket_versioning.blue; checkov drops graph edges into count-guarded resources
+  #checkov:skip=CKV_AWS_145:KMS SSE is attached by aws_s3_bucket_server_side_encryption_configuration.blue
+  #checkov:skip=CKV2_AWS_6:the public access block is attached by aws_s3_bucket_public_access_block.blue
+  #checkov:skip=CKV2_AWS_61:lifecycle rules are attached by aws_s3_bucket_lifecycle_configuration.sessions
+  count         = var.include_bucket ? 1 : 0
+  bucket_prefix = "${local.bucket_name}-sessions-"
+}
 
 resource "aws_s3_bucket_public_access_block" "blue" {
-  for_each                = { packages = aws_s3_bucket.packages.id, sessions = aws_s3_bucket.sessions.id }
+  for_each                = local.buckets
   bucket                  = each.value
   block_public_acls       = true
   block_public_policy     = true
@@ -31,7 +50,7 @@ resource "aws_s3_bucket_public_access_block" "blue" {
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "blue" {
-  for_each = { packages = aws_s3_bucket.packages.id, sessions = aws_s3_bucket.sessions.id }
+  for_each = local.buckets
   bucket   = each.value
   rule {
     apply_server_side_encryption_by_default {
@@ -42,18 +61,16 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "blue" {
   }
 }
 
-resource "aws_s3_bucket_versioning" "packages" {
-  bucket = aws_s3_bucket.packages.id
-  versioning_configuration { status = "Enabled" }
-}
-resource "aws_s3_bucket_versioning" "sessions" {
-  bucket = aws_s3_bucket.sessions.id
+resource "aws_s3_bucket_versioning" "blue" {
+  for_each = local.buckets
+  bucket   = each.value
   versioning_configuration { status = "Enabled" }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "sessions" {
-  bucket     = aws_s3_bucket.sessions.id
-  depends_on = [aws_s3_bucket_versioning.sessions]
+  count      = var.include_bucket ? 1 : 0
+  bucket     = aws_s3_bucket.sessions[0].id
+  depends_on = [aws_s3_bucket_versioning.blue]
   rule {
     id     = "expire-sessions"
     status = "Enabled"
@@ -70,8 +87,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "sessions" {
   }
 }
 resource "aws_s3_bucket_lifecycle_configuration" "packages" {
-  bucket     = aws_s3_bucket.packages.id
-  depends_on = [aws_s3_bucket_versioning.packages]
+  count      = var.include_bucket ? 1 : 0
+  bucket     = aws_s3_bucket.packages[0].id
+  depends_on = [aws_s3_bucket_versioning.blue]
   rule {
     id     = "package-housekeeping"
     status = "Enabled"
@@ -81,18 +99,26 @@ resource "aws_s3_bucket_lifecycle_configuration" "packages" {
   }
 }
 
+# ---------------------------------------------------------------------------
+# PostgreSQL — var.include_database. The chart's bundled StatefulSet replaces
+# this for evaluation clusters; production validation rejects that, so leave
+# this on for any deployment that sets blue.production=true.
+# ---------------------------------------------------------------------------
 resource "aws_db_subnet_group" "blue" {
-  name       = var.name
-  subnet_ids = var.private_subnet_ids
+  count      = var.include_database ? 1 : 0
+  name       = local.name_prefix
+  subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "database" {
-  name_prefix = "${var.name}-database-"
+  #checkov:skip=CKV2_AWS_5:attached to aws_db_instance.blue via vpc_security_group_ids
+  count       = var.include_database ? 1 : 0
+  name_prefix = "${local.name_prefix}-database-"
   description = "PostgreSQL access from Blue workloads"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.vpc_id
 }
 resource "aws_vpc_security_group_ingress_rule" "database" {
-  for_each                     = var.database_client_security_group_ids
-  security_group_id            = aws_security_group.database.id
+  for_each                     = local.database_client_sgs
+  security_group_id            = aws_security_group.database[0].id
   referenced_security_group_id = each.value
   from_port                    = 5432
   to_port                      = 5432
@@ -100,18 +126,38 @@ resource "aws_vpc_security_group_ingress_rule" "database" {
   description                  = "PostgreSQL from an approved Blue workload security group"
 }
 
+# Pods live in the cluster security group, so a created cluster grants itself
+# access. A count keeps the unknown-at-plan-time id out of a for_each.
+resource "aws_vpc_security_group_ingress_rule" "database_cluster" {
+  count                        = local.create_cluster && var.include_database ? 1 : 0
+  security_group_id            = aws_security_group.database[0].id
+  referenced_security_group_id = aws_eks_cluster.blue[0].vpc_config[0].cluster_security_group_id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+  description                  = "PostgreSQL from the Blue EKS cluster security group"
+}
+
+# ---------------------------------------------------------------------------
+# Redis — var.include_redis. Blue itself never reads HARNESS_REDIS_URL; it is
+# published for the organization-operated LiteLLM gateway used in gateway mode.
+# Governance-only deployments should set this to false.
+# ---------------------------------------------------------------------------
 resource "aws_elasticache_subnet_group" "blue" {
-  name       = var.name
-  subnet_ids = var.private_subnet_ids
+  count      = var.include_redis ? 1 : 0
+  name       = local.name_prefix
+  subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "redis" {
-  name_prefix = "${var.name}-redis-"
+  #checkov:skip=CKV2_AWS_5:attached to aws_elasticache_replication_group.blue via security_group_ids
+  count       = var.include_redis ? 1 : 0
+  name_prefix = "${local.name_prefix}-redis-"
   description = "Redis access from Blue workloads"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.vpc_id
 }
 resource "aws_vpc_security_group_ingress_rule" "redis" {
-  for_each                     = var.redis_client_security_group_ids
-  security_group_id            = aws_security_group.redis.id
+  for_each                     = local.redis_client_sgs
+  security_group_id            = aws_security_group.redis[0].id
   referenced_security_group_id = each.value
   from_port                    = 6379
   to_port                      = 6379
@@ -119,15 +165,18 @@ resource "aws_vpc_security_group_ingress_rule" "redis" {
   description                  = "Redis TLS from an approved Blue workload security group"
 }
 
-locals {
-  # Generated secret contract: length of the bootstrap admin password. Kept as a
-  # named local so it is a single source of truth and can be asserted by the CI
-  # "Verify generated secret contracts" check (which cannot read managed-resource
-  # attributes without state, but can evaluate a local).
-  bootstrap_admin_password_length = 48
+resource "aws_vpc_security_group_ingress_rule" "redis_cluster" {
+  count                        = local.create_cluster && var.include_redis ? 1 : 0
+  security_group_id            = aws_security_group.redis[0].id
+  referenced_security_group_id = aws_eks_cluster.blue[0].vpc_config[0].cluster_security_group_id
+  from_port                    = 6379
+  to_port                      = 6379
+  ip_protocol                  = "tcp"
+  description                  = "Redis TLS from the Blue EKS cluster security group"
 }
 
 resource "random_password" "database" {
+  count   = var.include_database ? 1 : 0
   length  = 32
   special = false
 }
@@ -140,11 +189,13 @@ resource "random_password" "bootstrap_admin" {
   special = false
 }
 resource "random_password" "redis_auth" {
+  count   = var.include_redis ? 1 : 0
   length  = 48
   special = false
 }
 
 resource "aws_elasticache_replication_group" "blue" {
+  count                      = var.include_redis ? 1 : 0
   replication_group_id       = local.resource_name
   description                = "Blue session and invalidation cache"
   node_type                  = var.redis_node_type
@@ -157,9 +208,9 @@ resource "aws_elasticache_replication_group" "blue" {
   at_rest_encryption_enabled = true
   kms_key_id                 = aws_kms_key.blue.arn
   transit_encryption_enabled = true
-  auth_token                 = random_password.redis_auth.result
-  subnet_group_name          = aws_elasticache_subnet_group.blue.name
-  security_group_ids         = [aws_security_group.redis.id]
+  auth_token                 = random_password.redis_auth[0].result
+  subnet_group_name          = aws_elasticache_subnet_group.blue[0].name
+  security_group_ids         = [aws_security_group.redis[0].id]
   snapshot_retention_limit   = var.redis_snapshot_retention_days
   apply_immediately          = false
 }
@@ -174,15 +225,18 @@ data "aws_iam_policy_document" "rds_monitoring_assume" {
   }
 }
 resource "aws_iam_role" "rds_monitoring" {
-  name_prefix        = "${var.name}-rds-monitoring-"
+  count              = var.include_database ? 1 : 0
+  name_prefix        = "${local.iam_name}-rds-monitoring-"
   assume_role_policy = data.aws_iam_policy_document.rds_monitoring_assume.json
 }
 resource "aws_iam_role_policy_attachment" "rds_monitoring" {
-  role       = aws_iam_role.rds_monitoring.name
+  count      = var.include_database ? 1 : 0
+  role       = aws_iam_role.rds_monitoring[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
 }
 
 resource "aws_db_instance" "blue" {
+  count                               = var.include_database ? 1 : 0
   identifier                          = local.resource_name
   engine                              = "postgres"
   engine_version                      = "16"
@@ -192,9 +246,9 @@ resource "aws_db_instance" "blue" {
   kms_key_id                          = aws_kms_key.blue.arn
   db_name                             = var.database_name
   username                            = var.database_username
-  password                            = random_password.database.result
-  db_subnet_group_name                = aws_db_subnet_group.blue.name
-  vpc_security_group_ids              = [aws_security_group.database.id]
+  password                            = random_password.database[0].result
+  db_subnet_group_name                = aws_db_subnet_group.blue[0].name
+  vpc_security_group_ids              = [aws_security_group.database[0].id]
   backup_retention_period             = var.database_backup_retention_days
   copy_tags_to_snapshot               = true
   deletion_protection                 = var.deletion_protection
@@ -206,24 +260,18 @@ resource "aws_db_instance" "blue" {
   iam_database_authentication_enabled = true
   enabled_cloudwatch_logs_exports     = ["postgresql", "upgrade"]
   monitoring_interval                 = 60
-  monitoring_role_arn                 = aws_iam_role.rds_monitoring.arn
+  monitoring_role_arn                 = aws_iam_role.rds_monitoring[0].arn
   performance_insights_enabled        = true
   performance_insights_kms_key_id     = aws_kms_key.blue.arn
 }
 
 resource "aws_secretsmanager_secret" "runtime" {
-  name_prefix = "${var.name}/runtime-"
+  name_prefix = "${local.name_prefix}/runtime-"
   kms_key_id  = aws_kms_key.blue.arn
 }
 resource "aws_secretsmanager_secret_version" "runtime" {
-  secret_id = aws_secretsmanager_secret.runtime.id
-  secret_string = jsonencode({
-    HARNESS_DATABASE_URL             = "postgres://${var.database_username}:${random_password.database.result}@${aws_db_instance.blue.address}:${aws_db_instance.blue.port}/${var.database_name}"
-    BETTER_AUTH_SECRET               = random_password.auth.result
-    HARNESS_BOOTSTRAP_ADMIN_EMAIL    = var.bootstrap_admin_email
-    HARNESS_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap_admin.result
-    HARNESS_REDIS_URL                = "rediss://default:${random_password.redis_auth.result}@${aws_elasticache_replication_group.blue.primary_endpoint_address}:6379/0"
-  })
+  secret_id     = aws_secretsmanager_secret.runtime.id
+  secret_string = jsonencode(local.runtime_secret)
 }
 
 data "aws_iam_policy_document" "assume" {
@@ -231,7 +279,7 @@ data "aws_iam_policy_document" "assume" {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
       type        = "Federated"
-      identifiers = [data.aws_iam_openid_connect_provider.eks.arn]
+      identifiers = [local.oidc_provider_arn]
     }
     condition {
       test     = "StringEquals"
@@ -246,17 +294,25 @@ data "aws_iam_policy_document" "assume" {
   }
 }
 resource "aws_iam_role" "blue" {
-  name_prefix        = "${var.name}-"
+  name_prefix        = "${local.iam_name}-"
   assume_role_policy = data.aws_iam_policy_document.assume.json
 }
 data "aws_iam_policy_document" "blue" {
-  statement {
-    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
-    resources = [aws_s3_bucket.packages.arn, aws_s3_bucket.sessions.arn]
+  # Without buckets the workload role carries KMS only, so both S3 statements
+  # are dynamic: an empty `resources` list is rejected at plan time.
+  dynamic "statement" {
+    for_each = var.include_bucket ? [1] : []
+    content {
+      actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+      resources = [aws_s3_bucket.packages[0].arn, aws_s3_bucket.sessions[0].arn]
+    }
   }
-  statement {
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.packages.arn}/*", "${aws_s3_bucket.sessions.arn}/*"]
+  dynamic "statement" {
+    for_each = var.include_bucket ? [1] : []
+    content {
+      actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+      resources = ["${aws_s3_bucket.packages[0].arn}/*", "${aws_s3_bucket.sessions[0].arn}/*"]
+    }
   }
   statement {
     actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]

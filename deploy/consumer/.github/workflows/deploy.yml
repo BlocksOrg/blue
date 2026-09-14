@@ -32,7 +32,11 @@ jobs:
       - run: tofu -chdir=infra/aws output -json helm_values > generated-values.json
       - run: docker build --build-arg BLUE_VERSION=0.1.0 -t "$IMAGE:${GITHUB_SHA}" .
       - run: docker push "$IMAGE:${GITHUB_SHA}"
-      - run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}"
+      # The module either created the cluster or attached to an existing one;
+      # either way it reports which, so the workflow needs no cluster variable.
+      - run: >-
+          aws eks update-kubeconfig --region "${{ vars.AWS_REGION }}"
+          --name "$(tofu -chdir=infra/aws output -raw cluster_name)"
       - name: Sync generated runtime secret
         run: |
           runtime_secret_arn="$(tofu -chdir=infra/aws output -raw runtime_secret_arn)"

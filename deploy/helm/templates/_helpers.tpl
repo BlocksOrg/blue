@@ -45,6 +45,18 @@ blue.existingSecret or blue.env like every other external dependency.
     secretKeyRef: { name: {{ $name | quote }}, key: AWS_SECRET_ACCESS_KEY, optional: false }
 {{- end }}
 {{- end }}
+{{/*
+Annotations for an externally reachable Service: the shared service.annotations
+map with the component's own overrides merged over it. Cloud load balancers read
+their scheme, target type and health checks from here, so a LoadBalancer or
+ingress-fronted install is unconfigurable without them.
+*/}}
+{{- define "blue.serviceAnnotations" -}}
+{{- with merge (deepCopy (default dict .component)) (default dict .shared) }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+{{- end }}
 {{- define "blue.image" -}}
 {{- if .Values.image.digest }}{{ printf "%s@%s" .Values.image.repository .Values.image.digest }}{{- else }}{{ printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}{{- end }}
 {{- end }}

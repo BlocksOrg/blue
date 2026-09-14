@@ -1,12 +1,46 @@
 aws_region                         = "us-west-2"
-name                               = "blue-production"
-eks_cluster_name                   = "platform-production"
-vpc_id                             = "vpc-0123456789abcdef0"
-private_subnet_ids                 = ["subnet-0123456789abcdef0", "subnet-abcdef01234567890"]
-database_client_security_group_ids = ["sg-0123456789abcdef0"]
-redis_client_security_group_ids    = ["sg-0123456789abcdef0"]
+name                               = "blue-eks"
+environment                        = "production"
+
+# Each dependency is optional; the defaults below create all three. Turn one off
+# to source it elsewhere — the Helm chart bundles evaluation-grade PostgreSQL and
+# MinIO. Nothing in Blue reads HARNESS_REDIS_URL (it is there for the
+# organization-operated LiteLLM gateway), so governance-only deployments should
+# set include_redis = false. The chart rejects its bundled datastores in
+# production, so a production stack keeps the database and buckets here. See
+# README.md.
+# include_database                   = true
+# include_bucket                     = true
+# include_redis                      = true
+
+# Cluster and network are create-or-reuse. Left unset, this module creates the
+# EKS cluster (Auto Mode), the VPC, and its subnets, and wires the cluster
+# security group into the datastores itself — nothing below is needed.
+#
+# Uncomment this block to attach to a platform cluster and VPC someone else
+# operates. The cluster must already have an IAM OIDC provider, the subnets must
+# span at least two AZs, and the security groups are the ones your pods run in.
+# eks_cluster_name                   = "platform-production"
+# vpc_id                             = "vpc-0123456789abcdef0"
+# private_subnet_ids                 = ["subnet-0123456789abcdef0", "subnet-abcdef01234567890"]
+# public_subnet_ids                  = ["subnet-0fedcba9876543210", "subnet-1fedcba9876543210"]
+# database_client_security_group_ids = ["sg-0123456789abcdef0"]
+# redis_client_security_group_ids    = ["sg-0123456789abcdef0"]
+
+# Narrow the public Kubernetes API endpoint to operator and CI egress, or close
+# it entirely where the VPC is reachable directly.
+# cluster_endpoint_public_access_cidrs = ["203.0.113.0/24"]
+# cluster_endpoint_public_access       = false
+
+# Name Blue on a hosted zone you own. The labels are relative to the zone, so
+# these give app.<zone> and api.<zone>. Pass alb_hostname on a second apply once
+# the chart's Ingress reports its load balancer, to create the records.
+# include_domain      = true
+# route53_zone_id     = "Z0123456789EXAMPLE"
+# dashboard_subdomain = "app"
+# api_subdomain       = "api"
+
 kubernetes_namespace               = "blue"
 kubernetes_service_account         = "blue"
-bootstrap_admin_email               = "operator@example.com"
-package_noncurrent_retention_days   = 90
-tags = { Environment = "production", Application = "blue" }
+bootstrap_admin_email              = "operator@example.com"
+package_noncurrent_retention_days  = 90
