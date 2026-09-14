@@ -30,6 +30,12 @@ spec:
       ports:
         - protocol: TCP
           port: {{ if eq $component "dashboard" }}3000{{ else }}8080{{ end }}
+    {{- range $.Values.networkPolicy.ingressCidrs }}
+    - from: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports:
+        - protocol: TCP
+          port: {{ if eq $component "dashboard" }}3000{{ else }}8080{{ end }}
+    {{- end }}
     {{- end }}
     {{- if eq $component "control-api" }}
     - from:
@@ -139,6 +145,10 @@ spec:
           podSelector:
             {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
       ports: [{ protocol: TCP, port: 8081 }]
+    {{- range .Values.networkPolicy.ingressCidrs }}
+    - from: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: 8081 }]
+    {{- end }}
     {{- if .Values.networkPolicy.monitoring.enabled }}
     - from:
         - namespaceSelector:

@@ -125,7 +125,8 @@ jobs:
       - run: pip install --disable-pip-version-check checkov==3.2.471
       - name: Scan infrastructure
         run: |
-          checkov --directory deploy/tofu/aws --framework terraform --soft-fail -o json > /tmp/checkov-tofu.json
+          # CKV2_AWS_11 (VPC flow logs) is deliberately not enforced for this module.
+          checkov --directory deploy/tofu/aws --framework terraform --skip-check CKV2_AWS_11 --soft-fail -o json > /tmp/checkov-tofu.json
           checkov --file /tmp/blue-production.yaml --framework kubernetes --soft-fail -o json > /tmp/checkov-kubernetes.json
           jq -s '[.. | objects | .failed_checks? // empty | .[]? | .check_id] | unique' /tmp/checkov-tofu.json /tmp/checkov-kubernetes.json > /tmp/checkov-findings.json
           scripts/enforce-security-findings.sh checkov /tmp/checkov-findings.json

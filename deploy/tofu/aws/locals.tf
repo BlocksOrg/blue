@@ -34,6 +34,7 @@ locals {
   nat_count = local.create_vpc ? (var.single_nat_gateway ? 1 : var.az_count) : 0
 
   vpc_id             = local.create_vpc ? aws_vpc.this[0].id : var.vpc_id
+  vpc_cidr           = local.create_vpc ? aws_vpc.this[0].cidr_block : data.aws_vpc.attached[0].cidr_block
   public_subnet_ids  = local.create_vpc ? aws_subnet.public[*].id : var.public_subnet_ids
   private_subnet_ids = local.create_vpc ? aws_subnet.private[*].id : var.private_subnet_ids
 

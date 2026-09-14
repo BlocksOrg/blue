@@ -16,11 +16,6 @@ kubectl create namespace "$namespace"
 kubectl create namespace "$ingress_namespace"
 kubectl create namespace "$other_namespace"
 
-helm template blue-prerequisites deploy/helm-prerequisites \
-  --namespace "$namespace" \
-  --set 'networkPolicy.databaseCidrs[0]=198.51.100.0/24' |
-  kubectl apply -n "$namespace" -f -
-
 helm template blue deploy/helm \
   --namespace "$namespace" \
   --set blue.existingSecret=blue-runtime \

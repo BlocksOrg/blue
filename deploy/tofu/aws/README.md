@@ -90,6 +90,7 @@ deployments:
 | `include_database` | `true` | RDS PostgreSQL, its subnet group, security group, monitoring role, and `HARNESS_DATABASE_URL` | The chart renders its evaluation StatefulSet (`database.deployStandalone`), or another database already exists |
 | `include_bucket` | `true` | Package and session buckets, their encryption/versioning/lifecycle rules, and the workload role's S3 grants | The chart renders its evaluation MinIO (`minio.deployStandalone`), or another S3-compatible store already exists |
 | `include_redis` | `true` | ElastiCache Redis and `HARNESS_REDIS_URL` | Governance-only deployments — see below |
+| `include_domain` | `false` | An ACM certificate for the dashboard and API hostnames, its validation records, and (once `alb_hostname` is set) alias records pointing at the load balancer | DNS lives outside Route 53, or a certificate already exists |
 
 Nothing in Blue reads `HARNESS_REDIS_URL`. It is published for the
 organization-operated LiteLLM gateway that gateway mode talks to, which is why
@@ -101,7 +102,19 @@ created, so a missing dependency surfaces as a startup failure rather than a
 connection to nowhere. `helm_values` mirrors the same choice back to the chart:
 skipping the database or the buckets here sets the matching `deployStandalone`
 to `true` there. The chart rejects both in production, so a production stack
-keeps `include_database` and `include_bucket` on.
+keeps `include_database` and `include_bucket` on. `helm_values` also fills the
+chart's `networkPolicy` CIDR lists with the VPC CIDR, since the load balancer,
+RDS and Redis all live there, and leaves HTTPS egress open because S3 and STS
+have no fixed range.
+
+`include_domain` takes `route53_zone_id` plus two labels, `dashboard_subdomain`
+and `api_subdomain`, relative to that zone (`app` and `api` on `example.com`
+give `app.example.com` and `api.example.com`; an empty label means the apex).
+The zone's name is read back, so nothing repeats the domain. The load balancer
+only exists after the chart's Ingress is installed, so the records are a second
+apply: `tofu apply -var alb_hostname=<ingress hostname>`. `certificate_arn`,
+`dashboard_hostname` and `api_hostname` are output for the chart and
+`IngressClassParams`.
 
 ## Naming and tags
 
