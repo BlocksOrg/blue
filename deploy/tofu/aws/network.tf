@@ -15,6 +15,18 @@ resource "aws_vpc" "this" {
   tags                 = { Name = local.name_prefix }
 }
 
+# Replace the default security group's allow-all-within-the-group rules with an
+# empty ruleset. Every workload uses a purpose-built security group instead.
+resource "aws_default_security_group" "this" {
+  count  = local.create_vpc ? 1 : 0
+  vpc_id = aws_vpc.this[0].id
+
+  ingress = []
+  egress  = []
+
+  tags = { Name = "${local.name_prefix}-default-deny" }
+}
+
 # The kubernetes.io/role tags are what the load balancer controller reads when
 # it places an ingress; Auto Mode's built-in controller is no exception.
 resource "aws_subnet" "public" {
