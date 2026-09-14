@@ -8,14 +8,14 @@ The binary is named `blue`. Run `blue --help` for the arguments supported by you
 
 | Command | Behavior |
 | --- | --- |
-| `blue` | Set up or renew login when needed, reconcile policy, and launch the preferred eligible agent. Hold Ctrl and press `]` for controls. |
+| `blue` | Set up or renew login when needed, reconcile policy, and launch the preferred agent. Hold Ctrl and press `]` for controls. On first run it asks which agent to use; an installed agent whose version the policy blocks is offered with a repair prompt rather than hidden. |
 | `blue version` / `blue --version` | Print the installed Blue metaharness version. |
 | `blue setup` | Clear the stored session, reconfigure the Control API connection through deployment discovery, and complete login. |
 | `blue reset [--yes]` | Disconnect the active deployment, remove Blue-managed agent overlays, and retain non-secret tenant state for a later reconnect. |
 | `blue login [--force]` | Verify the stored session with the service and, when it is missing or rejected, complete OAuth device authorization. `--force` safely retires an accessible session before re-authorizing. An inaccessible refresh token is replaced without signing out the user's other Blue sessions. |
 | `blue logout` | Revoke the refresh family when reachable and remove local tokens. |
 | `blue doctor` | Show detected harness paths, versions, and policy allow or deny state. |
-| `blue agent [NAME]` | Choose the preferred eligible agent used by bare `blue`. |
+| `blue agent [NAME]` | Choose the preferred agent used by bare `blue`. In an interactive terminal this also offers installed agents whose version needs repairing, and installs a policy-supported release before saving the choice. Without a terminal only eligible agents are accepted. |
 | `blue status` | Compare desired/applied revisions and report managed-file and package health. |
 | `blue verify` | Exit non-zero when policy or managed files are stale. |
 | `blue config` | Print the resolved, personalized configuration and its source. |
@@ -48,8 +48,8 @@ Hold <kbd>Ctrl</kbd> and press <kbd>]</kbd> while an agent is running. The persi
 | `/health` | Check Control API dependencies. |
 | `/version` | Show the Blue metaharness version. |
 | `/gateway` | Show gateway account status. |
-| `/doctor` | Show detected and eligible agents. |
-| `/agent` | Choose the default agent and optionally quit and reload immediately. |
+| `/doctor` | Show detected agents and their policy state. |
+| `/agent` | Choose the default agent and optionally quit and reload immediately. Agents needing a version repair are named but not selectable here; run `blue agent <name>` outside Blue to install one. |
 | `/apply` | Review and confirm immediate reconciliation. |
 | `/login` | Show identity or interactively confirm reauthentication when the agent must stop. |
 | `/logout` | Interactively confirm sign-out. |

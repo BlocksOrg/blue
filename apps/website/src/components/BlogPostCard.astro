@@ -1,6 +1,5 @@
 ---
 import type { CollectionEntry } from "astro:content";
-import { formatBlogDate } from "../lib/blog";
 
 interface Props {
   post: CollectionEntry<"blog">;
@@ -10,11 +9,6 @@ const { post } = Astro.props;
 ---
 
 <a class="blog-card" href={`/blog/${post.id}/`}>
-  <div class="blog-card-meta">
-    <time datetime={post.data.publishDate.toISOString()}>{formatBlogDate(post.data.publishDate)}</time>
-    <span aria-hidden="true">·</span>
-    <span>{post.data.author}</span>
-  </div>
   <h3>{post.data.title}</h3>
   <p>{post.data.description}</p>
   <span class="blog-card-link">Read article <span class="link-caret" aria-hidden="true"></span></span>
