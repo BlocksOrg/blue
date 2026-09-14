@@ -60,11 +60,16 @@ impl HarnessInventoryEntry {
         self.name.parse().ok()
     }
 
+    /// Allowed by policy, known to this client, and present on PATH — the
+    /// installed version may still be wrong. This is the set the interactive
+    /// surfaces may *offer*, because selecting one runs the version repair.
+    /// [`eligible`](Self::eligible) is the stricter "can launch right now" set.
+    pub fn repairable(&self) -> bool {
+        self.api_allowed && self.client_supported && self.installed
+    }
+
     pub fn eligible(&self) -> bool {
-        self.api_allowed
-            && self.client_supported
-            && self.installed
-            && self.compatibility_error.is_none()
+        self.repairable() && self.compatibility_error.is_none()
     }
 
     pub fn status(&self) -> &'static str {
@@ -165,6 +170,16 @@ impl HarnessInventory {
             .collect()
     }
 
+    /// Every harness a picker may offer, compatible or not. Superset of
+    /// [`eligible_names`](Self::eligible_names).
+    pub fn repairable_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.repairable())
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
     pub fn mark_reconciled(&mut self, names: impl IntoIterator<Item = String>) {
         let names = names.into_iter().collect::<BTreeSet<_>>();
         for entry in &mut self.entries {
@@ -217,6 +232,53 @@ mod tests {
             .find(|entry| entry.name == "future-agent")
             .unwrap();
         assert_eq!(future.status(), "unsupported-client");
+    }
+
+    #[test]
+    fn an_incompatible_install_stays_repairable_but_is_not_eligible() {
+        let mut inventory = HarnessInventory::discover_with_detector(
+            &["codex".into(), "claude".into()],
+            |harness| match harness {
+                Harness::Codex | Harness::Claude => Some(Detected {
+                    harness,
+                    path: PathBuf::from(format!("/bin/{}", harness.key())),
+                    raw_version: Some("1.0.0".into()),
+                    version: Some(Version::new(1, 0, 0)),
+                }),
+                _ => None,
+            },
+        );
+        let codex = inventory
+            .entries
+            .iter_mut()
+            .find(|entry| entry.name == "codex")
+            .unwrap();
+        codex.compatibility_error = Some("policy requires codex `>=2.0.0`".into());
+
+        // The picker offers it so the version repair can run; the launch path
+        // still refuses it until the repair succeeds.
+        assert_eq!(inventory.eligible_names(), vec!["claude"]);
+        assert_eq!(inventory.repairable_names(), vec!["codex", "claude"]);
+    }
+
+    #[test]
+    fn repairable_still_requires_allowed_supported_and_installed() {
+        let inventory = HarnessInventory::discover_with_detector(
+            &["codex".into(), "claude".into(), "future-agent".into()],
+            |harness| match harness {
+                // Installed but not allowed.
+                Harness::Kimi => Some(Detected {
+                    harness,
+                    path: PathBuf::from("/bin/kimi"),
+                    raw_version: Some("1.0.0".into()),
+                    version: Some(Version::new(1, 0, 0)),
+                }),
+                _ => None,
+            },
+        );
+        // codex/claude are allowed but not installed, kimi is installed but not
+        // allowed, future-agent is allowed but unknown to this client.
+        assert!(inventory.repairable_names().is_empty());
     }
 
     #[test]
