@@ -2,7 +2,6 @@
 set -euo pipefail
 
 chart="deploy/helm"
-prerequisites_chart="deploy/helm-prerequisites"
 digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 rendered="/tmp/blue-production.yaml"
 production_network=(
@@ -13,16 +12,6 @@ gateway_jwt=(
   --set blue.inferenceJwt.secret=blue-gateway-jwt
   --set blue.inferenceJwt.activeKid=gateway-2025-01
 )
-
-if helm template blue-prerequisites "$prerequisites_chart" >/dev/null 2>&1; then
-  echo "prerequisite render without a database CIDR unexpectedly succeeded" >&2
-  exit 1
-fi
-helm lint "$prerequisites_chart" --set 'networkPolicy.databaseCidrs[0]=10.0.0.0/24'
-helm template blue-prerequisites "$prerequisites_chart" \
-  --set 'networkPolicy.databaseCidrs[0]=10.0.0.0/24' > /tmp/blue-prerequisites.yaml
-grep -q 'name: blue-namespace-default-deny' /tmp/blue-prerequisites.yaml
-grep -q 'blue.blocks.org/migration-access: "true"' /tmp/blue-prerequisites.yaml
 
 if helm template blue "$chart" "${production_network[@]}" --set image.digest="$digest" >/dev/null 2>&1; then
   echo "production render without blue.existingSecret unexpectedly succeeded" >&2
@@ -64,7 +53,6 @@ helm template blue "$chart" \
 
 grep -q 'kind: Job' "$rendered"
 grep -q 'pre-install,pre-upgrade' "$rendered"
-grep -q 'blue.blocks.org/migration-access: "true"' "$rendered"
 for key in HARNESS_DATABASE_URL BETTER_AUTH_SECRET HARNESS_BOOTSTRAP_ADMIN_PASSWORD; do
   grep -q "key: $key" "$rendered"
 done

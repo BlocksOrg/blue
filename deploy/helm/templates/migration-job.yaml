@@ -22,7 +22,6 @@ spec:
       labels:
         {{- include "blue.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: migration
-        blue.blocks.org/migration-access: "true"
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "blue.serviceAccountName" . }}
