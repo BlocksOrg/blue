@@ -36,7 +36,8 @@
           "properties": {
             "mode": { "enum": ["mtls", "insecure-http"] },
             "serverSecret": { "type": "string" },
-            "clientSecret": { "type": "string" }
+            "clientSecret": { "type": "string" },
+            "clientSecretFormat": { "enum": ["combined", "split"] }
           }
         },
         "existingSecret": { "type": "string" },

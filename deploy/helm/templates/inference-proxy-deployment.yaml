@@ -63,7 +63,12 @@ spec:
               value: {{ printf "%s/api/auth/oauth2/token" (.Values.blue.publicUrls.dashboard | trimSuffix "/") | quote }}
             {{- if eq .Values.blue.internalTransport.mode "mtls" }}
             - { name: HARNESS_INTERNAL_CA_FILE, value: /var/run/blue/internal-tls/ca.crt }
+            {{- if eq .Values.blue.internalTransport.clientSecretFormat "split" }}
+            - { name: HARNESS_PROXY_CLIENT_CERT_FILE, value: /var/run/blue/internal-tls/tls.crt }
+            - { name: HARNESS_PROXY_CLIENT_KEY_FILE, value: /var/run/blue/internal-tls/tls.key }
+            {{- else }}
             - { name: HARNESS_PROXY_CLIENT_IDENTITY_FILE, value: /var/run/blue/internal-tls/client.pem }
+            {{- end }}
             {{- end }}
             - { name: HARNESS_PROXY_OAUTH_CLIENT_ID, value: {{ .Values.blue.inferenceProxyClientId | quote }} }
             - { name: HARNESS_PROXY_OAUTH_SCOPE, value: "gateway:resolve" }

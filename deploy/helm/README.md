@@ -95,8 +95,13 @@ ClusterIP Service on port 8082. Choose the transport explicitly with
   `blue.internalTransport.serverSecret` to a Secret containing `ca.crt`,
   `tls.crt`, and `tls.key`; the server certificate SAN must cover
   `<release>-control-api-internal`. Set `blue.internalTransport.clientSecret`
-  to a Secret containing `ca.crt` and `client.pem`, where `client.pem` contains
-  the proxy certificate followed by its private key.
+  to a Secret containing `ca.crt` plus the proxy identity, and pick its layout
+  with `blue.internalTransport.clientSecretFormat`:
+  `combined` (default) reads `client.pem`, the proxy certificate followed by its
+  private key; `split` reads `tls.crt` and `tls.key`, which is what cert-manager,
+  Vault, SPIRE, and `kubectl create secret tls` emit. Use `split` with an
+  automated issuer — the Certificate then needs no `additionalOutputFormats`
+  stanza, which is only on by default from cert-manager 1.15.
 - `insecure-http` disables transport encryption and certificate authentication.
   OAuth M2M remains mandatory, but decrypted virtual keys cross the pod network
   in plaintext. Use it only on a private, trusted network with enforced

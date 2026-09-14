@@ -113,6 +113,14 @@ invalid rotations retain the last-known-good configuration. The Control API
 also pins the token's `sub`, `client_id`, and `azp` claims to the configured
 proxy client id.
 
+The proxy's client certificate and private key may arrive as one combined PEM
+(`HARNESS_PROXY_CLIENT_IDENTITY_FILE`) or as a separate pair
+(`HARNESS_PROXY_CLIENT_CERT_FILE` and `HARNESS_PROXY_CLIENT_KEY_FILE`), matching
+the split files the Control API already takes. Configure exactly one of the two;
+setting both, or only half of the pair, is a startup error that names the
+offending variable. Rotating either file of a split pair is picked up by the same
+30-second reload.
+
 `insecure-http` is available only as a deliberate trusted-network tradeoff.
 OAuth M2M and NetworkPolicy isolation remain mandatory, but virtual keys are
 plaintext on the wire and there is no client-certificate check. A VPC or an API

@@ -124,6 +124,22 @@ requests, and retain the last-known-good configuration after an invalid update.
 
 Set both `blue.internalTransport.serverSecret` and `blue.internalTransport.clientSecret`; empty names render unusable Secret volumes.
 
+The server Secret holds `ca.crt`, `tls.crt`, and `tls.key`. The client Secret
+holds `ca.crt` plus the proxy's own identity, in whichever of two layouts your
+issuer produces:
+
+| `blue.internalTransport.clientSecretFormat` | Client Secret keys | Use it when |
+| --- | --- | --- |
+| `combined` (default) | `ca.crt`, `client.pem` | You build `client.pem` yourself by concatenating the certificate and its key |
+| `split` | `ca.crt`, `tls.crt`, `tls.key` | Your issuer emits the certificate and key as separate files |
+
+Prefer `split` with an automated issuer. cert-manager, Vault, SPIRE, and
+`kubectl create secret tls` all write `tls.crt` + `tls.key`, so the Certificate
+needs no `additionalOutputFormats` stanza — that field is only on by default
+from cert-manager 1.15, and enabling it earlier takes a cluster-wide feature
+gate on both the controller and the webhook. `kubectl create secret tls` cannot
+produce a combined file at all.
+
 `blue.internalTransport.mode: insecure-http` is supported for fully private,
 trusted networks. OAuth M2M remains mandatory and port 8082 must stay restricted
 to inference-proxy pods, but resolved virtual keys are not encrypted in transit.

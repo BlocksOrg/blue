@@ -139,6 +139,51 @@ helm template blue "$chart" \
   --set blue.internalTransport.mode=insecure-http \
   > /tmp/blue-gateway-insecure-production.yaml
 
+# The proxy's client identity comes either as one combined client.pem or as the
+# tls.crt + tls.key pair every non-cert-manager issuer emits. Each layout must
+# render its own variables and none of the other's, or the proxy either reads a
+# file that is not mounted or trips its combined-plus-split conflict check.
+grep -q 'name: HARNESS_PROXY_CLIENT_IDENTITY_FILE' /tmp/blue-gateway-production.yaml
+if grep -Eq 'HARNESS_PROXY_CLIENT_(CERT|KEY)_FILE' /tmp/blue-gateway-production.yaml; then
+  echo "default client-secret render emitted split cert/key variables" >&2
+  exit 1
+fi
+helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.serverSecret=blue-internal-server \
+  --set blue.internalTransport.clientSecret=blue-internal-client \
+  --set blue.internalTransport.clientSecretFormat=split \
+  > /tmp/blue-gateway-split-identity.yaml
+grep -q 'name: HARNESS_PROXY_CLIENT_CERT_FILE' /tmp/blue-gateway-split-identity.yaml
+grep -q 'name: HARNESS_PROXY_CLIENT_KEY_FILE' /tmp/blue-gateway-split-identity.yaml
+grep -q 'name: HARNESS_INTERNAL_CA_FILE' /tmp/blue-gateway-split-identity.yaml
+if grep -q 'HARNESS_PROXY_CLIENT_IDENTITY_FILE' /tmp/blue-gateway-split-identity.yaml; then
+  echo "split client-secret render still emitted the combined identity variable" >&2
+  exit 1
+fi
+# The mount is what makes either layout readable; it is emitted under a separate
+# mtls conditional in this template, so assert it alongside the split render.
+grep -q 'name: internal-tls, mountPath: /var/run/blue/internal-tls' /tmp/blue-gateway-split-identity.yaml
+grep -q 'secretName: "blue-internal-client"' /tmp/blue-gateway-split-identity.yaml
+if helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.serverSecret=blue-internal-server \
+  --set blue.internalTransport.clientSecret=blue-internal-client \
+  --set blue.internalTransport.clientSecretFormat=bogus >/dev/null 2>&1; then
+  echo "gateway render unexpectedly accepted an unknown clientSecretFormat" >&2
+  exit 1
+fi
+
 helm lint "$chart" -f "$chart/values-evaluation.yaml"
 helm template blue "$chart" -f "$chart/values-evaluation.yaml" > /tmp/blue-evaluation.yaml
 helm template blue "$chart" -f "$chart/values-evaluation.yaml" \

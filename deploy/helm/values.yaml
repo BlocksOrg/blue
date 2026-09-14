@@ -34,10 +34,16 @@ blue:
   internalTransport:
     # mtls (recommended/default) or insecure-http (trusted private networks only).
     mode: mtls
-    # Server Secret: ca.crt, tls.crt, tls.key. Client Secret: ca.crt and
-    # client.pem (certificate followed by its private key).
+    # Server Secret: ca.crt, tls.crt, tls.key. Client Secret: ca.crt plus the
+    # proxy identity in the layout named by clientSecretFormat.
     serverSecret: ""
     clientSecret: ""
+    # Layout of the client Secret's identity material:
+    #   combined - client.pem, the certificate followed by its private key.
+    #   split    - tls.crt and tls.key, what cert-manager, Vault, SPIRE and
+    #              `kubectl create secret tls` emit. No additionalOutputFormats
+    #              stanza, so no cert-manager 1.15 floor.
+    clientSecretFormat: combined
   existingSecret: ""
   config:
     existingConfigMap: ""
