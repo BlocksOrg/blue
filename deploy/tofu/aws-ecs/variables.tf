@@ -159,24 +159,19 @@ variable "inference_proxy_client_id" {
   default = "blue-inference-proxy"
 }
 
-variable "gateway_jwt_active_kid" {
-  type        = string
-  default     = "blue-gateway-1"
-  description = "Key ID for the active gateway inference JWT signing key."
-}
-
-variable "gateway_jwt_private_key_pem" {
-  type        = string
-  sensitive   = true
-  default     = ""
-  description = "RSA private key PEM used by the control API to sign gateway inference JWTs. Required in gateway mode."
-}
-
-variable "gateway_jwt_jwks_json" {
-  type        = string
-  sensitive   = true
-  default     = ""
-  description = "Public JWKS containing the active gateway JWT key and any retained rotation keys. Required in gateway mode."
+variable "gateway_jwt_key_versions" {
+  type        = list(string)
+  default     = ["1"]
+  description = "Gateway inference JWT signing keys to generate, newest first. The first key signs. A second key, kept during a rotation, is only published so tokens it signed keep verifying."
+  validation {
+    condition = (
+      length(var.gateway_jwt_key_versions) >= 1 &&
+      length(var.gateway_jwt_key_versions) <= 2 &&
+      length(distinct(var.gateway_jwt_key_versions)) == length(var.gateway_jwt_key_versions) &&
+      alltrue([for version in var.gateway_jwt_key_versions : trimspace(version) != ""])
+    )
+    error_message = "gateway_jwt_key_versions must hold one or two distinct, non-empty entries."
+  }
 }
 
 # The public CLI's OAuth client id. The dashboard seeds the client under this

@@ -15,13 +15,6 @@ resource "terraform_data" "validations" {
       error_message = "enable_inference_proxy requires enable_redis = true (the proxy consumes Redis)."
     }
     precondition {
-      condition = !var.enable_inference_proxy || (
-        trimspace(var.gateway_jwt_private_key_pem) != "" &&
-        trimspace(var.gateway_jwt_jwks_json) != ""
-      )
-      error_message = "gateway_jwt_private_key_pem and gateway_jwt_jwks_json are required when enable_inference_proxy is true."
-    }
-    precondition {
       condition     = var.domain_name == "" || var.route53_zone_id != ""
       error_message = "route53_zone_id is required when domain_name is set."
     }

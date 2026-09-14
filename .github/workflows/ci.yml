@@ -216,6 +216,8 @@ jobs:
         run: |
           test "$(printf 'local.bootstrap_admin_password_length\n' \
             | tofu -chdir=deploy/tofu/aws console -input=false -var-file=terraform.tfvars.example)" = 48
+          test "$(printf 'local.gateway_jwt_rsa_bits\n' \
+            | tofu -chdir=deploy/tofu/aws console -input=false -var-file=terraform.tfvars.example)" = 3072
       - run: scripts/package-deployment.sh "v${{ steps.version.outputs.version }}" /tmp/blue-dist
       - run: tar -tzf "/tmp/blue-dist/blue-deployment-v${{ steps.version.outputs.version }}.tar.gz"
 

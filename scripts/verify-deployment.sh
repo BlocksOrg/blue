@@ -10,7 +10,6 @@ production_network=(
 )
 gateway_jwt=(
   --set blue.inferenceJwt.secret=blue-gateway-jwt
-  --set blue.inferenceJwt.activeKid=gateway-2025-01
 )
 
 if helm template blue "$chart" "${production_network[@]}" --set image.digest="$digest" >/dev/null 2>&1; then
@@ -106,7 +105,25 @@ grep -q 'app.kubernetes.io/component: inference-proxy' /tmp/blue-gateway-product
 for key in HARNESS_GATEWAY_ENCRYPTION_KEY HARNESS_PROXY_OAUTH_CLIENT_SECRET; do
   grep -q "key: $key" /tmp/blue-gateway-production.yaml
 done
-grep -q 'name: HARNESS_GATEWAY_JWT_ACTIVE_KID' /tmp/blue-gateway-production.yaml
+grep -q 'name: HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE' /tmp/blue-gateway-production.yaml
+# The Control API derives its JWKS from the signing key, so the chart must not
+# configure a JWKS or key ID, and adds the previous key only during a rotation.
+if grep -Eq 'HARNESS_GATEWAY_JWT_(ACTIVE_KID|JWKS_FILE|PREVIOUS_PRIVATE_KEY_FILE)' /tmp/blue-gateway-production.yaml; then
+  echo "default gateway render configured a JWKS, key ID, or previous key" >&2
+  exit 1
+fi
+helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  --set blue.inferenceJwt.includePreviousKey=true \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.serverSecret=blue-internal-server \
+  --set blue.internalTransport.clientSecret=blue-internal-client \
+  > /tmp/blue-gateway-rotation.yaml
+grep -q 'name: HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_FILE' /tmp/blue-gateway-rotation.yaml
 grep -q 'secretName: "blue-gateway-jwt"' /tmp/blue-gateway-production.yaml
 grep -q 'name: gateway-jwt' /tmp/blue-gateway-production.yaml
 grep -q 'name: BLUE_GATEWAY_ENABLED' /tmp/blue-gateway-production.yaml

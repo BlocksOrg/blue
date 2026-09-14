@@ -116,7 +116,7 @@ locals {
     local.enable_proxy ? [for k in [
       "HARNESS_GATEWAY_ENCRYPTION_KEY",
       "HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM",
-      "HARNESS_GATEWAY_JWT_JWKS_JSON",
+      "HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_PEM",
     ] : { name = k, valueFrom = local.secret_ref[k] }] : [],
   )
   migrate_secrets = [{ name = "HARNESS_DATABASE_URL", valueFrom = local.secret_ref["HARNESS_DATABASE_URL"] }]

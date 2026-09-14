@@ -78,7 +78,7 @@ AWS dependency starter.
 Gateway deployments should enable `blue.enableInferenceProxy`, set
 `blue.gatewayType` to the same value as `gateway.type` in `blue.yaml`, set
 `blue.publicUrls.inferenceProxy` and `ingress.proxyHost`, configure the
-`blue.inferenceJwt` signing-key Secret, active key ID, and audience, and provide
+`blue.inferenceJwt` signing-key Secret and audience, and provide
 `HARNESS_GATEWAY_URL`, `HARNESS_PROXY_OAUTH_CLIENT_SECRET`, and gateway
 encryption settings through the runtime Secret. The inference proxy authenticates
 to the Control API with a short-lived OAuth2 client-credentials token minted by

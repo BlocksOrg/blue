@@ -89,9 +89,7 @@ gateway:
   inference_jwt:
     issuer: https://api.blue.example.com
     audience: blue-inference-proxy
-    active_kid: gateway-2026-09
     private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
-    jwks_file: /var/run/blue/gateway-jwt/jwks.json
   secret_encryption:
     provider: aws-kms
     key_id: arn:aws:kms:us-west-2:123456789012:key/example
@@ -130,7 +128,7 @@ gaps before selecting it.
 | Provisioner | In-process built-in or pinned deployment-trusted executable selected by `gateway.provisioner.type` |
 | Secret encryption | Environment key for development or AWS KMS key ID for production envelope encryption |
 | `HARNESS_PROXY_OAUTH_CLIENT_SECRET` | Client-credentials secret the inference proxy uses to obtain a Control API token (shared with the dashboard seed) |
-| Gateway JWT key ring | Active RS256 private key plus a JWKS containing its public key and retained rotation keys |
+| Gateway JWT key ring | Active RS256 private key, plus an optional previous key during a rotation. The Control API works out the published JWKS from them |
 | `HARNESS_GATEWAY_JWKS_URL` | M2M-protected internal Control API endpoint used by the proxy to verify inference JWTs |
 | `internal_allowed_client_id` | OAuth client id (`sub`) the Control API accepts on the internal resolver; defaults to `blue-inference-proxy` |
 | `HARNESS_GATEWAY_LOG_URL` | Internal Control API request-log ingestion endpoint; omit to disable egress |

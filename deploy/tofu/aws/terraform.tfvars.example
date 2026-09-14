@@ -44,3 +44,8 @@ kubernetes_namespace               = "blue"
 kubernetes_service_account         = "blue"
 bootstrap_admin_email              = "operator@example.com"
 package_noncurrent_retention_days  = 90
+
+# Gateway mode only: generate the gateway JWT signing key into its own secret.
+# See README.md "Gateway JWT signing keys".
+# generate_gateway_jwt_key           = true
+# gateway_jwt_key_versions           = ["1"]

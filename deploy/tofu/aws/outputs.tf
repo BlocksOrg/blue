@@ -1,5 +1,7 @@
 output "database_endpoint" { value = var.include_database ? aws_db_instance.blue[0].endpoint : null }
 output "runtime_secret_arn" { value = aws_secretsmanager_secret.runtime.arn }
+# Sync to the Kubernetes Secret named in helm_values.blue.inferenceJwt.secret.
+output "gateway_jwt_secret_arn" { value = var.generate_gateway_jwt_key ? aws_secretsmanager_secret.gateway_jwt[0].arn : null }
 output "redis_primary_endpoint" { value = var.include_redis ? aws_elasticache_replication_group.blue[0].primary_endpoint_address : null }
 output "package_bucket" { value = var.include_bucket ? aws_s3_bucket.packages[0].id : null }
 output "session_bucket" { value = var.include_bucket ? aws_s3_bucket.sessions[0].id : null }
@@ -30,11 +32,22 @@ output "helm_values" {
       name        = var.kubernetes_service_account
       annotations = { "eks.amazonaws.com/role-arn" = aws_iam_role.blue.arn }
     }
-    blue = { env = var.include_bucket ? {
-      HARNESS_BLOB_BUCKET    = aws_s3_bucket.sessions[0].id
-      HARNESS_PACKAGE_BUCKET = aws_s3_bucket.packages[0].id
-      HARNESS_BLOB_REGION    = var.aws_region
-    } : {} }
+    blue = merge(
+      { env = var.include_bucket ? {
+        HARNESS_BLOB_BUCKET    = aws_s3_bucket.sessions[0].id
+        HARNESS_PACKAGE_BUCKET = aws_s3_bucket.packages[0].id
+        HARNESS_BLOB_REGION    = var.aws_region
+      } : {} },
+      # Only when this module generated the gateway JWT key. The JSON round trip
+      # lets the two branches have different shapes.
+      jsondecode(var.generate_gateway_jwt_key ? jsonencode({
+        inferenceJwt = {
+          secret             = local.gateway_jwt_kubernetes_secret
+          audience           = "blue-inference-proxy"
+          includePreviousKey = length(var.gateway_jwt_key_versions) > 1
+        }
+      }) : "{}"),
+    )
     # The chart's bundled datastores are evaluation-only; a module that skipped
     # one is telling the chart to render it.
     database = { deployStandalone = !var.include_database }
