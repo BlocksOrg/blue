@@ -68,7 +68,7 @@ Keep credentials in your platform's secret store and inject them at runtime. A p
 
 | Setting | Consumers | Purpose |
 | --- | --- | --- |
-| `HARNESS_DATABASE_URL` | Dashboard, Control API, worker | Shared PostgreSQL connection |
+| `HARNESS_DATABASE_URL` | Dashboard, Control API, worker | Shared PostgreSQL connection. Append `?sslmode=require` for databases that refuse plaintext, such as RDS; `sslmode` follows libpq semantics in every component |
 | `BETTER_AUTH_SECRET` | Dashboard | Persistent authentication encryption and signing secret |
 | `HARNESS_BOOTSTRAP_ADMIN_EMAIL` | Dashboard, Control API, worker | Protected initial administrator identity |
 | `HARNESS_BOOTSTRAP_ADMIN_PASSWORD` | Dashboard | Initial administrator password |
