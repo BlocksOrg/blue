@@ -24,6 +24,13 @@ resource "random_id" "gateway_encryption" {
   count       = local.enable_proxy ? 1 : 0
   byte_length = 32
 }
+# Gateway inference JWT signing keys, newest first. The Control API works out
+# the public JWKS from them, so no public key file is written anywhere.
+resource "tls_private_key" "gateway_jwt" {
+  for_each  = local.enable_proxy ? toset(var.gateway_jwt_key_versions) : toset([])
+  algorithm = "RSA"
+  rsa_bits  = local.gateway_jwt_rsa_bits
+}
 
 resource "aws_secretsmanager_secret" "runtime" {
   name_prefix = "${var.name}/runtime-"
@@ -45,14 +52,18 @@ resource "aws_secretsmanager_secret_version" "runtime" {
     local.enable_proxy ? {
       HARNESS_PROXY_OAUTH_CLIENT_SECRET   = random_password.proxy_oauth_client_secret[0].result
       HARNESS_GATEWAY_ENCRYPTION_KEY      = random_id.gateway_encryption[0].b64_std
-      HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM = var.gateway_jwt_private_key_pem
-      HARNESS_GATEWAY_JWT_JWKS_JSON       = var.gateway_jwt_jwks_json
+      HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM = tls_private_key.gateway_jwt[var.gateway_jwt_key_versions[0]].private_key_pem_pkcs8
+      # Empty outside a rotation; the Control API treats an empty value as unset.
+      HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_PEM = length(var.gateway_jwt_key_versions) > 1 ? tls_private_key.gateway_jwt[var.gateway_jwt_key_versions[1]].private_key_pem_pkcs8 : ""
     } : {},
   ))
 }
 
 locals {
   runtime_secret_arn = aws_secretsmanager_secret.runtime.arn
+
+  # RSA size of the generated gateway JWT signing keys.
+  gateway_jwt_rsa_bits = 3072
 
   # ECS has no "mount the whole secret" primitive; each JSON key is referenced
   # individually as "${arn}:KEY::".
@@ -65,6 +76,6 @@ locals {
     "HARNESS_PROXY_OAUTH_CLIENT_SECRET",
     "HARNESS_GATEWAY_ENCRYPTION_KEY",
     "HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM",
-    "HARNESS_GATEWAY_JWT_JWKS_JSON",
+    "HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_PEM",
   ] : k => "${local.runtime_secret_arn}:${k}::" }
 }

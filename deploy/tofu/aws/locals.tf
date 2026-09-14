@@ -83,4 +83,11 @@ locals {
   # "Verify generated secret contracts" check (which cannot read managed-resource
   # attributes without state, but can evaluate a local).
   bootstrap_admin_password_length = 48
+
+  # Generated secret contract: RSA size of the gateway JWT signing keys, asserted
+  # by the same CI check.
+  gateway_jwt_rsa_bits = 3072
+
+  # Kubernetes Secret the operator syncs gateway_jwt_secret_arn into.
+  gateway_jwt_kubernetes_secret = "${local.name_prefix}-gateway-jwt"
 }

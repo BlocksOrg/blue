@@ -970,6 +970,8 @@ dependencies = [
  "gh-service",
  "hex",
  "jsonwebtoken",
+ "pkcs1",
+ "pkcs8",
  "rand 0.8.8",
  "reqwest",
  "rustls",

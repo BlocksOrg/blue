@@ -237,9 +237,9 @@ gateway:
   inference_jwt:
     issuer: https://api.blue.example.com
     audience: blue-inference-proxy
-    active_kid: gateway-2026-09
     private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
-    jwks_file: /var/run/blue/gateway-jwt/jwks.json
+    # Only while rotating keys:
+    # previous_private_key_file: /var/run/blue/gateway-jwt/previous-signing-key.pem
     token_ttl_seconds: 43200
   secret_encryption:
     provider: aws-kms
@@ -258,9 +258,8 @@ gateway:
 | `internal_allowed_client_id` | OAuth client id (`sub`) the Control API accepts on the internal resolver from the inference proxy's client-credentials token. Defaults to `blue-inference-proxy`. |
 | `inference_jwt.issuer` | Exact issuer placed in inference JWTs and required by the proxy. |
 | `inference_jwt.audience` | Exact inference-proxy audience placed in inference JWTs. |
-| `inference_jwt.active_kid` | Signing-key ID; it must identify a key in `inference_jwt.jwks_file`. |
-| `inference_jwt.private_key_file` | Active RS256 private signing key, mounted only in Control API replicas. |
-| `inference_jwt.jwks_file` | Public JWKS with the active key and retained verification keys for rotation. |
+| `inference_jwt.private_key_file` | Active RS256 signing key: an RSA key of at least 2048 bits, as PKCS#8 or PKCS#1 PEM, mounted only in Control API replicas. The Control API works out the published JWKS from it, so there is no JWKS file. Each key's `kid` is its RFC 7638 thumbprint. `HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM` supplies the PEM inline instead. |
+| `inference_jwt.previous_private_key_file` | Optional retired signing key, set only during a rotation. Its public key stays published so tokens it signed keep verifying; it never signs. `HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_PEM` supplies the PEM inline instead. |
 | `inference_jwt.token_ttl_seconds` | Inference JWT lifetime; defaults to `43200` (12 hours) and is always clamped to the remaining browser session. The token is written into the agent process environment at spawn and is not rotated in flight, so a shorter value shortens the usable agent run. |
 | `secret_encryption.provider` | `aws-kms` for production or `environment` for development. |
 | `secret_encryption.key_id` | AWS KMS key used for envelope encryption. |
@@ -280,6 +279,19 @@ The inference proxy also requires `HARNESS_GATEWAY_TYPE` with the same value as
 `HARNESS_GATEWAY_JWT_ISSUER`, and `HARNESS_GATEWAY_JWT_AUDIENCE`; it does not
 infer a gateway or trust domain from URLs. In Helm, set `blue.gatewayType` and
 the `blue.inferenceJwt` values when `blue.enableInferenceProxy=true`.
+
+Generate the inference JWT signing key once:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out signing-key.pem
+```
+
+To rotate it:
+
+1. Mount the new key as `private_key_file` and the old one as `previous_private_key_file`, then restart the Control API. New tokens use the new key, and the proxy fetches the new `kid` the first time it sees it.
+2. After the token lifetime has passed (12 hours by default), remove `previous_private_key_file` and restart again.
+
+The `deploy/tofu` modules generate the key for you; there you rotate by putting a new entry first in `gateway_jwt_key_versions`.
 
 The LiteLLM administrator key and inference JWT private key remain runtime secrets; do not put them in governance policy. See [Bring your own gateway](/next/concepts/gateway-mode) for the authenticated request path, key ring, and operational checks.
 

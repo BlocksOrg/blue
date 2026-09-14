@@ -69,9 +69,7 @@ services:
       HARNESS_GATEWAY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       HARNESS_GATEWAY_JWT_ISSUER: http://127.0.0.1:8080
       HARNESS_GATEWAY_JWT_AUDIENCE: blue-inference-proxy
-      HARNESS_GATEWAY_JWT_ACTIVE_KID: e2e-slim-rsa-1
-      HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /gateway-jwt/jwt-signing-key.pem
-      HARNESS_GATEWAY_JWT_JWKS_FILE: /gateway-jwt/jwks.json
+      HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /gateway-jwt/signing-key.pem
       # Plain-HTTP internal transport (no mTLS certs in this suite).
       HARNESS_INTERNAL_TRANSPORT_MODE: insecure-http
       HARNESS_INTERNAL_LISTEN: 0.0.0.0:8082
@@ -79,7 +77,7 @@ services:
       - ./fixtures/gateway-slim.yaml:/etc/blue/gateway-slim.yaml:ro
       # Mounted read-only; the exec bit comes from the checkout (committed 0755).
       - ./fixtures/litellm-provisioner.mjs:/etc/blue/litellm-provisioner:ro
-      - ./fixtures/jwks:/gateway-jwt:ro
+      - ../fixtures/jwt:/gateway-jwt:ro
     ports:
       - "8082:8082"
     depends_on:

@@ -23,7 +23,6 @@ helm template blue deploy/helm \
   --set blue.enableInferenceProxy=true \
   --set blue.gatewayType=litellm \
   --set blue.inferenceJwt.secret=blue-gateway-jwt \
-  --set blue.inferenceJwt.activeKid=gateway-2025-01 \
   --set blue.internalTransport.mode=insecure-http \
   --set "networkPolicy.ingressController.namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name=$ingress_namespace" \
   --set 'networkPolicy.databaseCidrs[0]=198.51.100.0/24' \

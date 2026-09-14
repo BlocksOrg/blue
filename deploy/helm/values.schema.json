@@ -23,11 +23,11 @@
         "inferenceProxyClientId": { "type": "string" },
         "inferenceJwt": {
           "type": "object",
-          "required": ["secret", "activeKid", "audience"],
+          "required": ["secret", "audience"],
           "properties": {
             "secret": { "type": "string" },
-            "activeKid": { "type": "string" },
-            "audience": { "type": "string", "minLength": 1 }
+            "audience": { "type": "string", "minLength": 1 },
+            "includePreviousKey": { "type": "boolean" }
           }
         },
         "internalTransport": {
@@ -97,7 +97,7 @@
         "then": { "required": ["gatewayType", "inferenceJwt"], "allOf": [
           { "properties": { "gatewayType": { "minLength": 1 } } },
           { "properties": { "inferenceJwt": { "properties": {
-            "secret": { "minLength": 1 }, "activeKid": { "minLength": 1 }
+            "secret": { "minLength": 1 }
           } } } },
           {
           "if": { "properties": { "internalTransport": { "properties": { "mode": { "const": "mtls" } } } } },

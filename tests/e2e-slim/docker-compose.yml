@@ -52,11 +52,13 @@ services:
 
   jwks:
     image: node:22-bookworm-slim
-    command: ["node", "/fixtures/jwks-server.mjs"]
+    command: ["node", "/sidecar/jwks-server.mjs"]
     environment:
       PORT: "8080"
     volumes:
-      - ./fixtures:/fixtures:ro
+      # The server reads the shared test key next to itself, from ./jwt.
+      - ./fixtures/jwks-server.mjs:/sidecar/jwks-server.mjs:ro
+      - ../fixtures/jwt:/sidecar/jwt:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 2s
