@@ -25,9 +25,14 @@ with an expired security exception or a missed recovery budget.
 - Default-deny ingress and egress is enabled. Dependency CIDRs and ingress or
   monitoring selectors have been narrowed to this cluster.
 
-Run `scripts/verify-deployment.sh` before every release. Scanner exceptions are
-declared in `.github/security-exceptions.yml` with an owner, rationale,
-compensating control, and expiry.
+Run `scripts/verify-deployment.sh` before every release. Scanner findings are
+suppressed two ways, by kind. An **accepted risk** is declared in
+`.github/security-exceptions.yml` with an owner, rationale, compensating control,
+and expiry. A **scanner false positive** gets an inline
+`#checkov:skip=<id>:<reason>` at the resource itself, naming the resource that
+actually satisfies the control; it carries no expiry, because a tool artifact is
+not a time-boxed risk acceptance, and it keeps the check live everywhere else
+rather than disabling it repo-wide.
 
 ## Upgrade and rollback
 

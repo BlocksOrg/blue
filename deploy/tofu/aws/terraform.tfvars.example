@@ -32,6 +32,14 @@ environment                        = "production"
 # cluster_endpoint_public_access_cidrs = ["203.0.113.0/24"]
 # cluster_endpoint_public_access       = false
 
+# Name Blue on a hosted zone you own. The labels are relative to the zone, so
+# these give app.<zone> and api.<zone>. Pass alb_hostname on a second apply once
+# the chart's Ingress reports its load balancer, to create the records.
+# include_domain      = true
+# route53_zone_id     = "Z0123456789EXAMPLE"
+# dashboard_subdomain = "app"
+# api_subdomain       = "api"
+
 kubernetes_namespace               = "blue"
 kubernetes_service_account         = "blue"
 bootstrap_admin_email              = "operator@example.com"

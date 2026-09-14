@@ -253,6 +253,11 @@ networkPolicy:
     podSelector:
       matchLabels:
         k8s-app: kube-dns
+  # Cloud load balancers that send traffic straight to pods (an AWS ALB or NLB in
+  # IP target mode, for example) come from addresses, not from an ingress pod.
+  # List their subnet or VPC CIDRs here to admit them to the dashboard, Control
+  # API and inference proxy on their listening ports. Extends ingressController.
+  ingressCidrs: []
   # Standard NetworkPolicy cannot match DNS names. Populate these with the
   # narrow cluster/VPC CIDRs for managed dependencies and approved HTTPS hosts.
   databaseCidrs: []
