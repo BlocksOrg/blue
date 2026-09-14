@@ -121,6 +121,11 @@ setting both, or only half of the pair, is a startup error that names the
 offending variable. Rotating either file of a split pair is picked up by the same
 30-second reload.
 
+The Helm chart can issue this pair for you: with
+`blue.internalTransport.certManager.enabled`, it declares the `Issuer` and
+`Certificate` resources and cert-manager generates and renews both certificates,
+so no Secret has to be made by hand.
+
 `insecure-http` is available only as a deliberate trusted-network tradeoff.
 OAuth M2M and NetworkPolicy isolation remain mandatory, but virtual keys are
 plaintext on the wire and there is no client-certificate check. A VPC or an API

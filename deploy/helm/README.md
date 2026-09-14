@@ -92,16 +92,25 @@ ClusterIP Service on port 8082. Choose the transport explicitly with
 
 - `mtls` is the default and recommended mode. It encrypts decrypted virtual
   keys in transit and authenticates both workloads. Set
-  `blue.internalTransport.serverSecret` to a Secret containing `ca.crt`,
+  `blue.internalTransport.certManager.enabled=true` and the chart issues both
+  certificates itself: it declares the `Issuer` and `Certificate` resources, and
+  cert-manager generates the keys, fills in the server SAN the proxy dials, and
+  renews everything. Install the cert-manager CRDs in the cluster first; the
+  chart does not install cert-manager. Leave `certManager.issuerRef` empty for a
+  self-signed CA scoped to this release, or point it at your own
+  `Issuer`/`ClusterIssuer`. It must be a CA-type issuer — Blue reads `ca.crt`
+  out of each Secret, and ACME issuers do not write that key. Under
+  `certManager`, `serverSecret`, `clientSecret`, and `clientSecretFormat` are
+  ignored: the chart names its own Secrets and always reads the split layout.
+- To bring your own certificates instead, leave `certManager.enabled=false` and
+  set `blue.internalTransport.serverSecret` to a Secret containing `ca.crt`,
   `tls.crt`, and `tls.key`; the server certificate SAN must cover
   `<release>-control-api-internal`. Set `blue.internalTransport.clientSecret`
   to a Secret containing `ca.crt` plus the proxy identity, and pick its layout
   with `blue.internalTransport.clientSecretFormat`:
   `combined` (default) reads `client.pem`, the proxy certificate followed by its
   private key; `split` reads `tls.crt` and `tls.key`, which is what cert-manager,
-  Vault, SPIRE, and `kubectl create secret tls` emit. Use `split` with an
-  automated issuer — the Certificate then needs no `additionalOutputFormats`
-  stanza, which is only on by default from cert-manager 1.15.
+  Vault, SPIRE, and `kubectl create secret tls` emit.
 - `insecure-http` disables transport encryption and certificate authentication.
   OAuth M2M remains mandatory, but decrypted virtual keys cross the pod network
   in plaintext. Use it only on a private, trusted network with enforced

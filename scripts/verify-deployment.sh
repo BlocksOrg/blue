@@ -184,6 +184,113 @@ if helm template blue "$chart" \
   exit 1
 fi
 
+# cert-manager issues both internal Secrets from the chart, so the render must
+# succeed with no serverSecret/clientSecret set at all. The negative above keeps
+# that relaxation from turning into a missing guard: without certManager the
+# same value set still has to fail.
+cert_manager=(
+  --set blue.internalTransport.certManager.enabled=true
+)
+helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  "${cert_manager[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  > /tmp/blue-gateway-cert-manager.yaml
+if [ "$(grep -c '^kind: Certificate$' /tmp/blue-gateway-cert-manager.yaml)" != 3 ]; then
+  echo "cert-manager render did not emit the CA plus both leaf Certificates" >&2
+  exit 1
+fi
+if [ "$(grep -c '^kind: Issuer$' /tmp/blue-gateway-cert-manager.yaml)" != 2 ]; then
+  echo "cert-manager render did not emit the self-signed and CA Issuers" >&2
+  exit 1
+fi
+# The Secret names the workloads mount must be the ones the Certificates write.
+grep -q 'secretName: blue-blue-internal-tls-server' /tmp/blue-gateway-cert-manager.yaml
+grep -q 'secretName: blue-blue-internal-tls-client' /tmp/blue-gateway-cert-manager.yaml
+grep -q 'secretName: "blue-blue-internal-tls-server"' /tmp/blue-gateway-cert-manager.yaml
+grep -q 'secretName: "blue-blue-internal-tls-client"' /tmp/blue-gateway-cert-manager.yaml
+# The server SAN must cover the internal Service name the proxy dials; a wrong
+# one fails the handshake at runtime, not at render time.
+grep -q -- '- blue-blue-control-api-internal$' /tmp/blue-gateway-cert-manager.yaml
+grep -q -- '- blue-blue-control-api-internal.default.svc$' /tmp/blue-gateway-cert-manager.yaml
+# cert-manager writes tls.crt + tls.key, so the proxy must read the split pair.
+grep -q 'name: HARNESS_PROXY_CLIENT_CERT_FILE' /tmp/blue-gateway-cert-manager.yaml
+grep -q 'name: HARNESS_PROXY_CLIENT_KEY_FILE' /tmp/blue-gateway-cert-manager.yaml
+if grep -q 'HARNESS_PROXY_CLIENT_IDENTITY_FILE' /tmp/blue-gateway-cert-manager.yaml; then
+  echo "cert-manager render emitted the combined identity variable" >&2
+  exit 1
+fi
+# clientSecretFormat is derived, not validated: Helm cannot tell a user-set
+# "combined" from the default, so an explicit one must not break the install.
+helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  "${cert_manager[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.clientSecretFormat=combined \
+  > /tmp/blue-gateway-cert-manager-combined.yaml
+grep -q 'name: HARNESS_PROXY_CLIENT_CERT_FILE' /tmp/blue-gateway-cert-manager-combined.yaml
+if grep -q 'HARNESS_PROXY_CLIENT_IDENTITY_FILE' /tmp/blue-gateway-cert-manager-combined.yaml; then
+  echo "cert-manager render honoured clientSecretFormat=combined" >&2
+  exit 1
+fi
+# An operator's own CA issuer replaces the chart's bootstrap chain entirely.
+helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  "${cert_manager[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.certManager.issuerRef.name=corporate-pki \
+  --set blue.internalTransport.certManager.issuerRef.kind=ClusterIssuer \
+  > /tmp/blue-gateway-cert-manager-issuer.yaml
+if grep -Eq 'name: blue-blue-internal-(selfsigned|ca)$' /tmp/blue-gateway-cert-manager-issuer.yaml; then
+  echo "external issuerRef render still bootstrapped the chart's own CA" >&2
+  exit 1
+fi
+if [ "$(grep -c 'name: corporate-pki' /tmp/blue-gateway-cert-manager-issuer.yaml)" != 2 ]; then
+  echo "external issuerRef render did not point both Certificates at it" >&2
+  exit 1
+fi
+grep -q 'kind: ClusterIssuer' /tmp/blue-gateway-cert-manager-issuer.yaml
+# cert-manager defaults a missing kind to Issuer, which looks only in the
+# release namespace and leaves the Certificate stuck Pending. Demand it.
+if helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  "${cert_manager[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.certManager.issuerRef.name=corporate-pki >/dev/null 2>&1; then
+  echo "cert-manager render unexpectedly accepted an issuerRef without a kind" >&2
+  exit 1
+fi
+# Nothing consumes the certificates under insecure-http; issuing them silently
+# is worse than saying so.
+if helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  "${cert_manager[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.mode=insecure-http >/dev/null 2>&1; then
+  echo "cert-manager render unexpectedly accepted insecure-http" >&2
+  exit 1
+fi
+
 helm lint "$chart" -f "$chart/values-evaluation.yaml"
 helm template blue "$chart" -f "$chart/values-evaluation.yaml" > /tmp/blue-evaluation.yaml
 helm template blue "$chart" -f "$chart/values-evaluation.yaml" \
