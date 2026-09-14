@@ -2,7 +2,7 @@
 import BrandMark from "./BrandMark.astro";
 
 interface Props {
-  current?: "manifesto";
+  current?: "manifesto" | "blog";
 }
 
 const { current } = Astro.props;
@@ -19,6 +19,7 @@ const externalLinkProps = { target: "_blank", rel: "noopener noreferrer" };
     <a href="/#how-it-works">How it works</a>
     <a href="/#capabilities">Capabilities</a>
     <a href="/manifesto/" aria-current={current === "manifesto" ? "page" : undefined}>Why Blue</a>
+    <a href="/blog/" aria-current={current === "blog" ? "page" : undefined}>Blog</a>
     <a href="https://docs.bluee.sh" {...externalLinkProps}>Docs</a>
     <a class="nav-github" href={github} {...externalLinkProps}>GitHub <span class="link-caret" aria-hidden="true"></span></a>
   </nav>
