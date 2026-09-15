@@ -266,7 +266,14 @@ fn toml_quote_style_is_not_a_content_difference() {
 fn every_production_interval_has_a_pure_golden_plan() {
     for definition in adapters::HARNESS_DEFINITIONS.iter() {
         for registration in definition.implementations {
-            for gateway_enabled in [false, true] {
+            // The third case is gateway mode for an org that governs OpenCode
+            // (or any harness) without pinning a model: every adapter must
+            // still render a plan, degrading rather than failing.
+            for (gateway_enabled, managed_model, variant) in [
+                (false, Some("fixture-model"), "governance"),
+                (true, Some("fixture-model"), "gateway"),
+                (true, None, "gateway-nomodel"),
+            ] {
                 let home = home(registration.interval.profile);
                 let skill = home.join("package/skills/example");
                 std::fs::create_dir_all(&skill).unwrap();
@@ -350,8 +357,12 @@ fn every_production_interval_has_a_pure_golden_plan() {
                 std::fs::write(&helper, "#!/bin/sh\nexit 0\n").unwrap();
                 component.helpers.insert("helper".into(), helper);
                 packages.groups.push(component);
+                let mut managed_config = serde_json::json!({"auto_approve": false});
+                if let Some(model) = managed_model {
+                    managed_config["model"] = serde_json::json!(model);
+                }
                 let policy: HarnessPolicy = serde_json::from_value(serde_json::json!({
-                    "managed_config": {"model":"fixture-model", "auto_approve":false},
+                    "managed_config": managed_config,
                     "mcp":[{"name":"fixture", "command":"fixture-mcp", "args":["--stdio"]}]
                 }))
                 .unwrap();
@@ -463,15 +474,7 @@ fn every_production_interval_has_a_pure_golden_plan() {
                 let actual = render_plan(&plan, &home);
                 let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/golden")
-                    .join(format!(
-                        "{}-{}.json",
-                        registration.interval.profile,
-                        if gateway_enabled {
-                            "gateway"
-                        } else {
-                            "governance"
-                        }
-                    ));
+                    .join(format!("{}-{variant}.json", registration.interval.profile));
                 if std::env::var_os("BLUE_UPDATE_GOLDENS").is_some() {
                     std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
                     std::fs::write(&fixture, format!("{actual}\n")).unwrap();
