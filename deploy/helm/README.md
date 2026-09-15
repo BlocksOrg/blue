@@ -6,7 +6,10 @@ all-in-one entrypoint is retained for local development only.
 The Control API and worker read `/etc/blue/blue.yaml` and exit at startup when
 it is missing. The published image does not bake one in — `deploy/Dockerfile`
 creates an empty `/etc/blue` — so `blue.config.existingConfigMap` is required
-unless you build an image that supplies the file itself. Runtime secrets are loaded
+unless you build an image that supplies the file itself. The image sets
+`BLUE_CONFIG_FILE=/etc/blue/blue.yaml`; changing `blue.config.mountPath` without
+rebuilding the image with a matching value silently breaks configuration
+loading. Runtime secrets are loaded
 from `blue.existingSecret`; required keys also use non-optional `secretKeyRef`
 entries so Kubernetes reports missing keys before a workload starts.
 Offline `helm template` cannot inspect keys inside that externally managed

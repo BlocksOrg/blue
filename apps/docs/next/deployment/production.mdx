@@ -1,152 +1,393 @@
 ---
 title: "Kubernetes with Helm"
-description: "Implement Blue's deployment contract on Kubernetes with the maintained Helm chart and optional AWS OpenTofu starter."
+description: "Deploy Blue on EKS with the maintained chart and the AWS OpenTofu starter, then turn on gateway mode."
 icon: "server"
 ---
 
-This guide implements Blue's platform-neutral [Deployment contract](/next/deployment/runtime-contract) on Kubernetes. Follow the [Quickstart](/next/quickstart) to choose a deployment path and complete the first workstation connection.
+This guide deploys Blue (Control API, worker, dashboard) onto a new EKS cluster, with Postgres on RDS, session and package storage on S3, and Redis on ElastiCache. One AWS load balancer serves HTTPS on two names in a Route 53 hosted zone you already have, for example `blue.example.com` and `api.blue.example.com`. The chart runs with its production checks on.
 
-The chart deploys the pinned Blue image with a secret-safe `blue.yaml` and managed PostgreSQL and S3-compatible storage. It runs the dashboard, Control API, inference proxy, and background worker as independently managed workloads. Kubernetes is the maintained reference deployment, not a requirement for running Blue.
+You need `tofu`, `aws`, `kubectl`, `helm`, `jq`, `docker`, and AWS credentials that can create VPC, EKS, RDS, ElastiCache, S3, IAM, KMS, ACM and Route 53 records. Run everything from the bundle's `infra/aws` folder, in one terminal. The files this guide writes go in that folder. Everything here costs money every hour.
 
-## Domain topology
+Nothing in Blue reads Redis. It is here for the LiteLLM gateway you may run later; drop `include_redis` to save the cost. To land in a cluster or VPC you already run, set `eks_cluster_name` and `vpc_id`; see the [AWS module README](https://github.com/BlocksOrg/blue/blob/main/deploy/tofu/aws/README.md).
 
-Publish the dashboard and Control API through HTTPS on organization-owned domains:
+Blue does not need Kubernetes. This is the maintained implementation of the [Deployment contract](/next/deployment/runtime-contract); any platform that meets the contract works.
 
-| Public endpoint | Example | Used by |
-| --- | --- | --- |
-| Dashboard and authentication | `https://blue.example.com` | Administrators and browser sign-in |
-| Control API | `https://api.blue.example.com` | The `blue` CLI and dashboard server |
-| Inference proxy | `https://inference.blue.example.com` | Governed coding-agent inference traffic in gateway mode |
-| Documentation | `https://docs.example.com` | Optional dashboard documentation link |
-
-Developers enter the Control API origin, such as `https://api.blue.example.com`, when they run `blue setup`. DNS and certificates must be active before inviting users.
-
-## Prerequisites
-
-- An existing Kubernetes cluster, ingress controller, DNS zone, and TLS certificate issuer
-- Managed PostgreSQL and S3-compatible object storage, or AWS access to provision them with the included OpenTofu starter
-- A container registry if you publish an optional custom gateway-provisioner image
-- A secret delivery system for runtime credentials
-- An organization-operated LiteLLM gateway if you enable gateway mode; Blue does not deploy the upstream gateway
-
-## Download the deployment bundle
-
-Each GitHub Release contains `blue-deployment-vX.Y.Z.tar.gz` with a consumer Dockerfile, `blue/blue.yaml`, shell and Python executable examples, the Helm chart, an AWS OpenTofu starter, and GitHub Actions templates.
-
+## Before you start
 ```bash
+# Downloads the release bundle, checks it, and moves into the AWS folder. The bundle holds
+# the Helm chart at chart/blue and the OpenTofu module at infra/aws.
 VERSION=0.1.0
 curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/blue-deployment-v${VERSION}.tar.gz"
+curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/SHA256SUMS"
+grep "blue-deployment-v${VERSION}.tar.gz" SHA256SUMS | shasum -a 256 -c -
 tar -xzf "blue-deployment-v${VERSION}.tar.gz"
-cd "blue-deployment-${VERSION}"
+cd "blue-deployment-${VERSION}/infra/aws"
 ```
 
-The consumer image contains only the provisioner executable. Helm copies
-it into a read-only volume before the unchanged stock Control API starts:
+## 1. Create the cluster, databases and certificate
+```bash
+# Writes the settings file. The names are relative to the hosted zone: with a zone for
+# example.com, this gives app.example.com, api.example.com and iproxy.example.com.
+export AWS_REGION=us-east-1   # every aws command and Tofu use this
 
-```dockerfile
-FROM busybox:1.37.0-musl
-COPY --chown=1000:1000 provisioner.sh /executable/provisioner
-RUN chmod 0555 /executable/provisioner
-USER 1000:1000
+cat > terraform.tfvars <<EOF
+aws_region            = "$AWS_REGION"
+name                  = "blue"
+bootstrap_admin_email = "admin@example.com"   # the first admin's login
+include_database      = true    # RDS Postgres
+include_bucket        = true    # S3 buckets for sessions and packages
+include_redis         = true    # ElastiCache; only used by the LiteLLM gateway
+include_domain        = true
+route53_zone_id       = "Z0123456789EXAMPLE"   # your hosted zone's id
+dashboard_subdomain   = "app"
+api_subdomain         = "api"
+inference_proxy_subdomain = "iproxy"   # only used in gateway mode; free to reserve now
+generate_gateway_jwt_key  = true       # same: the key gateway mode signs with, ready when needed
+deletion_protection   = false   # lets tofu destroy remove the database; keep true for real use
+EOF
+
+# Creates the VPC, cluster, RDS, Redis, buckets, encryption key, IAM role and HTTPS
+# certificate. Takes about 25 minutes.
+tofu init
+tofu apply
+
+# Saves the values later steps need, so nothing is typed by hand.
+export BLUE_KUBECONFIG_COMMAND="$(tofu output -raw kubeconfig_command)"
+export BLUE_KUBE_NAMESPACE="$(tofu output -raw kubernetes_namespace)"
+export BLUE_CERT_ARN="$(tofu output -raw certificate_arn)"
+export BLUE_DASHBOARD_HOST="$(tofu output -raw dashboard_hostname)"
+export BLUE_API_HOST="$(tofu output -raw api_hostname)"
+export BLUE_SECRET_ARN="$(tofu output -raw runtime_secret_arn)"
+export BLUE_CONFIG_FILE=./blue.eks.yaml
+export BLUE_HELM_VALUES_FILE=./eks-values.yaml
+export BLUE_HELM_GENERATED_FILE=./eks-generated-values.json
+export BLUE_HELM_DEPLOY_FOLDER=../../chart/blue
+
+# Saves the Helm settings Tofu generated: the IAM role, the bucket names, the network
+# rules that let the load balancer, RDS and Redis talk to Blue, and "don't run Postgres
+# or MinIO in the cluster".
+tofu output -json helm_values > "$BLUE_HELM_GENERATED_FILE"
+
+# Pins the image to an exact build. The chart refuses a moving tag in production.
+export BLUE_IMAGE_DIGEST="$(docker buildx imagetools inspect ghcr.io/blocksorg/blue:0.1.0 | awk '/^Digest:/{print $2}')"
+echo "$BLUE_IMAGE_DIGEST"   # must print sha256:...; if empty, stop here
+```
+**DNS not in Route 53?** Leave the four domain lines out of `terraform.tfvars`, skip the three `tofu output` lines for the certificate and hostnames, and set them yourself:
+```bash
+export BLUE_DASHBOARD_HOST=blue.example.com
+export BLUE_API_HOST=api.blue.example.com
+
+# Asks AWS for one certificate covering both names, prints one CNAME per name to create at
+# your DNS provider, then waits for AWS to see them.
+export BLUE_CERT_ARN="$(aws acm request-certificate \
+  --domain-name "$BLUE_DASHBOARD_HOST" --subject-alternative-names "$BLUE_API_HOST" \
+  --validation-method DNS --query CertificateArn --output text)"
+aws acm describe-certificate --certificate-arn "$BLUE_CERT_ARN" \
+  --query 'Certificate.DomainValidationOptions[].ResourceRecord' --output table
+aws acm wait certificate-validated --certificate-arn "$BLUE_CERT_ARN"
 ```
 
-Keep only literals and environment references in `blue.yaml`. Supply credentials through the Helm chart's `blue.existingSecret` value. Set `blue.config.existingConfigMap`; without it the chart does not mount `blue.yaml`.
+## 2. Connect kubectl and prepare the cluster
+```bash
+# Points kubectl at the new cluster.
+eval "$BLUE_KUBECONFIG_COMMAND"
 
-## Helm and AWS OpenTofu
+# Creates the namespace. It must match Tofu's, because the IAM role only trusts this one.
+kubectl create namespace "$BLUE_KUBE_NAMESPACE"
 
-The Helm chart deploys separate workloads and Services, optional Ingress, health probes, workload identity, autoscaling, and disruption controls. Proxy autoscaling requires an external metrics adapter for `gateway_proxy_active_streams`, and streaming ingress must use a suitable timeout. The AWS starter attaches to an existing EKS cluster and VPC and provisions PostgreSQL, package/session S3 buckets, KMS encryption, a runtime secret, and a least-privilege IRSA role.
+# Tells the cluster how to build a public HTTPS load balancer with our certificate.
+kubectl apply -f - <<YAML
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata: { name: blue-alb }
+spec:
+  scheme: internet-facing
+  certificateARNs: ["$BLUE_CERT_ARN"]
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata: { name: blue-alb }
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters: { apiGroup: eks.amazonaws.com, kind: IngressClassParams, name: blue-alb }
+YAML
+```
+No storage class needed: nothing in the cluster keeps data on a disk.
 
-EKS, networking, ingress, DNS/certificates, an encrypted OpenTofu state backend, and optional LiteLLM remain external prerequisites. Apply OpenTofu first, sync its runtime secret through your secret delivery system, then pass its `helm_values` output to `helm upgrade --install`.
+## 3. Copy the secrets into the cluster
+```bash
+# Tofu made the database URL, admin password and signing key. This copies them in.
+SECRET_JSON="$(aws secretsmanager get-secret-value --secret-id "$BLUE_SECRET_ARN" --region "$AWS_REGION" --query SecretString --output text)"
 
-## Deployment sequence
+kubectl -n "$BLUE_KUBE_NAMESPACE" create secret generic blue-runtime \
+  --from-literal=HARNESS_DATABASE_URL="$(jq -r .HARNESS_DATABASE_URL <<<"$SECRET_JSON")" \
+  --from-literal=BETTER_AUTH_SECRET="$(jq -r .BETTER_AUTH_SECRET <<<"$SECRET_JSON")" \
+  --from-literal=HARNESS_BOOTSTRAP_ADMIN_EMAIL="$(jq -r .HARNESS_BOOTSTRAP_ADMIN_EMAIL <<<"$SECRET_JSON")" \
+  --from-literal=HARNESS_BOOTSTRAP_ADMIN_PASSWORD="$(jq -r .HARNESS_BOOTSTRAP_ADMIN_PASSWORD <<<"$SECRET_JSON")" \
+  --from-literal=HARNESS_PROXY_OAUTH_CLIENT_SECRET="$(openssl rand -hex 32)"
+# The OAuth secret is only read in gateway mode; making it now saves a step later.
 
-<Steps>
-  <Step title="Create a deployment repository">
-    Extract the release bundle into a private repository owned by your organization. Keep the included Dockerfile, `blue/blue.yaml`, provisioner scripts, Helm chart, OpenTofu starter, and GitHub Actions workflows together so image and infrastructure changes can be reviewed as one deployment.
-  </Step>
-  <Step title="Set your domains and policy">
-    Replace `blue.example.com`, `api.blue.example.com`, and organization placeholders in `values.yaml` and `blue/blue.yaml`. Keep credentials out of both files; use environment references in `blue/blue.yaml` and store their values in your secret system. Follow [Configure blue.yaml](/next/deployment/blue-yaml) for every runtime and policy section.
-  </Step>
-  <Step title="Provision service dependencies">
-    Configure an encrypted remote OpenTofu backend, fill in `infra/aws/terraform.tfvars`, and review `tofu plan`. The AWS starter creates PostgreSQL, package and session buckets, KMS encryption, a runtime secret, and workload identity for an existing EKS cluster.
-  </Step>
-  <Step title="Optionally build a custom provisioner">
-    Skip this step for governance-only deployments or when using the built-in LiteLLM provisioner. Otherwise, implement the versioned JSON stdin/stdout contract in `provisioner.py` or `provisioner.sh`, build and hash `/executable/provisioner`, pin the file and OCI digests, then publish the included provisioner Dockerfile. Its administrator credentials come from the runtime Secret and are never baked into the image. See [Custom gateway provisioners](/next/admin/custom-gateway-provisioners).
-  </Step>
-  <Step title="Deploy with Helm">
-    Sync the generated runtime secret into Kubernetes, set `blue.config.existingConfigMap`, then install the chart with your values and OpenTofu outputs. Gateway mode also requires `blue.enableInferenceProxy: true` and `HARNESS_PROXY_OAUTH_CLIENT_SECRET` in the shared runtime Secret. The included GitHub deployment workflow performs these operations using an environment-scoped AWS role.
-  </Step>
-  <Step title="Verify and invite users">
-    Confirm the dashboard and API health endpoints through their public HTTPS domains. Sign in as the bootstrap administrator, configure identity and policy, then give developers the Control API origin to use with `blue setup`.
-  </Step>
-</Steps>
+export ADMIN_EMAIL="$(jq -r .HARNESS_BOOTSTRAP_ADMIN_EMAIL <<<"$SECRET_JSON")"
+export ADMIN_PW="$(jq -r .HARNESS_BOOTSTRAP_ADMIN_PASSWORD <<<"$SECRET_JSON")"
+```
+No AWS keys needed: the pods use the IAM role Tofu made to reach S3.
 
-## Components
+## 4. Add Blue's config file
+```bash
+# Writes Blue's config with the final addresses. The image has none built in, so this is required.
+cat > "$BLUE_CONFIG_FILE" <<EOF
+control_api:
+  listen: 0.0.0.0:8080
+  database_url: os.environ/HARNESS_DATABASE_URL
+  bootstrap: { organization_slug: dev, organization_name: Development, admin_subject: admin,
+               admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL }
+  auth: { public_url: "https://$BLUE_DASHBOARD_HOST", client_id: blue-cli,
+          session_url: "http://blue-blue-dashboard:3000/api/auth/get-session",
+          jwks_url: "http://blue-blue-dashboard:3000/api/auth/jwks",
+          issuer: "https://$BLUE_DASHBOARD_HOST/api/auth", audience: "https://$BLUE_API_HOST" }
+  identity: { mode: password }
+  blob_storage: { provider: s3, bucket: os.environ/HARNESS_BLOB_BUCKET, region: $AWS_REGION,
+                  auth: { mode: iam }, retention_days: 30 }
+  package_artifacts: { bucket: os.environ/HARNESS_PACKAGE_BUCKET }
+governance:
+  revision: "eks-1"   # a label for this baseline; the server detects edits by content, not by this value
+  contract_version: 3
+  required_capabilities: [adapter_intervals, compiled_harness_registry, versioned_state, transactional_reconcile, gateway_inference_jwt]
+  minimum_client_version: "0.1.0"
+  ttl_seconds: 300
+  required: true
+  allowed_harnesses: [codex, claude, kimi, opencode]
+  harnesses: { claude: { managed_config: { model: claude-opus-4-8 } } }
+  # Uploads each finished coding session to the S3 bucket. Transcripts can hold prompts, code
+  # and secrets, so agree a retention and access policy before turning this on.
+  session_upload: { presign_url: "https://$BLUE_API_HOST/session-uploads/presign" }
+EOF
 
-- Independently scalable dashboard, Control API, inference proxy, and singleton worker workloads
-- PostgreSQL with `auth` and control-plane schemas
-- S3-compatible object storage for managed package artifacts and, when enabled, session capture
-- Your external LiteLLM gateway when gateway mode is enabled
+# Uploads the config into the cluster so Blue's pods can read it.
+kubectl -n "$BLUE_KUBE_NAMESPACE" create configmap blue-config --from-file=blue.yaml="$BLUE_CONFIG_FILE"
+```
+The bucket names come from the environment, which the generated Helm settings fill in. The two `blue-blue-dashboard` URLs are calls inside the cluster, so they stay plain HTTP. See [Configure blue.yaml](/next/deployment/blue-yaml) for every field.
 
-## Runtime configuration
+## 5. Write the Helm settings
+```bash
+# Every Helm setting this guide adds on top of the generated ones.
+cat > "$BLUE_HELM_VALUES_FILE" <<EOF
+blue:
+  production: true    # the chart now insists on RDS, S3, a pinned image, migrations and network policies
+  existingSecret: blue-runtime              # made in step 3
+  config:
+    existingConfigMap: blue-config          # made in step 4
+  publicUrls:
+    dashboard: https://$BLUE_DASHBOARD_HOST
+    controlApi: https://$BLUE_API_HOST
 
-The image sets `BLUE_CONFIG_FILE=/etc/blue/blue.yaml`; mount `blue.yaml` at that path. Changing `blue.config.mountPath` without rebuilding the image with a matching environment value silently breaks configuration loading. The file contains `control_api`, server-only `gateway`, client-delivered `governance`, and `package_catalog` sections. Scalar values may be literals, `os.environ/NAME`, or `env://NAME`; direct environment variables take precedence. Only `governance` is delivered to clients.
+image:
+  digest: $BLUE_IMAGE_DIGEST
 
-See [Configure blue.yaml](/next/deployment/blue-yaml) for a production starting point, field-by-field runtime settings, secret reference rules, governance reconciliation, package catalogs, and rollout validation.
+# Tells the load balancer how to check each app is up. They use different paths, so
+# this can't be one setting on the load balancer.
+service:
+  dashboard:
+    annotations:
+      alb.ingress.kubernetes.io/healthcheck-path: /api/health
+  controlApi:
+    annotations:
+      alb.ingress.kubernetes.io/healthcheck-path: /ready
 
-After the initial seed, startup performs a three-way reconciliation between the previous deployment baseline, the current database revision, and the newly mounted `governance` section. Non-conflicting deployment changes create a new revision. Saved dashboard values win conflicts and are reported as path-only startup notices. Members, clients, sessions, gateway selections, artifacts, and other accumulated records are outside this reconciliation.
+# One HTTPS load balancer: the dashboard name goes to the dashboard, the API name goes to
+# the API, and plain HTTP redirects to HTTPS.
+ingress:
+  enabled: true
+  className: blue-alb
+  annotations:
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+  hosts:
+    - host: $BLUE_DASHBOARD_HOST
+      paths: [{ path: /, pathType: Prefix, port: dashboard }]
+    - host: $BLUE_API_HOST
+      paths: [{ path: /, pathType: Prefix, port: control-api }]
+EOF
+```
 
-| Area | Required settings |
-| --- | --- |
-| Database | `HARNESS_DATABASE_URL` |
-| Public auth | `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, `HARNESS_AUTH_PUBLIC_URL`, bootstrap identity, issuer, audience, JWKS and session URLs |
-| Managed identity | Optional `HARNESS_AUTH_MODE=oidc`, OIDC issuer/client credentials, SCIM bearer token, and JSON group-role mappings |
-| Blob storage | Bucket, region, optional endpoint/public endpoint, path style, retention, and ambient AWS credentials or role |
-| Gateway | Matching `gateway.type` and required proxy `HARNESS_GATEWAY_TYPE`, gateway and inference-proxy URLs, pinned executable provisioner, encrypted-secret provider, proxy authentication, and request-log retention |
-| Package catalog | Optional `package_catalog.packages` section in `blue.yaml` |
-| Package artifacts | Dedicated non-expiring `HARNESS_PACKAGE_BUCKET` used for immutable mirrored archives |
-| Repository connections | GitHub App ID/private-key references or Bitbucket read-only access-token references, enterprise base URLs/CA bundles when needed, and per-organization namespace allowlists |
+## 6. Install Blue
+```bash
+# Runs the database migration, installs Blue and creates the load balancer. Waits until up.
+helm upgrade --install blue "$BLUE_HELM_DEPLOY_FOLDER" --namespace "$BLUE_KUBE_NAMESPACE" \
+  -f "$BLUE_HELM_GENERATED_FILE" -f "$BLUE_HELM_VALUES_FILE" --wait --timeout 15m
+```
 
-Use separate internal and public object-storage endpoints when containers address storage differently from developer machines. In AWS, omit custom endpoints and use workload identity or IAM roles instead of static keys.
+## 7. Point the names at the load balancer
+```bash
+# Waits until the load balancer has an address (a few minutes).
+until ALB=$(kubectl -n "$BLUE_KUBE_NAMESPACE" get ingress blue-blue -o jsonpath='{.status.loadBalancer.ingress[0].hostname}') && [ -n "$ALB" ]; do
+  sleep 10
+done
+echo "$ALB"
 
-The optional `/governance-config/events` endpoint is a long-lived server-sent event stream. Configure the API ingress to disable response buffering for that path and keep idle connections open for more than the 15-second heartbeat interval. Clients fall back to periodic configuration checks when an ingress does not support the stream.
+# Second Tofu run: creates the DNS records, pointing at the load balancer.
+# Saves the address to the settings file so later tofu runs keep the records.
+echo "alb_hostname = \"$ALB\"" >> terraform.tfvars
+tofu apply
+```
+**DNS not in Route 53?** Skip the `tofu apply` and create two CNAME records at your DNS provider, `$BLUE_DASHBOARD_HOST` and `$BLUE_API_HOST`, both pointing at `$ALB`.
 
-`HARNESS_AUTH_PUBLIC_URL` is the browser-reachable dashboard origin used in invitation acceptance links. The reference implementation logs those links from the Control API; connect the same delivery boundary to SMTP or a transactional mail provider before relying on invitations in production.
+## 8. Check it, use it, delete it
+```bash
+# Checks the API is up over HTTPS and can reach S3. New DNS records can take a minute.
+curl -fsS "https://$BLUE_API_HOST/ready"
+curl -fsS "https://$BLUE_API_HOST/health/object-storage"
 
-## Security baseline
+# Opens the dashboard. Log in with the email and password this prints.
+echo "$ADMIN_EMAIL / $ADMIN_PW"
+open "https://$BLUE_DASHBOARD_HOST"
 
-### Internal proxy transport
+# Points your blue CLI to the deployed server. Enter https://$BLUE_API_HOST when asked.
+blue setup
+blue login && blue doctor
 
-Keep `blue.internalTransport.mode: mtls` unless your threat model explicitly
-accepts plaintext east-west credentials. The processes check mounted certificate
-files every 30 seconds, adopt valid rotations without dropping in-flight
-requests, and retain the last-known-good configuration after an invalid update.
+# Deletes Blue first (this removes the load balancer), then everything in AWS including
+# the database and its data. Don't skip the second one.
+helm uninstall blue -n "$BLUE_KUBE_NAMESPACE"
+tofu destroy
+```
+`open` is macOS; on Linux, paste the dashboard address into a browser. Session uploads go straight to S3, so no port-forward is needed. If `tofu destroy` fails on the VPC, the load balancer is still being removed. Wait and retry. If it fails on the buckets, they still have objects in them. Empty them and retry.
 
-Set both `blue.internalTransport.serverSecret` and `blue.internalTransport.clientSecret`; empty names render unusable Secret volumes.
+**DNS not in Route 53?** Run `tofu destroy` as above, then delete the two records and the certificate yourself.
 
-`blue.internalTransport.mode: insecure-http` is supported for fully private,
-trusted networks. OAuth M2M remains mandatory and port 8082 must stay restricted
-to inference-proxy pods, but resolved virtual keys are not encrypted in transit.
-A VPC, ClusterIP, or ingress API gateway does not prevent a compromised workload
-or node from observing this hop. Verify NetworkPolicy enforcement and tightly
-control workload, namespace, and node access; never expose port 8082 through an
-Ingress or load balancer.
+## Changing the config later
+Edit `$BLUE_CONFIG_FILE`, then upload it and restart the API and worker. The server compares the new file's content to the stored baseline and publishes a revision when they differ:
+```bash
+kubectl -n "$BLUE_KUBE_NAMESPACE" create configmap blue-config --from-file=blue.yaml="$BLUE_CONFIG_FILE" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n "$BLUE_KUBE_NAMESPACE" rollout restart deployments
+```
 
-- Terminate TLS for dashboard, API, inference, and object-storage URLs.
-- Restrict the internal gateway resolver to the inference proxy and rotate its OAuth client secret; the proxy authenticates with a short-lived client-credentials token verified against the better-auth JWKS.
-- Use least-privilege database roles and object-storage permissions.
-- Keep default-deny egress enabled and allow only approved package/provider CIDRs. Application-level DNS validation and address pinning protect public package requests; NetworkPolicy remains defense in depth. A public package host must resolve to public addresses from each client's resolver as well: Blue rejects the entire DNS answer set when any address in it is private, so on-prem split-horizon DNS needs a [managed package source connection](/next/deployment/managed-repositories) rather than a public archive URL.
-- Encrypt database backups and session objects.
-- Publish collection and retention policy before enabling session upload.
-- Monitor failed JWT authentication, failed session-bound credential resolution, upload completion failures, and stale client revisions.
-- Keep provider and LiteLLM keys server-side.
-- Restrict request logs to metadata, set a retention period, and monitor failed best-effort egress.
-- Keep repository credentials in deployment secret storage, grant read-only repository access, enforce organization namespace allowlists, and review executable hooks/plugins/helpers before publication.
+## Hardening
+- Set `deletion_protection` back to `true`, so the database can't be destroyed by accident and gets a final snapshot if it is.
+- Add `networkPolicy.externalHttpsCidrs` to your values file with the S3 and STS ranges for your region from `https://ip-ranges.amazonaws.com/ip-ranges.json`, plus any package hosts you allow. The generated settings leave HTTPS open.
+- Limit who can reach the cluster API with `cluster_endpoint_public_access_cidrs`, and who can reach the load balancer with `alb.ingress.kubernetes.io/inbound-cidrs`.
+- Check the rendered install with [`scripts/verify-deployment.sh`](https://github.com/BlocksOrg/blue/blob/main/scripts/verify-deployment.sh) from the source repository.
 
 ## Backups and upgrades
+Back up PostgreSQL, the package bucket, and the session bucket separately; they have different retention and recovery needs. To upgrade, pin the new image digest in the values file and run the step 6 `helm upgrade` again. The chart's pre-upgrade Job runs the database migrations before the new pods start. See the [migration policy](https://github.com/BlocksOrg/blue/blob/main/deploy/runbooks/migrations.md).
 
-Back up PostgreSQL, the non-expiring package-artifact bucket, and the raw-session bucket as separate consistency domains. Before upgrading, validate the new OpenAPI and governance schema, run database migrations, deploy the new workload, then reconcile clients. Preserve prior CLI and documentation versions during the rollout.
+## Gateway mode: route agent inference through Blue
 
-<Note>
-  The AWS starter creates the session-bucket lifecycle rule. For other storage backends, configure equivalent expiration that matches the documented retention period.
-</Note>
+Continues from step 8 with the cluster still running. Adds Blue's inference proxy at `https://iproxy.<zone>`: agents send model calls there, the proxy checks a Blue-issued token, then forwards to your LiteLLM, which holds the provider keys. LiteLLM is already running somewhere you manage, and you have its URL and master key. It must serve a model named `claude-opus-4-8`, the name the governance policy in step 4 hands to agents. Installs cert-manager into the cluster for the internal certificates.
+
+Read [Bring your own gateway](/next/concepts/gateway-mode) for how the routing and credentials work.
+
+## 9. Point Blue at your LiteLLM
+```bash
+export BLUE_PROXY_HOST="$(tofu output -raw inference_proxy_hostname)"
+export LITELLM_URL=https://litellm.example.com   # your LiteLLM, reachable from the cluster
+export LITELLM_MASTER_KEY=sk-...                  # its master key
+
+# Blue only hands out keys to people LiteLLM already knows, matched by email. Adds the admin;
+# repeat for each developer.
+curl -fsS -X POST "$LITELLM_URL/user/new" -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H 'Content-Type: application/json' -d "{\"user_email\":\"$ADMIN_EMAIL\"}"
+```
+
+## 10. Add the gateway secrets
+```bash
+# Refreshes the generated Helm settings: they now name the signing-key secret.
+tofu output -json helm_values > "$BLUE_HELM_GENERATED_FILE"
+
+# Adds LiteLLM's address and master key. The proxy reads the address from here, not from the
+# config file. The encryption key is ignored with KMS, but the chart refuses to start without it.
+kubectl -n "$BLUE_KUBE_NAMESPACE" patch secret blue-runtime --type merge -p "{\"stringData\":{
+  \"HARNESS_GATEWAY_URL\":\"$LITELLM_URL\",
+  \"HARNESS_LITELLM_ADMIN_KEY\":\"$LITELLM_MASTER_KEY\",
+  \"HARNESS_GATEWAY_ENCRYPTION_KEY\":\"unused-with-aws-kms\"}}"
+
+# Copies the token-signing key Tofu made into the cluster. Only the API reads it.
+JWT_JSON="$(aws secretsmanager get-secret-value --secret-id "$(tofu output -raw gateway_jwt_secret_arn)" --query SecretString --output text)"
+kubectl -n "$BLUE_KUBE_NAMESPACE" create secret generic "$(jq -r .blue.inferenceJwt.secret "$BLUE_HELM_GENERATED_FILE")" \
+  --from-literal=signing-key.pem="$(jq -r '."signing-key.pem"' <<<"$JWT_JSON")"
+```
+
+## 11. Install cert-manager
+The proxy and the API talk over an encrypted internal link where each side shows a certificate. The chart declares those certificates; cert-manager makes and renews them, and Blue picks up new files without a restart.
+```bash
+# One per cluster; skip if it is already there.
+helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --version v1.18.2 \
+  --namespace cert-manager --create-namespace --set crds.enabled=true --wait
+```
+Already have a PKI, or no cert-manager? See [Internal certificates](/next/concepts/gateway-mode#internal-certificates) for pointing the chart at your own issuer or supplying the two certificate Secrets yourself.
+
+## 12. Add the gateway to Blue's config
+```bash
+# One new top-level section: where LiteLLM is, where the proxy is, how tokens are signed,
+# and how stored gateway keys are encrypted (with the KMS key Tofu made).
+cat >> "$BLUE_CONFIG_FILE" <<EOF
+gateway:
+  type: litellm
+  url: $LITELLM_URL
+  inference_proxy_url: https://$BLUE_PROXY_HOST
+  inference_proxy_health_url: http://blue-blue-inference-proxy:8081/health
+  internal_allowed_client_id: blue-inference-proxy
+  inference_jwt:
+    issuer: https://$BLUE_API_HOST
+    audience: blue-inference-proxy
+    private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
+  secret_encryption: { provider: aws-kms, key_id: "$(tofu output -raw kms_key_arn)" }
+  provisioner: { type: builtin-litellm, reconcile_ttl_seconds: 86400 }
+EOF
+
+# Uploads the config.
+kubectl -n "$BLUE_KUBE_NAMESPACE" create configmap blue-config --from-file=blue.yaml="$BLUE_CONFIG_FILE" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+## 13. Turn the proxy on
+```bash
+# A second Helm settings file, layered on top of the first: the proxy, its public name, and
+# the encrypted link to the API with its certificates issued by cert-manager.
+export BLUE_HELM_GATEWAY_VALUES_FILE=./eks-gateway-values.yaml
+cat > "$BLUE_HELM_GATEWAY_VALUES_FILE" <<EOF
+blue:
+  enableInferenceProxy: true
+  gatewayType: litellm
+  publicUrls:
+    inferenceProxy: https://$BLUE_PROXY_HOST
+  internalTransport:
+    mode: mtls
+    certManager: { enabled: true }   # a private authority and both certificates, renewed every 90 days
+service:
+  inferenceProxy:
+    annotations:
+      alb.ingress.kubernetes.io/healthcheck-path: /health
+ingress:
+  proxyHost: $BLUE_PROXY_HOST
+EOF
+
+# Upgrades Blue with the proxy, then restarts everything so all pods read the new config.
+helm upgrade --install blue "$BLUE_HELM_DEPLOY_FOLDER" --namespace "$BLUE_KUBE_NAMESPACE" \
+  -f "$BLUE_HELM_GENERATED_FILE" -f "$BLUE_HELM_VALUES_FILE" -f "$BLUE_HELM_GATEWAY_VALUES_FILE" \
+  --wait --timeout 15m
+kubectl -n "$BLUE_KUBE_NAMESPACE" rollout restart deployments
+```
+The proxy joins the existing load balancer under its own name; the DNS record and certificate for it were made in steps 1 and 7. If you added `inference_proxy_subdomain` after the first apply, Tofu reissued the certificate: rerun step 2's `kubectl apply` with the new `BLUE_CERT_ARN`.
+
+**LiteLLM not on HTTPS port 443?** The generated settings let pods reach any address on 443 and nothing else. For another port, or a LiteLLM inside this cluster, add its address to the gateway values file:
+```yaml
+networkPolicy:
+  extraEgress:
+    - to: [{ ipBlock: { cidr: 10.0.0.0/8 } }]   # or a namespaceSelector for an in-cluster one
+      ports: [{ protocol: TCP, port: 4000 }]
+```
+
+## 14. Check it
+```bash
+# The proxy answers on its public name.
+curl -fsS "https://$BLUE_PROXY_HOST/health"
+
+# Creates your LiteLLM key through Blue, then runs an agent whose model calls now go
+# laptop -> proxy -> LiteLLM -> provider. The dashboard's Gateway page shows the key as ready.
+blue login && blue gateway
+blue claude
+```
+Deleting everything is the same as step 8. LiteLLM is yours and stays up.
