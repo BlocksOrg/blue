@@ -24,6 +24,18 @@ tests/e2e/run.sh full
 tests/e2e/run.sh mtls
 ```
 
+The proxy reads its client identity from the combined `client.pem` by default.
+To run the same stack against the split cert/key pair instead — the layout
+cert-manager, Vault, SPIRE, and `kubectl create secret tls` produce — point it
+at the separate files the fixture already generates:
+
+```bash
+BLUE_E2E_PROXY_IDENTITY_FILE= \
+BLUE_E2E_PROXY_CERT_FILE=/certs/client.crt \
+BLUE_E2E_PROXY_KEY_FILE=/certs/client.key \
+tests/e2e/run.sh mtls
+```
+
 The smoke suite covers deployment health, dashboard password authentication,
 OAuth device approval, policy reconciliation, custom-provisioner invocation,
 encrypted gateway provisioning, managed packages, a governed Codex launch, and

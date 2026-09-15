@@ -34,10 +34,35 @@ blue:
   internalTransport:
     # mtls (recommended/default) or insecure-http (trusted private networks only).
     mode: mtls
-    # Server Secret: ca.crt, tls.crt, tls.key. Client Secret: ca.crt and
-    # client.pem (certificate followed by its private key).
+    # Server Secret: ca.crt, tls.crt, tls.key. Client Secret: ca.crt plus the
+    # proxy identity in the layout named by clientSecretFormat.
+    # Both are ignored when certManager.enabled; the chart names its own Secrets.
     serverSecret: ""
     clientSecret: ""
+    # Layout of the client Secret's identity material:
+    #   combined - client.pem, the certificate followed by its private key.
+    #   split    - tls.crt and tls.key, what cert-manager, Vault, SPIRE and
+    #              `kubectl create secret tls` emit. No additionalOutputFormats
+    #              stanza, so no cert-manager 1.15 floor.
+    # Ignored when certManager.enabled; cert-manager always writes a split pair.
+    clientSecretFormat: combined
+    certManager:
+      # Requires cert-manager in the cluster. The chart only declares Issuer and
+      # Certificate resources; cert-manager generates and renews the keys.
+      enabled: false
+      # Leave issuerRef empty and the chart bootstraps a self-signed CA scoped to
+      # this release. Point it at your own Issuer/ClusterIssuer to use an
+      # existing PKI; it must be a CA-type issuer, because Blue needs the
+      # `ca.crt` key that ACME issuers do not write.
+      issuerRef: {}
+      #  name: corporate-pki
+      #  kind: ClusterIssuer
+      duration: 2160h # 90 days
+      renewBefore: 360h # 15 days
+      caDuration: 87600h # 10 years; only for the chart-created CA
+      privateKey:
+        algorithm: RSA
+        size: 2048
   existingSecret: ""
   config:
     existingConfigMap: ""
