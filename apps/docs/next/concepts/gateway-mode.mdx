@@ -121,10 +121,8 @@ setting both, or only half of the pair, is a startup error that names the
 offending variable. Rotating either file of a split pair is picked up by the same
 30-second reload.
 
-The Helm chart can issue this pair for you: with
-`blue.internalTransport.certManager.enabled`, it declares the `Issuer` and
-`Certificate` resources and cert-manager generates and renews both certificates,
-so no Secret has to be made by hand.
+The Helm chart can issue this pair for you with cert-manager, or mount
+certificates from your own PKI. See [Internal certificates](#internal-certificates).
 
 `insecure-http` is available only as a deliberate trusted-network tradeoff.
 OAuth M2M and NetworkPolicy isolation remain mandatory, but virtual keys are
@@ -159,6 +157,49 @@ blue codex
 ```
 
 Harness launch performs the same lazy ensure operation. Personalized policy cannot be delivered until provisioning succeeds.
+
+### Internal certificates
+
+Keep `blue.internalTransport.mode: mtls` unless your threat model explicitly accepts plaintext east-west credentials. The processes check mounted certificate files every 30 seconds, adopt valid rotations without dropping in-flight requests, and retain the last-known-good configuration after an invalid update.
+
+#### Let the chart issue the certificates
+
+If cert-manager is installed in the cluster, set `blue.internalTransport.certManager.enabled=true` and skip the rest of this section. The chart declares the `Issuer` and `Certificate` resources, names the two Secrets after the release, and fills in the server SAN from the internal Service name, which are the two values a hand-written manifest gets wrong. cert-manager generates the keys and renews them; nothing secret goes into the release.
+
+```yaml
+blue:
+  internalTransport:
+    mode: mtls
+    certManager:
+      enabled: true
+      # Omit issuerRef for a self-signed CA scoped to this release, or point it
+      # at your own PKI:
+      # issuerRef: { name: corporate-pki, kind: ClusterIssuer }
+```
+
+The issuer must be a CA-type issuer. Both sides read `ca.crt` out of their own Secret, and cert-manager writes that key only when the CA is known: true for `SelfSigned` and `CA` issuers, **false for ACME**. `issuerRef.kind` is required alongside `issuerRef.name`: cert-manager defaults it to `Issuer`, which looks only in the release namespace and leaves the Certificate stuck `Pending` if you meant `ClusterIssuer`.
+
+Under `certManager`, `serverSecret`, `clientSecret`, and `clientSecretFormat` are ignored. Installing cert-manager itself is out of the chart's scope: it is a cluster-scoped singleton with its own CRDs.
+
+Turning `certManager.enabled` on for a running mTLS install is a CA cutover, not an in-place upgrade. Both Secrets get new content from a new CA and they do not swap atomically, so expect a short window of rejected handshakes; the 30-second reload and last-known-good behaviour keep it from becoming an outage.
+
+#### Or bring your own certificates
+
+Set both `blue.internalTransport.serverSecret` and `blue.internalTransport.clientSecret`; empty names render unusable Secret volumes.
+
+The server Secret holds `ca.crt`, `tls.crt`, and `tls.key`. The client Secret holds `ca.crt` plus the proxy's own identity, in whichever of two layouts your issuer produces:
+
+| `blue.internalTransport.clientSecretFormat` | Client Secret keys | Use it when |
+| --- | --- | --- |
+| `combined` (default) | `ca.crt`, `client.pem` | You build `client.pem` yourself by concatenating the certificate and its key |
+| `split` | `ca.crt`, `tls.crt`, `tls.key` | Your issuer emits the certificate and key as separate files |
+| chart-issued (`certManager.enabled`) | `ca.crt`, `tls.crt`, `tls.key` | The chart declares the Certificates and cert-manager fills the Secrets; the layout is forced to `split` |
+
+Prefer `split` with an automated issuer. cert-manager, Vault, SPIRE, and `kubectl create secret tls` all write `tls.crt` + `tls.key`, so the Certificate needs no `additionalOutputFormats` stanza. That field is only on by default from cert-manager 1.15, and enabling it earlier takes a cluster-wide feature gate on both the controller and the webhook. `kubectl create secret tls` cannot produce a combined file at all.
+
+### Scaling the proxy
+
+The inference proxy holds long-lived streaming connections. Proxy autoscaling in the Helm chart requires an external metrics adapter that exposes `gateway_proxy_active_streams`, and the public ingress in front of the proxy must use a timeout long enough for a full streamed response. Drain proxy connections during rollouts.
 
 ## Disable or change routing
 
