@@ -140,10 +140,11 @@ pub fn write(
     })
 }
 
-/// The models the governed provider advertises, newest policy first: an
+/// Provider-local model IDs the governed provider advertises: an
 /// admin-supplied `managed_config.available_models` when present (the gateway
 /// is the only thing that knows what it actually serves), else the built-in
-/// default. Never empty, so the provider block is always renderable.
+/// default. Strip one optional `governed/` prefix and ignore empty IDs.
+/// Never empty, so the provider block is always renderable.
 fn governed_catalog(policy: &HarnessPolicy) -> Vec<String> {
     let configured = policy
         .managed_config
@@ -154,6 +155,8 @@ fn governed_catalog(policy: &HarnessPolicy) -> Vec<String> {
             models
                 .iter()
                 .filter_map(Value::as_str)
+                .map(|model| model.strip_prefix("governed/").unwrap_or(model))
+                .filter(|model| !model.is_empty())
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         })
@@ -583,6 +586,80 @@ mod tests {
         assert_eq!(models["org/fast"]["name"], "org/fast");
         assert_eq!(models["org/slow"]["name"], "org/slow");
         assert!(!models.contains_key("openai/gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn policy_catalog_normalizes_governed_prefixes() {
+        let (report, managed) = gateway_write(
+            "gateway-prefixed-catalog",
+            None,
+            json!({ "available_models": ["governed/openai/gpt-5.6-sol", "anthropic/claude-x"] }),
+        );
+
+        assert_eq!(managed["model"], "governed/openai/gpt-5.6-sol");
+        assert_eq!(
+            managed["provider"]["governed"]["models"],
+            json!({
+                "openai/gpt-5.6-sol": { "name": "openai/gpt-5.6-sol" },
+                "anthropic/claude-x": { "name": "anthropic/claude-x" }
+            })
+        );
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("defaulting to `openai/gpt-5.6-sol`"));
+    }
+
+    #[test]
+    fn native_model_matches_normalized_policy_catalog() {
+        for native in ["openai/other", "governed/openai/other"] {
+            let (_, managed) = gateway_write(
+                "gateway-native-normalized",
+                Some(native),
+                json!({ "available_models": ["governed/org/first", "governed/openai/other"] }),
+            );
+            assert_eq!(managed["model"], "governed/openai/other");
+        }
+    }
+
+    #[test]
+    fn policy_catalog_discards_empty_and_non_string_entries() {
+        let (_, managed) = gateway_write(
+            "gateway-mixed-catalog",
+            None,
+            json!({ "available_models": ["", "governed/", null, 42, "governed/org/fast", "org/slow"] }),
+        );
+        assert_eq!(managed["model"], "governed/org/fast");
+        assert_eq!(
+            managed["provider"]["governed"]["models"],
+            json!({
+                "org/fast": { "name": "org/fast" },
+                "org/slow": { "name": "org/slow" }
+            })
+        );
+
+        let (_, fallback) = gateway_write(
+            "gateway-invalid-catalog",
+            None,
+            json!({ "available_models": ["", "governed/", null, 42] }),
+        );
+        assert_eq!(fallback["model"], "governed/openai/gpt-5.6-sol");
+        assert_eq!(
+            fallback["provider"]["governed"]["models"],
+            json!({ "openai/gpt-5.6-sol": { "name": "openai/gpt-5.6-sol" } })
+        );
+    }
+
+    #[test]
+    fn policy_catalog_strips_one_prefix_and_preserves_order_and_duplicates() {
+        let policy: HarnessPolicy = serde_json::from_value(json!({
+            "managed_config": {
+                "available_models": ["governed/org/first", "governed/governed/legacy", "org/first"]
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            governed_catalog(&policy),
+            ["org/first", "governed/legacy", "org/first"]
+        );
     }
 
     #[test]
