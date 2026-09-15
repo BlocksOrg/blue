@@ -47,6 +47,8 @@ fn matrix_managed_config(agent: &str, version: &str) {
     common::assert_governed_model(&home, agent, model);
     common::assert_mcp_registered(&home, agent);
     common::assert_example_skill_materialized(&home, agent);
+    drop(home); // Native state and asynchronous children must be clean before recording success.
+    e2e_slim::record_cell("governance", agent, version);
 }
 
 /// The governed model a given agent's managed config must carry, from the shared
@@ -66,7 +68,7 @@ fn model_for(agent: &str) -> &'static str {
 #[test]
 fn matrix_excludes_lock_pin() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let lock = common::read_json(&manifest_dir.join("agents.lock.json"));
+    let lock = common::read_json(&manifest_dir.join("../e2e/agents.lock.json"));
     let matrix = common::read_json(&manifest_dir.join("agents.matrix.json"));
     for (agent, _) in common::AGENTS {
         let pin = lock

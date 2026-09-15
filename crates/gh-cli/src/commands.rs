@@ -2360,7 +2360,7 @@ fn ensure_compatible_version(
         let version = resolve_npm_install_version(harness, &invocation)?;
         run_kimi_standalone_installer(&detected.path, &version)?;
     } else {
-        let program = PathBuf::from(invocation.program);
+        let program = program_on_path(invocation.program);
         run_installer_command(harness, &program, &invocation.args, &invocation.display)?;
     }
 
@@ -2412,6 +2412,17 @@ fn path_is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
+}
+
+/// Resolve a helper program on `PATH` before spawning it.
+///
+/// `Command::new("npm")` cannot start anything on Windows: `CreateProcessW`
+/// only ever appends `.exe`, and npm — like every CLI npm installs — is a
+/// `npm.cmd` wrapper. Resolving first hands `Command` the full `.cmd` path,
+/// which it knows to run through the command interpreter. Falls back to the
+/// bare name so a genuinely missing program still fails by its own name.
+fn program_on_path(name: &str) -> PathBuf {
+    gh_common::which(name).unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn run_installer_command(
@@ -2497,7 +2508,7 @@ fn resolve_npm_install_version(
     let package = invocation.args.last().ok_or_else(|| {
         anyhow!("the {harness} install plan did not contain an npm package selector")
     })?;
-    let output = std::process::Command::new("npm")
+    let output = std::process::Command::new(program_on_path("npm"))
         .args(["view", package, "version", "--json"])
         .output()
         .with_context(|| format!("looking up a published policy-supported {harness} version"))?;
@@ -4405,7 +4416,7 @@ fn restore_verified_bundle(
         let import_path =
             session_spool_dir()?.join(format!("opencode-import-{}.json", std::process::id()));
         gh_common::write_atomic(&import_path, export)?;
-        let mut command = std::process::Command::new("opencode");
+        let mut command = std::process::Command::new(program_on_path("opencode"));
         command.arg("import").arg(&import_path);
         if let Some(destination) = destination {
             command.current_dir(destination);
@@ -4446,7 +4457,7 @@ fn restore_verified_bundle(
 }
 
 fn opencode_session_exists(destination: Option<&Path>, session_id: &str) -> Result<bool> {
-    let mut command = std::process::Command::new("opencode");
+    let mut command = std::process::Command::new(program_on_path("opencode"));
     command.args([
         "session",
         "list",

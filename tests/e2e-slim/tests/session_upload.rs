@@ -15,7 +15,7 @@
 //! only needs a valid compatibility profile and a capturable native session —
 //! so it runs whenever the stack is up.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// `(harness, profile, transcript role in the bundle manifest)`.
@@ -34,14 +34,22 @@ const HARNESSES: [(&str, &str, &str); 4] = [
 /// under `.kimi-code/sessions/<project>/<session>`. OpenCode's portable export
 /// is imported natively rather than restored to a home path, so any location
 /// works.
-fn write_native_session(home: &Path, harness: &str, session_id: &str, bytes: &[u8]) -> PathBuf {
+fn write_native_session(
+    profile: &e2e_slim::Home,
+    harness: &str,
+    session_id: &str,
+    bytes: &[u8],
+) -> PathBuf {
+    let home = profile.path();
     let transcript_path = match harness {
         "codex" => home.join(format!(".codex/sessions/rollout-{session_id}.jsonl")),
         "claude" => home.join(format!(".claude/projects/e2e-slim/{session_id}.jsonl")),
         "kimi" => home.join(format!(
             ".kimi-code/sessions/e2e-slim/{session_id}/agents/main/wire.jsonl"
         )),
-        "opencode" => home.join(format!("{harness}-transcript.json")),
+        "opencode" => profile
+            .scratch_path()
+            .join(format!("{harness}-transcript.json")),
         _ => unreachable!("unknown harness {harness}"),
     };
     std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
@@ -74,7 +82,7 @@ fn session_upload_round_trip() {
             "{{\"harness\":\"{harness}\",\"session\":\"{session_id}\",\"marker\":\"BLUE_SLIM_OK\"}}\n"
         )
         .into_bytes();
-        let transcript_path = write_native_session(home.path(), harness, &session_id, &bytes);
+        let transcript_path = write_native_session(&home, harness, &session_id, &bytes);
 
         let payload = serde_json::json!({
             "session_id": session_id,
@@ -127,6 +135,32 @@ fn session_upload_round_trip() {
                         == Some(session_id.as_str())
             }),
             "captured sessions should include {harness}/{session_id}: {items:#?}"
+        );
+    }
+
+    // Wait for every worker before releasing the native profile.
+    for item in &items {
+        let id = item.get("id").and_then(serde_json::Value::as_str).unwrap();
+        if !transcripts.iter().any(|(agent, _, session, _)| {
+            item.get("harness").and_then(serde_json::Value::as_str) == Some(*agent)
+                && item
+                    .get("native_session_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(session)
+        }) {
+            continue;
+        }
+        e2e_slim::wait_for(
+            "completed session artifact",
+            Duration::from_secs(60),
+            || {
+                let detail = home.get_upload(id);
+                (detail
+                    .pointer("/artifacts/0/status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("complete"))
+                .then_some(())
+            },
         );
     }
 
