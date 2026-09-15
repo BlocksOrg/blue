@@ -13,6 +13,8 @@
 //! (not a root member) so its test-only deps stay out of the deployment image's
 //! cargo-chef recipe; build/test it via its own manifest.
 
+mod platform;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -54,18 +56,46 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// CI must fail when coverage prerequisites are absent.
+pub fn required() -> bool {
+    std::env::var("E2E_SLIM_REQUIRED").as_deref() == Ok("1")
+}
+fn required_env(name: &str) -> Option<String> {
+    let value = non_empty_env(name);
+    assert!(
+        !required() || value.is_some(),
+        "missing required environment variable {name}"
+    );
+    value
+}
+
+/// A completed matrix cell, written only after all its assertions succeed.
+pub fn record_cell(suite: &str, agent: &str, version: &str) {
+    if let Some(dir) = non_empty_env("E2E_SLIM_REPORT_DIR") {
+        let path = Path::new(&dir).join(format!("{suite}-{agent}-{version}.json"));
+        std::fs::create_dir_all(&dir).expect("creating report directory");
+        std::fs::write(
+            path,
+            serde_json::json!({"suite":suite,"agent":agent,"version":version,"status":"passed"})
+                .to_string(),
+        )
+        .expect("writing cell evidence");
+    }
+}
+
 /// Resolve the running stack from the environment, or `None` to skip.
 ///
 /// Only `E2E_SLIM_CONTROL_API_URL` is required; the rest fall back to the
 /// well-known host-published defaults from `docker-compose.yml`.
 pub fn env_or_skip() -> Option<Stack> {
-    let control_api_url = non_empty_env("E2E_SLIM_CONTROL_API_URL")?;
-    let database_url = non_empty_env("E2E_SLIM_DATABASE_URL")
+    let control_api_url = required_env("E2E_SLIM_CONTROL_API_URL")?;
+    let database_url = required_env("E2E_SLIM_DATABASE_URL")
         .unwrap_or_else(|| "postgres://harness:harness@127.0.0.1:5432/governance".to_owned());
     let minio_url =
-        non_empty_env("E2E_SLIM_MINIO_URL").unwrap_or_else(|| "http://127.0.0.1:9000".to_owned());
+        required_env("E2E_SLIM_MINIO_URL").unwrap_or_else(|| "http://127.0.0.1:9000".to_owned());
     let blue_bin = PathBuf::from(
-        non_empty_env("E2E_SLIM_BLUE_BIN").unwrap_or_else(|| "target/debug/blue".to_owned()),
+        non_empty_env("E2E_SLIM_BLUE_BIN")
+            .unwrap_or_else(|| format!("target/debug/blue{}", std::env::consts::EXE_SUFFIX)),
     );
     let http = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -293,8 +323,7 @@ impl Stack {
 /// An isolated `$HOME` for one test process. Holds the tempdir alive; drop
 /// cleans it up.
 pub struct Home {
-    _dir: tempfile::TempDir,
-    home: PathBuf,
+    profile: platform::TestProfile,
     blue_bin: PathBuf,
     control_api_url: String,
     minio_url: String,
@@ -319,9 +348,8 @@ impl Home {
         governance_only: bool,
         path_prepend: Option<PathBuf>,
     ) -> Home {
-        let dir = tempfile::tempdir().expect("creating temp HOME");
-        let home = dir.path().to_path_buf();
-        let blue_dir = home.join(".config/blue");
+        let profile = platform::TestProfile::create();
+        let blue_dir = profile.paths.config.clone();
         std::fs::create_dir_all(&blue_dir).expect("creating ~/.config/blue");
 
         // blue.toml: reach the control-api over HTTP, authenticate with a static
@@ -360,8 +388,7 @@ impl Home {
         );
 
         Home {
-            _dir: dir,
-            home,
+            profile,
             blue_bin: stack.blue_bin.clone(),
             control_api_url: stack.control_api_url.clone(),
             minio_url: stack.minio_url.clone(),
@@ -375,7 +402,23 @@ impl Home {
 
     /// The isolated HOME directory root.
     pub fn path(&self) -> &Path {
-        &self.home
+        &self.profile.paths.profile
+    }
+
+    pub fn config_path(&self) -> &Path {
+        &self.profile.paths.config
+    }
+    pub fn data_path(&self) -> &Path {
+        &self.profile.paths.data
+    }
+    pub fn cache_path(&self) -> &Path {
+        &self.profile.paths.cache
+    }
+    pub fn scratch_path(&self) -> &Path {
+        self.profile.scratch()
+    }
+    pub fn marker_path(&self) -> PathBuf {
+        self.profile.markers()
     }
 
     /// The unique per-process user email baked into this HOME's token. The
@@ -392,7 +435,7 @@ impl Home {
 
     /// The path to this HOME's `session.json`.
     pub fn session_path(&self) -> PathBuf {
-        self.home.join(".config/blue/session.json")
+        self.config_path().join("session.json")
     }
 
     /// A `blue` command bound to this isolated HOME. PATH is inherited (so the
@@ -402,11 +445,8 @@ impl Home {
     /// exact build — for both `blue agent` (eligibility) and `blue run` (launch).
     pub fn blue(&self) -> assert_cmd::Command {
         let mut command = assert_cmd::Command::new(&self.blue_bin);
-        command
-            .env("HOME", &self.home)
-            .env("XDG_CONFIG_HOME", self.home.join(".config"))
-            .env("XDG_CACHE_HOME", self.home.join(".cache"))
-            .env("E2E_SLIM_BEARER", &self.bearer);
+        self.profile.configure(&mut command);
+        command.env("E2E_SLIM_BEARER", &self.bearer);
         if let Some(dir) = &self.path_prepend {
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut entries = vec![dir.clone()];
@@ -432,6 +472,10 @@ impl Home {
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("not eligible") {
+            assert!(
+                !required(),
+                "required agent {name} is not eligible: {stderr}"
+            );
             AgentSelection::NotEligible
         } else {
             panic!(
@@ -446,6 +490,7 @@ impl Home {
     /// generous timeout absorbs a real (network) inference round-trip.
     pub fn run_agent(&self, name: &str, args: &[String]) -> std::process::Output {
         let mut command = self.blue();
+        command.current_dir(self.scratch_path());
         command.arg("run").arg(name).arg("--").args(args);
         command.timeout(std::time::Duration::from_secs(240));
         command.output().expect("running `blue run`")
@@ -573,7 +618,7 @@ impl AgentMatrix {
     /// Load the manifest named by `E2E_SLIM_AGENT_MATRIX`, or `None` when the env
     /// is unset/empty (matrix off) so callers self-skip.
     pub fn from_env() -> Option<AgentMatrix> {
-        let path = non_empty_env(AGENT_MATRIX_ENV)?;
+        let path = required_env(AGENT_MATRIX_ENV)?;
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|error| panic!("reading agent matrix manifest {path}: {error}"));
         let manifest = serde_json::from_slice(&bytes)
@@ -584,10 +629,16 @@ impl AgentMatrix {
     /// Absolute bin dir the `(agent, version)` cell was installed into, or `None`
     /// when the manifest has no such cell (that cell then self-skips).
     pub fn bin_dir(&self, agent: &str, version: &str) -> Option<PathBuf> {
-        self.manifest
+        let result = self
+            .manifest
             .pointer(&format!("/{agent}/{version}"))
             .and_then(serde_json::Value::as_str)
-            .map(PathBuf::from)
+            .map(PathBuf::from);
+        assert!(
+            !required() || result.is_some(),
+            "missing required matrix cell {agent} {version}"
+        );
+        result
     }
 }
 
@@ -703,11 +754,11 @@ pub struct GatewayStack {
 /// [`env_or_skip`] but additionally requires the LiteLLM coordinates `run.sh`
 /// only exports in gateway mode, so the governance-only path never trips it.
 pub fn gateway_env_or_skip() -> Option<GatewayStack> {
-    let litellm_url = non_empty_env("E2E_SLIM_LITELLM_URL")?
+    let litellm_url = required_env("E2E_SLIM_LITELLM_URL")?
         .trim_end_matches('/')
         .to_owned();
-    let litellm_master_key = non_empty_env("E2E_SLIM_LITELLM_MASTER_KEY")?;
-    let inference_proxy_url = non_empty_env("E2E_SLIM_INFERENCE_PROXY_URL")
+    let litellm_master_key = required_env("E2E_SLIM_LITELLM_MASTER_KEY")?;
+    let inference_proxy_url = required_env("E2E_SLIM_INFERENCE_PROXY_URL")
         .unwrap_or_else(|| "http://127.0.0.1:8081".to_owned())
         .trim_end_matches('/')
         .to_owned();
@@ -816,6 +867,27 @@ impl GatewayStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_mode_rejects_missing_endpoints() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::required_mode_child", "--nocapture"])
+            .env("E2E_SLIM_REQUIRED", "1")
+            .env("E2E_SLIM_REQUIRED_CHILD", "1")
+            .env_remove("E2E_SLIM_CONTROL_API_URL")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("missing required environment variable E2E_SLIM_CONTROL_API_URL"));
+    }
+
+    #[test]
+    fn required_mode_child() {
+        if std::env::var("E2E_SLIM_REQUIRED_CHILD").as_deref() == Ok("1") {
+            let _ = env_or_skip();
+        }
+    }
 
     #[test]
     fn parses_session_bundles() {

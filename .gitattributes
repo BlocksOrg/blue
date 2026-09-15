@@ -1,3 +1,7 @@
 # Golden plans are byte-compared on every platform, including a Windows
 # checkout with core.autocrlf=true. Keep them exactly as committed.
 crates/gh-config/tests/golden/** -text
+
+# Windows stages these exact executable bytes for the Linux native-E2E backend.
+tests/e2e-native/backend.sh text eol=lf
+tests/e2e-slim/fixtures/litellm-provisioner.mjs text eol=lf

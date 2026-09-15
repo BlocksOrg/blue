@@ -23,3 +23,5 @@ terraform.tfvars
 !terraform.tfvars.example
 /tests/e2e-windows/target
 /tests/e2e-windows/artifacts
+
+/tests/e2e-native/artifacts/

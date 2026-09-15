@@ -42,3 +42,9 @@ workflows and deployment image dependencies are unchanged.
 This is client process E2E using a fixture agent and file policy, not backend
 login, real inference or a certification of the real Codex UI. Those remain
 covered by the existing suites and manual testing with a real agent installation.
+
+The separate [`../e2e-native`](../e2e-native/README.md) runner exercises shared
+backend-connected slim governance and real-agent gateway scenarios on native
+clients. This ConPTY suite remains a fixture-based launcher regression check;
+it alone does not certify real agents, inference or backend session journeys.
+Do not run both suites concurrently under the same disposable Windows account.
