@@ -61,3 +61,25 @@ Root workspace build, tests, `cargo fmt --all --check`, and
 `cargo clippy --all-targets` passed. Build/test/Clippy used
 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0` to fit
 local disk capacity after stopping the initial debug-symbol build.
+
+Manual workflow dispatch was denied with HTTP 403 (`Resource not accessible by
+integration`). Pushing implementation commit `b9a25f4` triggered the
+[PR native workflow](https://github.com/BlocksOrg/blue/actions/runs/35030256590)
+instead. Gateway remains excluded from PR runs by design.
+
+That run scheduled only `governance (windows-2022)` (no macOS job). The
+[Windows job](https://github.com/BlocksOrg/blue/actions/runs/35030256590/job/104588464282)
+failed at the new preflight step, listing all seven missing variables and the
+setup documentation before credentials, tool installation, or backend allocation.
+Only image/build artifacts were uploaded: no native coverage, cell, isolation,
+or lease artifacts exist. This verifies Windows preflight execution, not Windows
+scenario execution or cloud cleanup.
+
+[CI](https://github.com/BlocksOrg/blue/actions/runs/35030256583) and the existing
+[Windows CLI suite](https://github.com/BlocksOrg/blue/actions/runs/35030256346)
+passed on implementation commit `b9a25f4`.
+The existing [Linux smoke workflow](https://github.com/BlocksOrg/blue/actions/runs/35030256629),
+[Linux slim governance](https://github.com/BlocksOrg/blue/actions/runs/35030256556),
+and [security gates](https://github.com/BlocksOrg/blue/actions/runs/35030256370)
+also passed on that commit. Linux full and gateway are not PR jobs and were not
+rerun for this follow-up.
