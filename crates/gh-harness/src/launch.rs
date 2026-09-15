@@ -101,7 +101,12 @@ fn pty_command(bin: &Path, args: &[String]) -> Result<CommandBuilder, GhError> {
     let comspec =
         std::env::var_os("ComSpec").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe"));
     let mut cmd = CommandBuilder::new(comspec);
-    cmd.args(["/d", "/e:ON", "/v:OFF", "/c"]);
+    // A quoted batch path as the first token after `/c` triggers cmd's
+    // outer-quote stripping once argv contains additional quotes. Prefix with
+    // CALL so the path's quotes survive (e.g. an npm prefix containing spaces).
+    // CALL reparses its arguments; cmd_reserved_argument above rejects the
+    // expansion and control characters that could change on that second pass.
+    cmd.args(["/d", "/e:ON", "/v:OFF", "/c", "call"]);
     cmd.arg(bin);
     cmd.args(args);
     Ok(cmd)
@@ -715,6 +720,7 @@ mod windows_tests {
                 std::ffi::OsString::from("/e:ON"),
                 std::ffi::OsString::from("/v:OFF"),
                 std::ffi::OsString::from("/c"),
+                std::ffi::OsString::from("call"),
                 std::ffi::OsString::from(r"C:\Users\dev\AppData\Roaming\npm\codex.CMD"),
                 std::ffi::OsString::from("--model"),
                 std::ffi::OsString::from("gpt-5"),
