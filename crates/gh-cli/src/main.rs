@@ -5,6 +5,7 @@
 // and each crate's docs for the design.
 
 mod commands;
+mod repair;
 mod supervisor;
 
 use clap::{Parser, Subcommand};
