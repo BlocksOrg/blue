@@ -182,12 +182,14 @@ never drift on agent versions. The extra historical samples for the
 symlinked); it must list only versions **other** than the lock pin — the
 `matrix_excludes_lock_pin` guard test fails if it re-lists the pin.
 
-## Native Windows clients
+## On-demand native Windows clients
 
 [`../e2e-native`](../e2e-native/README.md) runs these **same scenario bodies and
-version matrix** on Windows x64 against a separate disposable Linux backend per
-suite/run attempt. Existing Linux suites retain Unix coverage; additional macOS
-native certification is discontinued.
+version matrix** on a manually prepared Windows x64 machine against a separate
+disposable Linux backend per suite/run attempt. No native Windows/AWS workflow
+is scheduled in CI. See the native runner README for setup and commands. Existing
+Linux suites retain Unix coverage; additional macOS native certification is
+discontinued.
 Unix still uses temporary HOME/XDG roots; Windows uses real Known Folders in a
 fresh disposable account, serial tests, an exclusive reservation, and descendant
 cleanup before removing only test-owned application state.
@@ -198,7 +200,7 @@ cleanup before removing only test-owned application state.
 | Gateway invocation | Fresh per-profile MCP markers and invocation nonce in uploaded bundle |
 | Native isolation | Windows account preflight, session ACL, sequential cleanup, one active Home and child completion |
 | Client/backend connection | Fresh inert health-object digest and DB query through loopback SSM tunnels |
-| Required coverage | Missing endpoints, agents and matrix cells fail CI; expected/executed report |
+| Required coverage | Missing endpoints, agents and matrix cells fail the manual run; expected/executed report |
 
 New knobs: `E2E_SLIM_REQUIRED=1` makes missing prerequisites failures;
 `E2E_SLIM_REPORT_DIR` receives completed cell evidence;

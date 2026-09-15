@@ -1,3 +1,9 @@
+> Current scope: native Windows E2E is manual only. The AWS-backed GitHub
+> workflow was removed at the user's request. Fixtures, the runner, isolation
+> regression, backend helpers, and infrastructure module remain available for
+> on-demand runs. Workflow references below are historical evidence, not active
+> automation. See [manual setup](README.md#run-on-demand).
+
 # Validation recorded 2026-09-15
 
 | Target | Result |

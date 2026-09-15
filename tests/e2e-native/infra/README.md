@@ -10,34 +10,35 @@ and at least 40 GiB root storage (delete on termination). Its instance role only
 accesses the test bucket and SSM. It needs outbound access to container registries,
 SSM, S3, and (gateway only) OpenRouter. The security group has no ingress rules.
 
-Run `tofu init`, `tofu fmt -check`, `tofu validate`, then review `tofu plan` before
-applying. Configure the GitHub `blue-e2e-native` environment with the output values
-using this complete output mapping:
+## Manual runner configuration
 
-| Module output | GitHub environment variable |
+Inspect existing test resources/state before provisioning. Run `tofu init`,
+`tofu fmt -check`, `tofu validate`, then review `tofu plan` before applying.
+Export the module outputs in the shell on the Windows test machine:
+
+| Module output | Manual runner environment variable |
 | --- | --- |
-| `github_role_arn` | `E2E_NATIVE_ROLE_ARN` |
-| `region` | `E2E_NATIVE_REGION` |
+| `region` | `AWS_REGION` |
 | `bucket` | `E2E_NATIVE_BUCKET` |
 | `subnet_id` | `E2E_NATIVE_SUBNET_ID` |
 | `security_group_id` | `E2E_NATIVE_SECURITY_GROUP_ID` |
 | `instance_profile` | `E2E_NATIVE_INSTANCE_PROFILE` |
 | `ami_id` | `E2E_NATIVE_AMI_ID` |
 
-Run `node tests/e2e-native/preflight.mjs --ci` from the repository root with
-these variables exported to check for missing/blank settings. The credential
-action requires both the region and role ARN. Manual AWS runs may use the
-normal credential/region chain instead.
+Run `node tests/e2e-native/preflight.mjs` from the repository root to check the
+five backend settings. Authenticate separately through the normal AWS credential
+chain with dedicated-test permissions to manage the leased backend. Never reuse
+a product deployment role. Set `OPENROUTER_API_KEY` locally only for gateway runs;
+without it gateway remains unverified.
 
-The default role trust requires
+The module retains its GitHub OIDC role and `github_role_arn` output, but no
+native E2E workflow currently uses them. That role trusts only
 `repo:BlocksOrg/blue:environment:blue-e2e-native` with audience
-`sts.amazonaws.com`; its maximum session duration is 7200 seconds. Both the
-gateway secret probe and gateway runner select this environment, so
-`OPENROUTER_API_KEY` may be environment-scoped. A missing key explicitly leaves
-gateway unverified. Check deployment rules allow the intended branch and manual
-dispatch. Restrict that environment to trusted
-same-repository branches and reviewers: its OIDC subject authorizes remote code
-on these disposable test instances. Never reuse a product deployment role.
+`sts.amazonaws.com` and maximum session duration 7200 seconds; it does not grant
+manual users access. The retained `preflight.mjs --ci` mode checks the additional
+`E2E_NATIVE_ROLE_ARN` and `E2E_NATIVE_REGION` inputs for potential future automation.
+Neither a GitHub environment nor those CI-only variables is needed to run the
+manual runner with separately authorized AWS credentials.
 
 Each instance has a three-hour expiry. A scheduled Lambda independently terminates
 expired instances every 15 minutes; test objects expire after four hours in the
