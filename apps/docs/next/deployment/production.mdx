@@ -36,9 +36,13 @@ Each GitHub Release contains `blue-deployment-vX.Y.Z.tar.gz` with a consumer Doc
 ```bash
 VERSION=0.1.0
 curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/blue-deployment-v${VERSION}.tar.gz"
+curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/SHA256SUMS"
+grep "blue-deployment-v${VERSION}.tar.gz" SHA256SUMS | shasum -a 256 -c -
 tar -xzf "blue-deployment-v${VERSION}.tar.gz"
 cd "blue-deployment-${VERSION}"
 ```
+
+Deploy the stock Blue image by immutable digest; package a custom provisioner separately if gateway mode requires one.
 
 The consumer image contains only the provisioner executable. Helm copies
 it into a read-only volume before the unchanged stock Control API starts:
