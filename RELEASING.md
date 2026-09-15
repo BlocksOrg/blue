@@ -32,6 +32,37 @@ Run the Release workflow manually with the intended tag to assemble a dry-run
 artifact. Inspect the CLI archives, `SHA256SUMS`, SBOM, Helm package, and
 deployment bundle.
 
+## Candidate images
+
+To deploy unreleased code, cut a candidate image instead of tagging. The Dev
+image workflow builds any ref on demand and publishes it to a separate package,
+`ghcr.io/blocksorg/blue-rc`:
+
+```bash
+gh workflow run dev-image.yml --ref <branch>
+```
+
+It names the candidate `<workspace version>-rc.g<short sha>` from the version
+already in `Cargo.toml`, so a cut of `main` today is `0.1.0-rc.g1a2b3c4`.
+Repeated cuts of the same version stay distinct, the prerelease suffix keeps a
+candidate from ever squatting the tag the real release will take, and the
+`{{major}}` / `{{major}}.{{minor}}` rollup tags are suppressed. No git tag, no
+GitHub Release, and `latest` never moves.
+
+Only the image is published — no CLI archives, chart or deployment bundle. The
+run summary prints the manifest digest; deploy with that rather than the tag,
+since production mode requires `image.digest`:
+
+```bash
+helm upgrade --install blue oci://ghcr.io/blocksorg/charts/blue \
+  --set image.repository=ghcr.io/blocksorg/blue-rc \
+  --set image.digest=sha256:...
+```
+
+Dispatching requires write access to the repository, which is the only access
+control on the workflow. `ghcr.io/blocksorg/blue-rc` is created on the first
+push and is private until someone makes it public.
+
 ## Publish
 
 Create and push an annotated tag only after the dry run succeeds:
