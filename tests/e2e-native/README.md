@@ -1,9 +1,10 @@
 # Shared native client E2E
 
 Runs the existing `e2e-slim` Rust scenarios and generated agent/version grid with
-a native Blue binary. Backends remain Linux. Windows x64 (`windows-2022`) and
-macOS (`macos-14`, runner architecture recorded in reports) each get a separate
-EC2 backend per suite and run attempt. Windows ARM64 remains unverified.
+a native Blue binary. Backends remain Linux. Windows x64 (`windows-2022`) gets
+a separate EC2 backend per suite and run attempt. Existing Linux suites provide
+Unix coverage; additional macOS native certification is discontinued. Windows
+ARM64 remains unverified.
 
 ## Run
 
@@ -39,8 +40,11 @@ AWS inputs (dedicated test resources, see [infra](infra/README.md)):
 
 In CI also configure `E2E_NATIVE_ROLE_ARN` and `E2E_NATIVE_REGION` as variables
 in the protected `blue-e2e-native` GitHub environment. Allow its role a two-hour
-session. The gateway secret is `OPENROUTER_API_KEY`. A missing provider secret
-means **not run**, never certified. Forks retain the existing Linux and Windows
+session. Run `node tests/e2e-native/preflight.mjs --ci` to validate all seven
+settings before CI setup. Manual AWS runs validate the five backend variables
+and may use the normal AWS credential/region chain. Cleanup-only runs do not
+require these setup settings. The gateway secret is `OPENROUTER_API_KEY`. A
+missing provider secret means **not run**, never certified. Forks retain the existing Linux and Windows
 fixture checks and cannot access this AWS workflow.
 
 ## Windows isolation
@@ -50,6 +54,11 @@ real Known Folders and refuses existing Blue or agent roots, including legacy
 Blue state. It removes only its enumerated application roots, never a profile,
 `.config`/`.local` parent or agent installation prefix. Installation prefixes and
 fixtures live in the run directory. No production path override is added.
+
+Before agent installation or backend allocation, the Windows runner executes
+`platform::windows_tests::sequential_native_profiles_remove_owned_state` with
+MSVC. Exactly one passing test is required; `windows-isolation.log` retains its
+output, including failures.
 
 All native tests are serialized (including retries). A cross-process reservation
 rejects simultaneous Homes; a Windows Job Object tracks native descendants,
@@ -73,7 +82,7 @@ Governance includes signed-session bootstrap verified by the backend, managed
 configuration, session recovery and synthetic native transcript uploads. Gateway
 uses real agent invocations and inference. Slim does **not** cover browser/device
 approval, SCIM, mTLS, full upstream TUIs or the full container topology; those
-remain in Linux `tests/e2e`. A checked-in workflow is not proof of Windows/macOS
+remain in Linux `tests/e2e`. A checked-in workflow is not proof of Windows
 parity: require a successful dispatched gateway grid before making that claim.
 
 ## Backend lifecycle

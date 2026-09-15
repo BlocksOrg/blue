@@ -5,6 +5,8 @@ import { prepareFixtures, repo } from "./prepare-fixtures.mjs";
 import { installAgents, cells } from "./install-agents.mjs";
 import { Backend, sanitize } from "./backend.mjs";
 import { run } from "./process.mjs";
+import { validateAwsConfiguration } from "./preflight.mjs";
+import { verifyWindowsIsolation } from "./windows-isolation.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -61,6 +63,7 @@ if (values["cleanup-only"]) {
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
   try {
+    if (values.backend === "aws") validateAwsConfiguration(process.env);
     const rust = await run("rustc", ["-vV"], { capture: true });
     if (process.platform === "win32") {
       if (!rust.includes("pc-windows-msvc"))
@@ -78,6 +81,11 @@ if (values["cleanup-only"]) {
       timeout: 1_800_000,
       signal: backend.controller.signal,
     });
+    if (process.platform === "win32")
+      await verifyWindowsIsolation({
+        directory,
+        signal: backend.controller.signal,
+      });
     const agents = await installAgents(join(directory, "agents"));
     const hashes = await prepareFixtures(backend.fixtures);
     await backend.start(hashes);

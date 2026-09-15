@@ -32,3 +32,32 @@ was denied to the available integration. No infrastructure was created. Apply th
 isolated module with reviewed network/AMI inputs and configure the protected
 GitHub environment before dispatching native jobs. Successful native gateway
 runs are still required before claiming Windows/macOS parity.
+
+## Windows-only follow-up, 2026-09-15
+
+Additional macOS native certification is discontinued; the dated evidence above
+is retained. Existing Linux suites and macOS product/release support are unchanged.
+
+The prior [Windows setup run](https://github.com/BlocksOrg/blue/actions/runs/35027010693/job/104578016803)
+failed before scenarios with `Input required and not supplied: aws-region`.
+All seven protected environment variables were absent during implementation.
+The environment permits the implementation branch (no deployment branch policy).
+In the accessible AWS account `767397683479`, region `us-east-1`, the dedicated
+role and instance profile still return `NoSuchEntity`; no `BlueE2E=native` tagged
+resources or account-owned AMIs were found. No infrastructure state or reviewed
+test network/AMI inputs were available locally. No infrastructure was provisioned.
+Windows MSVC isolation, governance, gateway, and cloud cleanup remain unverified
+until dedicated infrastructure and the protected environment are configured.
+
+Follow-up local checks: all 14 Node helper tests passed; `actionlint` passed for
+all workflows; OpenTofu initialization, formatting and validation passed. The
+preflight CLI exited 1 and listed all seven missing CI settings. An AWS runtime
+attempt without configuration recorded all 16 cells as not certified and failed
+before tool setup; cleanup-only succeeded without those inputs. The isolation
+wrapper tests reject zero/ignored tests and preserve subprocess failure output;
+they do not substitute for Windows execution.
+
+Root workspace build, tests, `cargo fmt --all --check`, and
+`cargo clippy --all-targets` passed. Build/test/Clippy used
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0` to fit
+local disk capacity after stopping the initial debug-symbol build.

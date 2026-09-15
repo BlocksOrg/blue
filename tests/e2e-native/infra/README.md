@@ -12,7 +12,30 @@ SSM, S3, and (gateway only) OpenRouter. The security group has no ingress rules.
 
 Run `tofu init`, `tofu fmt -check`, `tofu validate`, then review `tofu plan` before
 applying. Configure the GitHub `blue-e2e-native` environment with the output values
-using the variable names in ../README.md. Restrict that environment to trusted
+using this complete output mapping:
+
+| Module output | GitHub environment variable |
+| --- | --- |
+| `github_role_arn` | `E2E_NATIVE_ROLE_ARN` |
+| `region` | `E2E_NATIVE_REGION` |
+| `bucket` | `E2E_NATIVE_BUCKET` |
+| `subnet_id` | `E2E_NATIVE_SUBNET_ID` |
+| `security_group_id` | `E2E_NATIVE_SECURITY_GROUP_ID` |
+| `instance_profile` | `E2E_NATIVE_INSTANCE_PROFILE` |
+| `ami_id` | `E2E_NATIVE_AMI_ID` |
+
+Run `node tests/e2e-native/preflight.mjs --ci` from the repository root with
+these variables exported to check for missing/blank settings. The credential
+action requires both the region and role ARN. Manual AWS runs may use the
+normal credential/region chain instead.
+
+The default role trust requires
+`repo:BlocksOrg/blue:environment:blue-e2e-native` with audience
+`sts.amazonaws.com`; its maximum session duration is 7200 seconds. Both the
+gateway secret probe and gateway runner select this environment, so
+`OPENROUTER_API_KEY` may be environment-scoped. A missing key explicitly leaves
+gateway unverified. Check deployment rules allow the intended branch and manual
+dispatch. Restrict that environment to trusted
 same-repository branches and reviewers: its OIDC subject authorizes remote code
 on these disposable test instances. Never reuse a product deployment role.
 

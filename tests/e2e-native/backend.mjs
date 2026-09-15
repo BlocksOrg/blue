@@ -198,7 +198,7 @@ export class Backend {
       this.localStarted = true;
       if (process.platform !== "linux")
         throw new Error(
-          "local backend requires Linux Docker; Windows/macOS use --backend aws",
+          "local backend requires Linux Docker; Windows uses --backend aws",
         );
       await this.execute.run(
         "docker",

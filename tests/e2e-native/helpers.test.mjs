@@ -1,4 +1,6 @@
 import test from "node:test";
+import { validateAwsConfiguration } from "./preflight.mjs";
+import { verifyWindowsIsolation } from "./windows-isolation.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,7 +23,7 @@ test("canonical lock supplies every unique pin and historical cell without slim 
 });
 test("npm prefix selection uses the native layout", () => {
   assert.equal(binDirectory("C:\\install", "win32"), "C:\\install");
-  assert.equal(binDirectory("/install", "darwin"), "/install/bin");
+  assert.equal(binDirectory("/install", "linux"), "/install/bin");
 });
 test("fixture generation preserves legacy bytes and renders native policies as data", async () => {
   const dir = await mkdtemp(join(tmpdir(), "blue fixtures # "));
@@ -188,4 +190,123 @@ test("cancelled native subprocess exits and fails instead of hanging", async () 
   });
   controller.abort(new Error("tunnel lost"));
   await assert.rejects(result, /tunnel lost/);
+});
+
+const runtimeConfiguration = {
+  E2E_NATIVE_BUCKET: "private-bucket-value",
+  E2E_NATIVE_SUBNET_ID: "subnet-value",
+  E2E_NATIVE_SECURITY_GROUP_ID: "security-group-value",
+  E2E_NATIVE_INSTANCE_PROFILE: "instance-profile-value",
+  E2E_NATIVE_AMI_ID: "ami-value",
+};
+const ciConfiguration = {
+  ...runtimeConfiguration,
+  E2E_NATIVE_REGION: "region-value",
+  E2E_NATIVE_ROLE_ARN: "role-value",
+};
+
+test("AWS preflight accepts complete runtime and CI configurations", () => {
+  validateAwsConfiguration(runtimeConfiguration);
+  validateAwsConfiguration(ciConfiguration, { ci: true });
+});
+
+test("AWS preflight lists every missing or blank setting together", () => {
+  assert.throws(
+    () =>
+      validateAwsConfiguration(
+        { E2E_NATIVE_BUCKET: " \t", E2E_NATIVE_AMI_ID: "\n" },
+        { ci: true },
+      ),
+    (error) => {
+      for (const name of Object.keys(ciConfiguration))
+        assert.ok(error.message.includes(name));
+      assert.ok(error.message.includes("tests/e2e-native/infra/README.md"));
+      return true;
+    },
+  );
+});
+
+test("AWS preflight permits manual credential/region chain but requires CI inputs", () => {
+  validateAwsConfiguration(runtimeConfiguration);
+  assert.throws(
+    () =>
+      validateAwsConfiguration(
+        { ...runtimeConfiguration, E2E_NATIVE_REGION: " " },
+        { ci: true },
+      ),
+    /E2E_NATIVE_REGION, E2E_NATIVE_ROLE_ARN/,
+  );
+});
+
+test("AWS preflight errors name missing settings without supplied values", () => {
+  assert.throws(
+    () =>
+      validateAwsConfiguration(
+        { ...ciConfiguration, E2E_NATIVE_SUBNET_ID: "" },
+        { ci: true },
+      ),
+    (error) => {
+      assert.ok(error.message.includes("E2E_NATIVE_SUBNET_ID"));
+      for (const value of Object.values(ciConfiguration))
+        assert.ok(!error.message.includes(value));
+      return true;
+    },
+  );
+});
+
+test("Windows isolation requires a real passing test and preserves failure evidence", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "blue isolation "));
+  const name =
+    "platform::windows_tests::sequential_native_profiles_remove_owned_state";
+  const success = `test ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;`;
+  const signal = new AbortController().signal;
+  try {
+    await verifyWindowsIsolation({
+      directory: dir,
+      signal,
+      execute: async (command, args, options) => {
+        assert.equal(command, "cargo");
+        assert.ok(args.includes(name));
+        assert.ok(args.includes("--exact"));
+        assert.equal(options.signal, signal);
+        assert.equal(options.env.E2E_SLIM_REQUIRED, "1");
+        assert.ok(options.timeout > 0);
+        return success;
+      },
+    });
+    assert.equal(
+      await readFile(join(dir, "windows-isolation.log"), "utf8"),
+      success,
+    );
+    for (const output of [
+      "test result: ok. 0 passed; 0 failed; 0 ignored;",
+      `test ${name} ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;`,
+    ]) {
+      await assert.rejects(
+        verifyWindowsIsolation({ directory: dir, execute: async () => output }),
+        /exactly one passing test/,
+      );
+      assert.equal(
+        await readFile(join(dir, "windows-isolation.log"), "utf8"),
+        output,
+      );
+    }
+    await assert.rejects(
+      verifyWindowsIsolation({
+        directory: dir,
+        execute: async () => {
+          throw Object.assign(new Error("cargo failed"), {
+            output: "linker failed",
+          });
+        },
+      }),
+      /cargo failed/,
+    );
+    assert.equal(
+      await readFile(join(dir, "windows-isolation.log"), "utf8"),
+      "linker failed",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

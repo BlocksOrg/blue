@@ -182,10 +182,12 @@ never drift on agent versions. The extra historical samples for the
 symlinked); it must list only versions **other** than the lock pin — the
 `matrix_excludes_lock_pin` guard test fails if it re-lists the pin.
 
-## Native Windows and macOS clients
+## Native Windows clients
 
 [`../e2e-native`](../e2e-native/README.md) runs these **same scenario bodies and
-version matrix** against a separate disposable Linux backend per OS/suite.
+version matrix** on Windows x64 against a separate disposable Linux backend per
+suite/run attempt. Existing Linux suites retain Unix coverage; additional macOS
+native certification is discontinued.
 Unix still uses temporary HOME/XDG roots; Windows uses real Known Folders in a
 fresh disposable account, serial tests, an exclusive reservation, and descendant
 cleanup before removing only test-owned application state.
