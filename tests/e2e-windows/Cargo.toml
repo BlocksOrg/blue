@@ -1,0 +1,13 @@
+# Independent of the deployment image's Cargo workspace and Linux E2E suites.
+[workspace]
+
+[package]
+name = "e2e-windows"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde_json = "1"
+portable-pty = "0.8"
+tempfile = "3"
