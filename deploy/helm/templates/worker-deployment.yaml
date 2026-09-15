@@ -41,6 +41,13 @@ spec:
             - name: HARNESS_GATEWAY_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef: { name: {{ .Values.blue.existingSecret | quote }}, key: HARNESS_GATEWAY_ENCRYPTION_KEY, optional: false }
+            # The worker never signs inference tokens, but it loads the same gateway
+            # envelope as the API, which declares this key. Pin the path to the mount
+            # below so a config file can't point the two pods at different files.
+            - { name: HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE, value: /var/run/blue/gateway-jwt/signing-key.pem }
+            {{- if .Values.blue.inferenceJwt.includePreviousKey }}
+            - { name: HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_FILE, value: /var/run/blue/gateway-jwt/previous-signing-key.pem }
+            {{- end }}
             {{- end }}
             {{- include "blue.storageEnv" . | nindent 12 }}
             {{- range $name, $value := .Values.blue.env }}
@@ -52,14 +59,25 @@ spec:
           livenessProbe: { httpGet: { path: /health, port: worker-health }, periodSeconds: 30, timeoutSeconds: 10 }
           resources:
             {{- toYaml .Values.resources.worker | nindent 12 }}
-          {{- with .Values.blue.config.existingConfigMap }}
+          {{- if or .Values.blue.config.existingConfigMap .Values.blue.enableInferenceProxy }}
           volumeMounts:
+            {{- if .Values.blue.enableInferenceProxy }}
+            - { name: gateway-jwt, mountPath: /var/run/blue/gateway-jwt, readOnly: true }
+            {{- end }}
+            {{- with .Values.blue.config.existingConfigMap }}
             - { name: blue-config, mountPath: {{ $.Values.blue.config.mountPath }}, subPath: {{ $.Values.blue.config.key }}, readOnly: true }
+            {{- end }}
           {{- end }}
-      {{- with .Values.blue.config.existingConfigMap }}
+      {{- if or .Values.blue.config.existingConfigMap .Values.blue.enableInferenceProxy }}
       volumes:
+        {{- if .Values.blue.enableInferenceProxy }}
+        - name: gateway-jwt
+          secret: { secretName: {{ required "blue.inferenceJwt.secret is required when blue.enableInferenceProxy=true" .Values.blue.inferenceJwt.secret | quote }} }
+        {{- end }}
+        {{- with .Values.blue.config.existingConfigMap }}
         - name: blue-config
           configMap:
             name: {{ . }}
             items: [{ key: {{ $.Values.blue.config.key }}, path: {{ $.Values.blue.config.key }} }]
+        {{- end }}
       {{- end }}

@@ -24,6 +24,8 @@ blue:
   inferenceJwt:
     # Secret holding signing-key.pem, the active RSA private key. The Control
     # API derives the published verification keys from it; there is no JWKS.
+    # Mounted into the Control API and the worker: both load the whole gateway
+    # envelope at startup, and it declares this key. Only the API signs with it.
     # Keep this Secret separate from existingSecret, which every pod loads.
     secret: ""
     audience: blue-inference-proxy
