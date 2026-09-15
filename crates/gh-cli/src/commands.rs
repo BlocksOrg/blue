@@ -3,17 +3,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use gh_common::{BlueToml, Harness, IdentityConfig, InstallInvocation};
+use gh_common::{BlueToml, Harness, IdentityConfig};
 use gh_config::{
-    package_statuses, resolve_compatibility, supported_install, write_harness_with_package_fetcher,
-    AuthenticatedPackageFetcher, HarnessContext, WriteOptions,
+    package_statuses, write_harness_with_package_fetcher, AuthenticatedPackageFetcher,
+    HarnessContext, WriteOptions,
 };
 use gh_harness::{Detected, HarnessInventory, HarnessInventoryEntry};
 use gh_service::{
@@ -2322,67 +2321,13 @@ fn ensure_compatible_version(
     policy: &HarnessPolicy,
     interactive: bool,
 ) -> Result<(Detected, HarnessContext, bool)> {
-    match resolve_compatibility(
+    crate::repair::ensure_compatible_version(
         harness,
-        detected.version.as_ref(),
-        detected.raw_version.as_deref(),
+        detected,
         policy,
-    ) {
-        Ok(context) => return Ok((detected, context, false)),
-        Err(error) if !interactive || !error.is_installable() => {
-            return Err(anyhow!(error.with_install_hint(policy)))
-        }
-        Err(error) => cliclack::log::warning(error.with_install_hint(policy))?,
-    }
-
-    let invocation = supported_install(harness, policy)?;
-    let confirmed = cliclack::confirm(format!(
-        "Install a policy-supported {} version now?",
-        harness.metadata().label
-    ))
-    .initial_value(false)
-    .interact()?;
-    if !confirmed {
-        bail!(
-            "{} installation declined; run `{}` when ready",
-            harness.metadata().label,
-            invocation.display
-        );
-    }
-
-    if harness == Harness::Opencode {
-        let version = resolve_npm_install_version(harness, &invocation)?;
-        let program = detected.path.clone();
-        let args = vec!["upgrade".into(), version.to_string()];
-        let display = format!("'{}' upgrade {version}", program.display());
-        run_installer_command(harness, &program, &args, &display)?;
-    } else if harness == Harness::Kimi && !path_is_symlink(&detected.path) {
-        let version = resolve_npm_install_version(harness, &invocation)?;
-        run_kimi_standalone_installer(&detected.path, &version)?;
-    } else {
-        let program = PathBuf::from(invocation.program);
-        run_installer_command(harness, &program, &invocation.args, &invocation.display)?;
-    }
-
-    let refreshed = gh_harness::detect_at(harness, detected.path.clone());
-    let context = resolve_compatibility(
-        harness,
-        refreshed.version.as_ref(),
-        refreshed.raw_version.as_deref(),
-        policy,
+        interactive,
+        &mut crate::repair::NativeRuntime,
     )
-    .with_context(|| {
-        format!(
-            "the installer completed, but `{}` is still incompatible",
-            detected.path.display()
-        )
-    })?;
-    cliclack::log::success(format!(
-        "{} {} is installed and supported",
-        harness.metadata().label,
-        context.version
-    ))?;
-    Ok((refreshed, context, true))
 }
 
 fn update_inventory_after_version_check(
@@ -2406,132 +2351,6 @@ fn update_inventory_after_version_check(
     entry.compatibility_error = None;
     entry.compatibility_warning = context.unverified_warning.clone();
     entry.reconciled = false;
-}
-
-fn path_is_symlink(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
-fn run_installer_command(
-    harness: Harness,
-    program: &Path,
-    args: &[String],
-    display: &str,
-) -> Result<()> {
-    cliclack::log::info(format!("Running `{display}`"))?;
-    let status = std::process::Command::new(program)
-        .args(args)
-        .status()
-        .with_context(|| format!("starting `{}`", program.display()))?;
-    if !status.success() {
-        bail!(
-            "{} installer exited with {}; retry with `{}`",
-            harness.metadata().label,
-            status,
-            display
-        );
-    }
-    Ok(())
-}
-
-fn run_kimi_standalone_installer(path: &Path, version: &semver::Version) -> Result<()> {
-    let install_root = kimi_install_root(path).ok_or_else(|| {
-        anyhow!(
-            "cannot determine the Kimi installation root for `{}`",
-            path.display()
-        )
-    })?;
-    let url = "https://code.kimi.com/kimi-code/install.sh";
-    let display = format!(
-        "curl -fsSL {url} | KIMI_INSTALL_DIR='{}' KIMI_NO_MODIFY_PATH=1 bash -s -- --version {version}",
-        install_root.display()
-    );
-    cliclack::log::info(format!("Running `{display}`"))?;
-    let download = std::process::Command::new("curl")
-        .args(["-fsSL", url])
-        .output()
-        .context("downloading Kimi's official installer")?;
-    if !download.status.success() {
-        let stderr = String::from_utf8_lossy(&download.stderr).trim().to_owned();
-        bail!(
-            "downloading Kimi's official installer failed{}",
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
-        );
-    }
-    let mut child = std::process::Command::new("bash")
-        .args(["-s", "--", "--version", &version.to_string()])
-        .env("KIMI_INSTALL_DIR", install_root)
-        .env("KIMI_NO_MODIFY_PATH", "1")
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("starting Kimi's official installer")?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("Kimi installer stdin was unavailable"))?
-        .write_all(&download.stdout)
-        .context("sending Kimi's official installer to bash")?;
-    let status = child
-        .wait()
-        .context("waiting for Kimi's official installer")?;
-    if !status.success() {
-        bail!("Kimi installer exited with {status}; retry with `{display}`");
-    }
-    Ok(())
-}
-
-fn kimi_install_root(path: &Path) -> Option<&Path> {
-    path.parent().and_then(Path::parent)
-}
-
-fn resolve_npm_install_version(
-    harness: Harness,
-    invocation: &InstallInvocation,
-) -> Result<semver::Version> {
-    let package = invocation.args.last().ok_or_else(|| {
-        anyhow!("the {harness} install plan did not contain an npm package selector")
-    })?;
-    let output = std::process::Command::new("npm")
-        .args(["view", package, "version", "--json"])
-        .output()
-        .with_context(|| format!("looking up a published policy-supported {harness} version"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        bail!(
-            "npm could not resolve a policy-supported {harness} release{}",
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
-        );
-    }
-    highest_npm_version(&output.stdout)
-        .with_context(|| format!("resolving a published policy-supported {harness} release"))
-}
-
-fn highest_npm_version(output: &[u8]) -> Result<semver::Version> {
-    let value: serde_json::Value = serde_json::from_slice(output)
-        .context("npm returned an invalid OpenCode version response")?;
-    let values = match &value {
-        serde_json::Value::String(value) => vec![value.as_str()],
-        serde_json::Value::Array(values) => values
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect(),
-        _ => Vec::new(),
-    };
-    values
-        .into_iter()
-        .filter_map(|value| semver::Version::parse(value.trim_start_matches('v')).ok())
-        .max()
-        .ok_or_else(|| anyhow!("npm found no published OpenCode release matching the policy"))
 }
 
 fn repair_incompatible_inventory(
@@ -5229,6 +5048,7 @@ fn set_executable(_path: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gh_config::resolve_compatibility;
 
     /// Every install before the shim format was versioned wrote the legacy
     /// form; refusing to touch it would strand those users on both `install`
@@ -5591,7 +5411,7 @@ mod tests {
         };
         let detected = Detected {
             harness: Harness::Opencode,
-            path: binary,
+            path: root.join("new-prefix/opencode"),
             raw_version: Some("1.18.25".into()),
             version: Some(repaired_version.clone()),
         };
@@ -5604,6 +5424,7 @@ mod tests {
         .unwrap();
         update_inventory_after_version_check(&mut inventory, &detected, &context);
         let entry = &inventory.entries[0];
+        assert_eq!(entry.path.as_ref(), Some(&detected.path));
         assert_eq!(entry.version.as_ref(), Some(&repaired_version));
         assert_eq!(entry.raw_version.as_deref(), Some("1.18.25"));
         assert_eq!(
@@ -6501,31 +6322,6 @@ mod tests {
         let scoped = inventory_for_harness(&inventory, Harness::Claude);
         assert_eq!(scoped.entries.len(), 1);
         assert_eq!(scoped.entries[0].name, "claude");
-    }
-
-    #[test]
-    fn npm_version_lookup_selects_the_highest_published_match() {
-        assert_eq!(
-            highest_npm_version(br#"["1.18.23","1.18.25","1.18.24"]"#).unwrap(),
-            semver::Version::new(1, 18, 25)
-        );
-        assert_eq!(
-            highest_npm_version(br#""v1.18.25""#).unwrap(),
-            semver::Version::new(1, 18, 25)
-        );
-        assert!(highest_npm_version(br#"[]"#).is_err());
-    }
-
-    #[test]
-    fn kimi_standalone_repair_targets_the_detected_installation_root() {
-        assert_eq!(
-            kimi_install_root(Path::new("/Users/example/.kimi-code/bin/kimi")),
-            Some(Path::new("/Users/example/.kimi-code"))
-        );
-        assert_eq!(
-            kimi_install_root(Path::new("/usr/local/bin/kimi")),
-            Some(Path::new("/usr/local"))
-        );
     }
 
     fn read_session_metadata(dir: &Path, uuid: &str) -> BlueSessionMetadata {

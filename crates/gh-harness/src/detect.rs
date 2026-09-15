@@ -19,20 +19,30 @@ pub struct Detected {
 
 /// Locate `harness` on `PATH`, if installed.
 pub fn detect(harness: Harness) -> Option<Detected> {
-    for name in harness.binary_names() {
-        for path in which_all(name) {
-            if is_blue_or_shim(&path) {
-                continue;
-            }
-            return Some(detect_at(harness, path));
-        }
-    }
-    None
+    upstream_paths(harness)
+        .into_iter()
+        .next()
+        .map(|path| detect_at(harness, path))
 }
 
-/// Inspect a specific harness executable instead of resolving it from PATH.
-/// Install repair uses this to prove that it updated the binary the user was
-/// already launching, rather than a shadowed copy elsewhere on PATH.
+/// All upstream candidates in binary-name/PATH/PATHEXT order, excluding Blue.
+pub fn upstream_paths(harness: Harness) -> Vec<PathBuf> {
+    upstream_paths_with(harness, which_all)
+}
+
+fn upstream_paths_with(
+    harness: Harness,
+    candidates: impl Fn(&str) -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    harness
+        .binary_names()
+        .iter()
+        .flat_map(|name| candidates(name))
+        .filter(|path| !is_blue_or_shim(path))
+        .collect()
+}
+
+/// Inspect a specific executable, including shadowed copies for diagnostics.
 pub fn detect_at(harness: Harness, path: PathBuf) -> Detected {
     let detected = gh_config::implementations::definition(harness)
         .detect_version(&path)
@@ -92,13 +102,17 @@ fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
 
 #[cfg(windows)]
 fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
+    let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    windows_executable_candidates(dir, name, &pathext.to_string_lossy())
+}
+
+#[cfg(any(windows, test))]
+fn windows_executable_candidates(dir: &std::path::Path, name: &str, pathext: &str) -> Vec<PathBuf> {
     let path = std::path::Path::new(name);
     if path.extension().is_some() {
         return vec![dir.join(path)];
     }
-    let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
     pathext
-        .to_string_lossy()
         .split(';')
         .filter(|extension| !extension.is_empty())
         .map(|extension| dir.join(format!("{name}{extension}")))
@@ -168,6 +182,55 @@ fn is_executable(path: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_candidates_preserve_pathext_order_and_explicit_extension() {
+        let dir = PathBuf::from("prefix");
+        assert_eq!(
+            windows_executable_candidates(&dir, "codex", ".CMD;;.EXE;.BAT"),
+            vec![
+                dir.join("codex.CMD"),
+                dir.join("codex.EXE"),
+                dir.join("codex.BAT")
+            ]
+        );
+        assert_eq!(
+            windows_executable_candidates(&dir, "codex.exe", ".CMD;.EXE"),
+            vec![dir.join("codex.exe")]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shared_candidates_preserve_path_order_and_duplicate_aliases_but_exclude_blue() {
+        let root = std::env::temp_dir().join(format!("blue-upstream-paths-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let shim = root.join("shim");
+        std::fs::write(
+            &shim,
+            gh_common::shim::render_shim(PathBuf::from("/usr/bin/blue").as_path(), Harness::Codex)
+                .unwrap(),
+        )
+        .unwrap();
+        let first = root.join("first");
+        std::fs::write(&first, "upstream").unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        let last = root.join("last");
+        std::fs::write(&last, "second upstream").unwrap();
+        let paths = upstream_paths_with(Harness::Codex, |name| {
+            assert_eq!(name, "codex");
+            vec![
+                shim.clone(),
+                first.clone(),
+                alias.clone(),
+                std::env::current_exe().unwrap(),
+                last.clone(),
+            ]
+        });
+        assert_eq!(paths, vec![first, alias, last]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_prefixed_harness_versions() {

@@ -65,13 +65,51 @@ Run `blue apply` or launch through `blue run` to see the normalized version, sel
 
 ## Repair an incompatible installation
 
-In a terminal, `blue run` and `blue apply` show the policy-compatible install command and ask whether to run it. The default answer is **No**. If approved, Blue resolves a published release inside the policy and certified range, updates the installation that owns the detected executable, and verifies that same path against the policy before reconciliation or launch continues. This prevents an npm repair from appearing successful while a standalone binary earlier on `PATH` remains unchanged.
+In a terminal, `blue run` and `blue apply` identify the detected executable's
+installation method before offering repair. The prompt shows the active path,
+method, exact release, and command. The default answer is **No**. Blue never
+falls back to another installer if ownership is unverified or an installer fails.
 
-For npm-owned binaries, Blue runs the package-manager selector directly.
-OpenCode repairs through the detected executable's version-aware upgrade command.
-Standalone Kimi installations use Kimi's checksum-verifying installer with an
-exact version and the detected installation root. Installer failure or an
-unchanged detected path stops the flow before any managed files are written.
+| Installation | Ownership evidence | Repair |
+| --- | --- | --- |
+| npm global (all four harnesses, Unix) | `<prefix>/bin/<agent>` resolves to the expected package under `<prefix>/lib/node_modules`; package name and `bin` metadata match, and read-only npm global root/prefix probes confirm that prefix | `npm install -g --prefix <owned-prefix> <package>@<exact-version>` |
+| Claude native (Unix) | Native binary in `~/.local/share/claude/versions/<version>`, reached through `~/.local/bin/claude`; relative symlink chains are resolved | Detected executable: `install <exact-version>` |
+| Homebrew Claude/Codex/OpenCode | Resolved target under the matching `Caskroom` or `Cellar` package, including custom prefixes | Refuse automatic arbitrary-version pinning; use manual vendor/Homebrew guidance |
+| Kimi standalone (Unix) | Regular native binary at the documented default `~/.kimi-code/bin/kimi`, without redirected parent directories | Official installer with exact `--version`, `KIMI_INSTALL_DIR`, and `KIMI_NO_MODIFY_PATH=1`; the child PATH excludes the installation's bin so the installer skips legacy migration |
+| Kimi legacy uv tool | Target belongs to a Python environment with `uv-receipt.toml` identifying `kimi-cli` and `pyvenv.cfg` | Refuse: legacy Python versions are not the current npm release line |
+| OpenCode standalone (Unix) | Regular native binary at the default `~/.opencode/bin/opencode`, without redirected parent directories | Detected executable: `upgrade <exact-version> --method curl` |
+| Codex standalone/release download, custom Kimi/OpenCode roots, pnpm/bun wrappers, Windows wrappers/native layouts, other unverified copies | No supported ownership proof | Refuse automatic replacement; manually install a policy-compatible release at the active path |
+
+The standalone installers leave no ownership receipt. Blue limits recognition
+to their documented default layout and native executable format; arbitrary files
+and release-style filenames do not establish provenance. Windows layouts remain
+unsupported for automatic repair until equivalent ownership checks are available.
+
+Supported repair methods currently require **npm for read-only release lookup**,
+even for native installations. Blue resolves an exact published version with
+`npm view` and rechecks the unchanged policy and certified range before mutation.
+A missing npm executable or failed lookup stops repair; Blue does not bootstrap
+npm. Unsupported methods and noninteractive runs do not query the registry.
+
+After installation, Blue freshly resolves `PATH` and validates its first upstream
+executable. A compatible winner is used immediately, including when its path
+changed. If an incompatible winner shadows a compatible copy, the error names
+both paths: put the compatible directory earlier on `PATH`, or uninstall the
+shadowing copy through its owner. Blue does not remove files or silently launch
+a later candidate. If no compatible copy is found, the error reports the actual
+winner and version. Reconciliation, inventory refresh, and saved defaults proceed
+only after successful verification.
+
+Vendor references: [Claude setup](https://code.claude.com/docs/en/setup),
+[Claude CLI](https://code.claude.com/docs/en/cli-reference),
+[Codex installation](https://github.com/openai/codex#installing-and-running-codex),
+[OpenCode CLI](https://opencode.ai/docs/cli/),
+[OpenCode installer](https://github.com/anomalyco/opencode/blob/dev/install),
+[Kimi installer](https://code.kimi.com/kimi-code/install.sh),
+[Kimi migration](https://www.kimi.com/code/docs/en/kimi-code-cli/guides/migration.html),
+[uv tools](https://docs.astral.sh/uv/guides/tools/), and
+[Homebrew FAQ](https://docs.brew.sh/FAQ). Automatic Homebrew pinning is a limit
+of Blue's repair implementation.
 
 Blue-launched sessions suppress each harness's native update check or automatic
 updater whenever the effective policy has a ceiling. That includes an explicit
@@ -88,7 +126,7 @@ manager can still replace the installed binary. The selected compatibility
 version's atomic operation set owns this control, so a later harness version can
 adopt a changed vendor mechanism without altering older intervals.
 
-Daemon runs, redirected/non-interactive commands, and `blue apply --yes` never install native CLIs. They fail closed and print the command for an operator to run explicitly.
+Daemon runs, redirected/non-interactive commands, and `blue apply --yes` never install native CLIs. They fail closed and print ownership-aware manual guidance for an operator.
 
 ## Breaking-version profiles
 
