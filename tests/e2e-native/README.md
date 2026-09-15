@@ -93,12 +93,15 @@ Generated policies carry native MCP paths and an HTTP package object with its
 exact SHA-256. A test-only database row associates the package with its artifact
 ID; Blue uses its existing authenticated artifact API to obtain the presigned
 HTTP download. Direct public package fetches still require HTTPS/public hosts.
-The disposable MinIO grant permits reading that one fixture only.
+The executable archive is private in MinIO and requires a signed URL. The
+anonymous grant permits reading only a fresh, inert `health.txt` fixture.
 Existing full-suite fixtures and the Linux legacy tarball bytes are preserved.
 
 SSM forwards 8080, 5432 and 9000; gateway adds 8081 and 4000. No internal 8082 or
 dashboard port is exposed. Health checks traverse the client tunnels and verify
-an actual package read/digest and database query. A dead tunnel aborts the tests.
+the fresh health object's bytes/digest and a database query. The shared config
+matrix separately exercises archive download and SHA-256 verification through
+Blue's authenticated artifact flow. A dead tunnel aborts the tests.
 `lease.json` records run, attempt, source SHA, image artifact digest, instance,
 prefix, expiry and mappings without secrets.
 

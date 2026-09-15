@@ -16,6 +16,7 @@ export async function prepareFixtures(
     join(directory, "mcp-server.mjs"),
   );
   const artifactId = randomUUID();
+  let healthSha256;
   let archive = Buffer.from(
     await readFile(
       join(repo, "tests/e2e/fixtures/package/e2e-package.tar.gz.b64"),
@@ -85,6 +86,11 @@ export async function prepareFixtures(
         YAML.stringify(policy),
       );
     }
+    // A fresh, inert object proves this run's storage path without downloading
+    // an executable archive anonymously. Blue fetches the archive via signed URLs.
+    const health = `blue-native-health:${randomUUID()}\n`;
+    await writeFile(join(directory, "health.txt"), health);
+    healthSha256 = sha256(health);
     const grant = {
       Version: "2012-10-17",
       Statement: [
@@ -92,7 +98,7 @@ export async function prepareFixtures(
           Effect: "Allow",
           Principal: { AWS: ["*"] },
           Action: ["s3:GetObject"],
-          Resource: ["arn:aws:s3:::package-artifacts/e2e-package.tar.gz"],
+          Resource: ["arn:aws:s3:::package-artifacts/health.txt"],
         },
       ],
     };
@@ -104,6 +110,7 @@ export async function prepareFixtures(
   await writeFile(join(directory, "e2e-package.tar.gz"), archive);
   return {
     artifactId,
+    healthSha256,
     packageSize: archive.length,
     packageSha256: sha256(archive),
     provisionerSha256: sha256(

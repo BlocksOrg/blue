@@ -42,6 +42,18 @@ test("fixture generation preserves legacy bytes and renders native policies as d
       sha256(await readFile(join(dir, "e2e-package.tar.gz"))),
     );
     assert.equal(policy.governance.packages[0].sha256, native.packageSha256);
+    const health = await readFile(join(dir, "health.txt"), "utf8");
+    assert.match(health, /^blue-native-health:[0-9a-f-]+\n$/);
+    assert.equal(sha256(health), native.healthSha256);
+    const grant = JSON.parse(await readFile(join(dir, "package-policy.json")));
+    assert.deepEqual(grant.Statement, [
+      {
+        Effect: "Allow",
+        Principal: { AWS: ["*"] },
+        Action: ["s3:GetObject"],
+        Resource: ["arn:aws:s3:::package-artifacts/health.txt"],
+      },
+    ]);
     assert.equal(
       policy.governance.harnesses.codex.mcp[0].args[0],
       join(dir, "mcp-server.mjs"),

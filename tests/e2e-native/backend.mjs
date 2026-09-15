@@ -414,15 +414,17 @@ export class Backend {
           });
           if (!response.ok) return false;
           const object = await fetch(
-            "http://127.0.0.1:9000/package-artifacts/e2e-package.tar.gz",
-            { signal: AbortSignal.timeout(3000) },
+            "http://127.0.0.1:9000/package-artifacts/health.txt",
+            { signal: AbortSignal.timeout(3000), redirect: "error" },
           );
           if (!object.ok) return false;
           if (
             sha256(Buffer.from(await object.arrayBuffer())) !==
-            hashes.packageSha256
+            hashes.healthSha256
           )
-            throw new Error("fixture digest mismatch through client tunnel");
+            throw new Error(
+              "health fixture digest mismatch through client tunnel",
+            );
           const client = new pg.Client({
             connectionString: this.databaseUrl,
             connectionTimeoutMillis: 3000,

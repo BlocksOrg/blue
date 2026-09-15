@@ -18,4 +18,5 @@ services:
         mc mb --ignore-existing local/raw-sessions &&
         mc mb --ignore-existing local/package-artifacts &&
         mc cp /native-fixtures/e2e-package.tar.gz local/package-artifacts/e2e-package.tar.gz &&
+        mc cp /native-fixtures/health.txt local/package-artifacts/health.txt &&
         mc anonymous set-json /native-fixtures/package-policy.json local/package-artifacts

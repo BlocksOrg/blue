@@ -197,7 +197,7 @@ cleanup before removing only test-owned application state.
 | Shared config matrix | Exact pinned/historical agent, model, MCP and managed skill |
 | Gateway invocation | Fresh per-profile MCP markers and invocation nonce in uploaded bundle |
 | Native isolation | Windows account preflight, session ACL, sequential cleanup, one active Home and child completion |
-| Client/backend connection | Package object digest and DB query through loopback SSM tunnels |
+| Client/backend connection | Fresh inert health-object digest and DB query through loopback SSM tunnels |
 | Required coverage | Missing endpoints, agents and matrix cells fail CI; expected/executed report |
 
 New knobs: `E2E_SLIM_REQUIRED=1` makes missing prerequisites failures;
@@ -218,3 +218,6 @@ successful native gateway results, not just a passing fixture suite or workflow.
 Native package fixtures use a seeded managed artifact and the authenticated download
 API because public package URLs reject HTTP/loopback. Production access rules
 are unchanged; the advertised MinIO URL is signed before the client receives it.
+The native overlay keeps the executable archive private; anonymous reads are
+limited to a fresh `health.txt` object for readiness and tunnel digest checks.
+The config matrix exercises the real signed archive download and SHA-256 check.

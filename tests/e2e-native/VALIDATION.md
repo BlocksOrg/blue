@@ -83,3 +83,21 @@ The existing [Linux smoke workflow](https://github.com/BlocksOrg/blue/actions/ru
 and [security gates](https://github.com/BlocksOrg/blue/actions/runs/35030256370)
 also passed on that commit. Linux full and gateway are not PR jobs and were not
 rerun for this follow-up.
+
+## CodeQL follow-up, 2026-09-15
+
+The successful Security gates workflow above did **not** imply that the separate
+[CodeQL alert check](https://github.com/BlocksOrg/blue/runs/104587043326) passed.
+That check reported `js/insecure-download` on the native readiness probe's HTTP
+archive download. The readiness probe now reads a fresh inert `health.txt` object
+and verifies its digest with redirects disabled. Only that health object permits
+anonymous reads; the executable package archive requires its signed URL. The
+shared config matrix continues to exercise package download and SHA-256 checking
+through Blue's authenticated artifact flow.
+
+Local verification passed: 14 Node helper tests, workspace build/tests/fmt/Clippy,
+and actionlint. A local native backend run verified the health-object digest,
+HTTP 403 for anonymous archive access, and all 28 shared governance tests with
+all 16 pinned/historical cells passed. This run reused installed agent versions
+with Node 24.5.0 and the local image, used Postgres port 15432, and cleaned up the
+Compose stack afterwards. This remains Linux evidence, not Windows certification.
