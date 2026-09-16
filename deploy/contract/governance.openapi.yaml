@@ -964,7 +964,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AdminInvitationIssued" }
         "404": { description: Invitation does not exist in the administrator's organization }
-        "409": { description: Invitation is accepted or canceled, or invitations are disabled }
+        "409": { description: "Invitation is accepted or canceled, or invitations are disabled" }
 
   /admin/client-status:
     get:
