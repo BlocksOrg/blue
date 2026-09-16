@@ -1,7 +1,7 @@
 //! Installation-aware repair. Plans contain argv, never executable shell strings.
 use anyhow::{anyhow, bail, Context, Result};
 use gh_common::{Harness, InstallInvocation};
-use gh_config::{resolve_compatibility, supported_install, HarnessContext};
+use gh_config::{resolve_compatibility, supported_install, CompatibilityFailure, HarnessContext};
 use gh_harness::{Detected, InstallMethod, Installation};
 use gh_service::HarnessPolicy;
 use semver::Version;
@@ -124,15 +124,18 @@ fn refusal(method: &InstallMethod) -> Option<String> {
     }
 }
 
-fn guidance(installation: &Installation) -> String {
-    let action = match &installation.method {
+fn manual_action(installation: &Installation) -> String {
+    match &installation.method {
         InstallMethod::NpmGlobal { prefix, package } => format!("npm install -g --prefix {prefix:?} {package}@<exact-policy-compatible-version>"),
         InstallMethod::ClaudeNative => format!("{:?} install <exact-policy-compatible-version>", installation.executable),
         InstallMethod::KimiStandalone { root } => format!("use the Kimi official installer with --version <exact-policy-compatible-version>, KIMI_INSTALL_DIR={root:?}, KIMI_NO_MODIFY_PATH=1; exclude that root's bin from the installer PATH to skip legacy migration"),
         InstallMethod::OpenCodeStandalone => format!("{:?} upgrade <exact-policy-compatible-version> --method curl", installation.executable),
         other => format!("{}; manually install a policy-compatible release at the active path using its owner", refusal(other).expect("unsupported method")),
-    };
-    let method = match &installation.method {
+    }
+}
+
+fn method_name(method: &InstallMethod) -> &'static str {
+    match method {
         InstallMethod::NpmGlobal { .. } => "npm global",
         InstallMethod::ClaudeNative => "Claude native",
         InstallMethod::KimiStandalone { .. } => "Kimi standalone",
@@ -140,12 +143,131 @@ fn guidance(installation: &Installation) -> String {
         InstallMethod::Homebrew { .. } => "Homebrew",
         InstallMethod::KimiUvLegacy => "legacy Kimi uv",
         InstallMethod::Unknown { .. } => "unknown",
-    };
+    }
+}
+
+fn guidance(installation: &Installation) -> String {
+    let action = manual_action(installation);
+    let method = method_name(&installation.method);
     format!(
         "active path `{}` (resolved `{}`, method {method}); {action}",
         installation.executable.display(),
         installation.canonical.display()
     )
+}
+
+/// Keeps operational details available without flattening them into the terminal message.
+#[derive(Debug)]
+pub(crate) struct ManualRepairRequired {
+    failure: CompatibilityFailure,
+    installation: Installation,
+    message: String,
+}
+
+impl std::fmt::Display for ManualRepairRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ManualRepairRequired {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.failure)
+    }
+}
+
+fn compatibility_summary(failure: &CompatibilityFailure) -> String {
+    match failure {
+        CompatibilityFailure::UnparseableVersion { harness, .. } => {
+            format!("Blue could not read the installed {harness} version.")
+        }
+        CompatibilityFailure::PolicyMismatch {
+            harness,
+            requirement,
+            installed,
+        } => format!(
+            "{harness} {installed} does not match the required version range {requirement}."
+        ),
+        CompatibilityFailure::UnsupportedGeneration { harness, installed } => {
+            format!("{harness} {installed} is not supported by this Blue release.")
+        }
+        CompatibilityFailure::UnverifiedGeneration {
+            harness, installed, ..
+        } => format!("{harness} {installed} is newer than Blue's tested versions."),
+        CompatibilityFailure::InvalidPolicy { .. } => failure.to_string(),
+    }
+}
+
+fn npm_migration_command(invocation: &InstallInvocation) -> Option<&str> {
+    match invocation.args.as_slice() {
+        [install, global, selector]
+            if invocation.program == "npm"
+                && install == "install"
+                && global == "-g"
+                && selector.rsplit_once('@').is_some_and(|(package, range)| {
+                    !package.is_empty() && !range.is_empty() && range != "latest"
+                }) =>
+        {
+            Some(&invocation.display)
+        }
+        _ => None,
+    }
+}
+
+impl ManualRepairRequired {
+    pub(crate) fn new(
+        failure: CompatibilityFailure,
+        installation: Installation,
+        harness: Harness,
+        policy: &HarnessPolicy,
+    ) -> Self {
+        let reason = match &installation.method {
+            InstallMethod::Homebrew { .. } => {
+                "Blue cannot automatically install a specific version with Homebrew."
+            }
+            InstallMethod::KimiUvLegacy => {
+                "This is the legacy Python version of Kimi. Blue requires the current Kimi CLI."
+            }
+            InstallMethod::Unknown { .. } => {
+                "Blue cannot safely replace this installation automatically."
+            }
+            _ => "Automatic repair requires an interactive terminal.",
+        };
+        let remedy = if refusal(&installation.method).is_none() {
+            format!(
+                "To repair manually:\n  {}\nThen retry Blue.",
+                manual_action(&installation)
+            )
+        } else {
+            match supported_install(harness, policy) {
+                Err(_) => "Ask your administrator to select a version range supported by this Blue release, or update Blue.".into(),
+                Ok(invocation) => match npm_migration_command(&invocation) {
+                    Some(command) => {
+                        let preparation = match &installation.method {
+                            InstallMethod::Homebrew { .. } => format!("remove this {harness} installation using Homebrew"),
+                            InstallMethod::KimiUvLegacy => "remove the legacy kimi-cli installation using uv".into(),
+                            _ => "identify and remove the old installation using its installer, or use a separate npm prefix".into(),
+                        };
+                        format!("To migrate to npm, {preparation}, then run (POSIX shell or PowerShell):\n  {command}\nEnsure npm's executable directory is on PATH, then retry Blue.")
+                    }
+                    None => "Manually install a policy-compatible release using the current manager or vendor's installation guide, then retry Blue.".into(),
+                },
+            }
+        };
+        let message = format!(
+            "{}\nInstallation: {} — {}\n{reason}\n\n{remedy}",
+            compatibility_summary(&failure),
+            method_name(&installation.method),
+            installation.executable.display(),
+        );
+        let diagnostic = Self {
+            failure,
+            installation,
+            message,
+        };
+        tracing::debug!(failure = ?diagnostic.failure, installation = ?diagnostic.installation, "Manual harness repair required");
+        diagnostic
+    }
 }
 
 fn plan(installation: &Installation, version: &Version) -> Result<RepairPlan> {
@@ -294,10 +416,10 @@ pub(crate) fn ensure_compatible_version(
         Err(error) => error,
     };
     let installation = runtime.installation(&detected);
-    let manual = guidance(&installation);
     if !interactive || refusal(&installation.method).is_some() {
-        bail!("{error}; {manual}");
+        return Err(ManualRepairRequired::new(error, installation, harness, policy).into());
     }
+    let manual = guidance(&installation);
     let invocation = supported_install(harness, policy)?;
     let version = runtime.lookup(harness, &invocation)?;
     // A registry response is not authority to bypass the original policy.
@@ -396,9 +518,12 @@ mod tests {
         }
     }
     impl Runtime for Fake {
-        fn installation(&mut self, _: &Detected) -> Installation {
+        fn installation(&mut self, detected: &Detected) -> Installation {
             self.calls.push("ownership");
-            installation(self.method.clone())
+            Installation {
+                executable: detected.path.clone(),
+                ..installation(self.method.clone())
+            }
         }
         fn lookup(&mut self, _: Harness, _: &InstallInvocation) -> Result<Version> {
             self.calls.push("lookup");
@@ -520,7 +645,8 @@ mod tests {
             };
             let error = run(&mut fake, true).unwrap_err().to_string();
             assert!(error.contains("/native/claude"));
-            assert!(!error.contains("npm install"));
+            assert!(error.contains("npm install -g"));
+            assert!(error.contains("<2."));
             assert_eq!(fake.calls, ["ownership"]);
         }
         let mut fake = Fake::default();
@@ -529,6 +655,205 @@ mod tests {
             .to_string()
             .contains("install <exact-policy-compatible-version>"));
         assert_eq!(fake.calls, ["ownership"]);
+    }
+
+    #[test]
+    fn migration_uses_each_harness_plan_without_runtime_work() {
+        for harness in Harness::ALL {
+            for (method, path) in [
+                (
+                    InstallMethod::Homebrew {
+                        package: harness.to_string(),
+                    },
+                    "/opt/homebrew/bin/agent",
+                ),
+                (
+                    InstallMethod::Unknown {
+                        reason: "pnpm/bun wrapper or broken link details".into(),
+                    },
+                    r"C:\tools\agent.cmd",
+                ),
+            ] {
+                let mut fake = Fake {
+                    method,
+                    ..Fake::default()
+                };
+                let detected = Detected {
+                    harness,
+                    ..detected(path, "99.0.0")
+                };
+                let error = ensure_compatible_version(
+                    harness,
+                    detected,
+                    &HarnessPolicy::default(),
+                    true,
+                    &mut fake,
+                )
+                .unwrap_err();
+                let message = error.to_string();
+                let expected = supported_install(harness, &HarnessPolicy::default()).unwrap();
+                assert!(message.contains(&expected.display), "{message}");
+                assert!(message.contains(path));
+                assert!(!message.contains("wrapper or broken"));
+                assert!(!message.contains("profile"));
+                assert!(!message.contains("resolved"));
+                assert_eq!(fake.calls, ["ownership"]);
+            }
+        }
+    }
+
+    #[test]
+    fn homebrew_codex_refusal_is_readable_and_preserves_details() {
+        let failure = resolve_compatibility(
+            Harness::Codex,
+            Some(&Version::new(0, 154, 0)),
+            None,
+            &HarnessPolicy::default(),
+        )
+        .unwrap_err();
+        let error = ManualRepairRequired::new(
+            failure,
+            Installation {
+                executable: "/opt/homebrew/bin/codex".into(),
+                canonical: "/opt/homebrew/Caskroom/codex/0.154.0/bin/codex".into(),
+                method: InstallMethod::Homebrew {
+                    package: "codex".into(),
+                },
+            },
+            Harness::Codex,
+            &HarnessPolicy::default(),
+        );
+        assert_eq!(error.to_string(), "codex 0.154.0 is newer than Blue's tested versions.\nInstallation: Homebrew — /opt/homebrew/bin/codex\nBlue cannot automatically install a specific version with Homebrew.\n\nTo migrate to npm, remove this codex installation using Homebrew, then run (POSIX shell or PowerShell):\n  npm install -g '@openai/codex@>=0.145.0 <0.151.1-0'\nEnsure npm's executable directory is on PATH, then retry Blue.");
+        assert!(format!("{error:?}").contains("/opt/homebrew/Caskroom/codex"));
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("codex-v0_145_0"));
+    }
+
+    #[test]
+    fn migration_respects_policy_and_handles_no_intersection() {
+        for (requirement, unverified) in [
+            (">=0.146.0, <0.150.0", false),
+            ("=0.150.0", false),
+            (">=0.154.0, <0.155.0", true),
+            (">=99.0.0", false),
+        ] {
+            let policy = HarnessPolicy {
+                version_requirement: Some(requirement.into()),
+                allow_unverified_versions: unverified,
+                ..HarnessPolicy::default()
+            };
+            let mut fake = Fake {
+                method: InstallMethod::Homebrew {
+                    package: "codex".into(),
+                },
+                ..Fake::default()
+            };
+            let error = ensure_compatible_version(
+                Harness::Codex,
+                Detected {
+                    harness: Harness::Codex,
+                    ..detected("/brew/codex", "0.144.0")
+                },
+                &policy,
+                true,
+                &mut fake,
+            )
+            .unwrap_err()
+            .to_string();
+            match supported_install(Harness::Codex, &policy) {
+                Ok(invocation) => assert!(error.contains(&invocation.display)),
+                Err(_) => {
+                    assert!(error.contains("Ask your administrator"));
+                    assert!(!error.contains("npm install"));
+                }
+            }
+            assert!(error.contains(requirement));
+            assert_eq!(fake.calls, ["ownership"]);
+        }
+    }
+
+    #[test]
+    fn legacy_kimi_and_unreadable_versions_have_short_explanations() {
+        let mut fake = Fake {
+            method: InstallMethod::KimiUvLegacy,
+            ..Fake::default()
+        };
+        let error = ensure_compatible_version(
+            Harness::Kimi,
+            Detected {
+                harness: Harness::Kimi,
+                ..detected("/uv/bin/kimi", "1.0.0")
+            },
+            &HarnessPolicy::default(),
+            true,
+            &mut fake,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("legacy Python version of Kimi"));
+        assert!(error.contains("using uv"));
+        assert!(error.contains("@moonshot-ai/kimi-code@"));
+        assert_eq!(fake.calls, ["ownership"]);
+        let summary = compatibility_summary(&CompatibilityFailure::UnparseableVersion {
+            harness: Harness::Codex,
+            raw: "very noisy output".into(),
+        });
+        assert_eq!(summary, "Blue could not read the installed codex version.");
+    }
+
+    #[test]
+    fn migration_rejects_non_npm_and_unexpected_invocations() {
+        for (program, args) in [
+            ("brew", vec!["install", "-g", "codex@1.0.0"]),
+            ("npm", vec!["install", "codex@1.0.0"]),
+            ("npm", vec!["install", "-g", "codex@latest"]),
+        ] {
+            let invocation = InstallInvocation {
+                program,
+                args: args.into_iter().map(String::from).collect(),
+                display: "do not show".into(),
+            };
+            assert!(npm_migration_command(&invocation).is_none());
+        }
+    }
+
+    #[test]
+    fn noninteractive_advice_preserves_each_supported_method() {
+        for (method, expected) in [
+            (
+                InstallMethod::NpmGlobal {
+                    prefix: "/custom npm prefix".into(),
+                    package: "@anthropic-ai/claude-code".into(),
+                },
+                "npm install -g --prefix \"/custom npm prefix\"",
+            ),
+            (
+                InstallMethod::ClaudeNative,
+                "install <exact-policy-compatible-version>",
+            ),
+            (
+                InstallMethod::OpenCodeStandalone,
+                "upgrade <exact-policy-compatible-version> --method curl",
+            ),
+            (
+                InstallMethod::KimiStandalone {
+                    root: "/custom kimi root".into(),
+                },
+                "KIMI_INSTALL_DIR=\"/custom kimi root\"",
+            ),
+        ] {
+            let mut fake = Fake {
+                method,
+                ..Fake::default()
+            };
+            let message = run(&mut fake, false).unwrap_err().to_string();
+            assert!(message.contains("Automatic repair requires an interactive terminal."));
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("migrate"));
+            assert_eq!(fake.calls, ["ownership"]);
+        }
     }
 
     #[test]

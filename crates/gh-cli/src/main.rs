@@ -181,14 +181,23 @@ fn main() {
     }
 }
 
+fn error_message(error: &anyhow::Error) -> String {
+    if let Some(refusal) = error.downcast_ref::<repair::ManualRepairRequired>() {
+        refusal.to_string()
+    } else {
+        format!("{error:#}")
+    }
+}
+
 fn print_error(error: &anyhow::Error) {
+    tracing::debug!(?error, "CLI command failed");
     eprintln!();
     eprintln!(
         "  {}",
         console::style("Blue ran into a problem").red().bold()
     );
     eprintln!();
-    for line in format!("{error:#}").lines() {
+    for line in error_message(error).lines() {
         eprintln!("  {line}");
     }
     eprintln!();
@@ -197,6 +206,37 @@ fn print_error(error: &anyhow::Error) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contextual_manual_repair_omits_outer_noise() {
+        let error = repair::ManualRepairRequired::new(
+            gh_config::CompatibilityFailure::UnsupportedGeneration {
+                harness: gh_common::Harness::Codex,
+                installed: semver::Version::new(0, 1, 0),
+            },
+            gh_harness::Installation {
+                executable: "/brew/codex".into(),
+                canonical: "/brew/resolved/codex".into(),
+                method: gh_harness::InstallMethod::Homebrew {
+                    package: "codex".into(),
+                },
+            },
+            gh_common::Harness::Codex,
+            &gh_service::HarnessPolicy::default(),
+        );
+        let expected = error.to_string();
+        let contextual = anyhow::Error::new(error).context("checking installed harness version");
+        assert_eq!(error_message(&contextual), expected);
+        assert!(!error_message(&contextual).contains("checking installed"));
+        assert!(!error_message(&contextual).contains("profile"));
+        assert!(error_message(&contextual).contains("\nInstallation:"));
+    }
+
+    #[test]
+    fn ordinary_errors_keep_the_context_chain() {
+        let error = anyhow::anyhow!("underlying failure").context("outer context");
+        assert_eq!(error_message(&error), "outer context: underlying failure");
+    }
 
     #[test]
     fn parses_agent_with_and_without_a_name() {
