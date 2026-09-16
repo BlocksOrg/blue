@@ -160,7 +160,13 @@ services:
       HARNESS_INTERNAL_TLS_KEY_FILE: /certs/tls.key
       HARNESS_INTERNAL_TLS_CLIENT_CA_FILE: /certs/ca.crt
       HARNESS_INTERNAL_CA_FILE: /certs/ca.crt
-      HARNESS_PROXY_CLIENT_IDENTITY_FILE: /certs/client.pem
+      # The proxy accepts its client identity as one combined file or as a
+      # separate cert/key pair. Default to combined, the layout the chart ships;
+      # export BLUE_E2E_PROXY_IDENTITY_FILE= plus the CERT/KEY pair to run the
+      # same stack against the split path. Blank reads as unset.
+      HARNESS_PROXY_CLIENT_IDENTITY_FILE: ${BLUE_E2E_PROXY_IDENTITY_FILE-/certs/client.pem}
+      HARNESS_PROXY_CLIENT_CERT_FILE: ${BLUE_E2E_PROXY_CERT_FILE-}
+      HARNESS_PROXY_CLIENT_KEY_FILE: ${BLUE_E2E_PROXY_KEY_FILE-}
       HARNESS_GATEWAY_RESOLVER_URL: https://127.0.0.1:8082/internal/gateway/resolve
       HARNESS_GATEWAY_EVENT_URL: https://127.0.0.1:8082/internal/gateway/events
       HARNESS_GATEWAY_CREDENTIAL_INVALID_URL: https://127.0.0.1:8082/internal/gateway/credential-invalid

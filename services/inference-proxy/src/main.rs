@@ -372,14 +372,9 @@ async fn main() {
     let oauth = oauth_config_from_env();
     let internal_transport = InternalTransportMode::from_env();
     if internal_transport == InternalTransportMode::InsecureHttp
-        && [
-            "HARNESS_INTERNAL_CA_PEM",
-            "HARNESS_INTERNAL_CA_FILE",
-            "HARNESS_PROXY_CLIENT_IDENTITY_PEM",
-            "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
-        ]
-        .iter()
-        .any(|name| std::env::var(name).is_ok())
+        && INTERNAL_TLS_ENV_VARS
+            .iter()
+            .any(|name| env_setting(name).is_some())
     {
         panic!("internal TLS settings must not be configured in insecure-http mode");
     }
@@ -495,8 +490,7 @@ async fn main() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     if dynamic_mode
         && internal_transport == InternalTransportMode::Mtls
-        && std::env::var("HARNESS_INTERNAL_CA_FILE").is_ok()
-        && std::env::var("HARNESS_PROXY_CLIENT_IDENTITY_FILE").is_ok()
+        && tls_file_fingerprint().is_some()
     {
         tokio::spawn(control_tls_reload_worker(
             state.clone(),
@@ -597,10 +591,7 @@ fn build_control_client(mode: InternalTransportMode) -> anyhow::Result<reqwest::
             },
         )?;
         builder = builder.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes())?);
-        let pem = pem_setting(
-            "HARNESS_PROXY_CLIENT_IDENTITY_PEM",
-            "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
-        ).ok_or_else(|| anyhow::anyhow!("HARNESS_PROXY_CLIENT_IDENTITY_FILE or HARNESS_PROXY_CLIENT_IDENTITY_PEM is required in mtls mode"))?;
+        let pem = client_identity_pem(pem_setting).map_err(anyhow::Error::msg)?;
         builder = builder.identity(reqwest::Identity::from_pem(pem.as_bytes())?);
     }
     Ok(builder
@@ -642,18 +633,118 @@ async fn control_tls_reload_worker(
     }
 }
 
+/// Hash every file-backed piece of Control API mTLS material so the reload
+/// worker notices a rotation of any one of them. Returns `None` when there is
+/// nothing file-backed to watch, or when a file that is configured cannot be
+/// read — the caller treats that as "retain the last-known-good client".
+///
+/// The client identity may be a single combined file or a separate cert/key
+/// pair; hashing whichever are configured means a key-only rotation still
+/// advances the fingerprint.
 fn tls_file_fingerprint() -> Option<[u8; 32]> {
-    let ca = std::fs::read(std::env::var("HARNESS_INTERNAL_CA_FILE").ok()?).ok()?;
-    let identity = std::fs::read(std::env::var("HARNESS_PROXY_CLIENT_IDENTITY_FILE").ok()?).ok()?;
     let mut hash = Sha256::new();
-    hash.update(ca);
-    hash.update(identity);
-    Some(hash.finalize().into())
+    hash.update(std::fs::read(env_setting("HARNESS_INTERNAL_CA_FILE")?).ok()?);
+    let mut identity_files = 0;
+    for name in [
+        "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
+        "HARNESS_PROXY_CLIENT_CERT_FILE",
+        "HARNESS_PROXY_CLIENT_KEY_FILE",
+    ] {
+        if let Some(path) = env_setting(name) {
+            hash.update(std::fs::read(path).ok()?);
+            identity_files += 1;
+        }
+    }
+    (identity_files > 0).then(|| hash.finalize().into())
+}
+
+/// Every environment variable that carries internal mTLS material. Configuring
+/// any of them in `insecure-http` mode is a hard error.
+const INTERNAL_TLS_ENV_VARS: [&str; 8] = [
+    "HARNESS_INTERNAL_CA_PEM",
+    "HARNESS_INTERNAL_CA_FILE",
+    "HARNESS_PROXY_CLIENT_IDENTITY_PEM",
+    "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
+    "HARNESS_PROXY_CLIENT_CERT_PEM",
+    "HARNESS_PROXY_CLIENT_CERT_FILE",
+    "HARNESS_PROXY_CLIENT_KEY_PEM",
+    "HARNESS_PROXY_CLIENT_KEY_FILE",
+];
+
+/// Resolve the proxy's client identity into a single PEM bundle.
+///
+/// Two shapes are accepted, and they are mutually exclusive so a half-migrated
+/// deployment fails loudly instead of silently ignoring one of them:
+///
+/// - combined `HARNESS_PROXY_CLIENT_IDENTITY_{PEM,FILE}` — certificate and key
+///   in one file, Blue's original contract;
+/// - split `HARNESS_PROXY_CLIENT_{CERT,KEY}_{PEM,FILE}` — what cert-manager,
+///   Vault, SPIRE and `kubectl create secret tls` emit as `tls.crt` + `tls.key`.
+///
+/// `reqwest::Identity::from_pkcs8_pem` (the two-buffer constructor) is
+/// `native-tls`-only and Blue is rustls-only, so the split pair is concatenated
+/// here and handed to the same `Identity::from_pem` the combined path uses.
+/// That scan is order-independent, so the join order does not matter.
+fn client_identity_pem(get: impl Fn(&str, &str) -> Option<String>) -> Result<String, String> {
+    let identity = get(
+        "HARNESS_PROXY_CLIENT_IDENTITY_PEM",
+        "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
+    );
+    let cert = get(
+        "HARNESS_PROXY_CLIENT_CERT_PEM",
+        "HARNESS_PROXY_CLIENT_CERT_FILE",
+    );
+    let key = get(
+        "HARNESS_PROXY_CLIENT_KEY_PEM",
+        "HARNESS_PROXY_CLIENT_KEY_FILE",
+    );
+    match (identity, cert, key) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(
+            "HARNESS_PROXY_CLIENT_IDENTITY_FILE/_PEM cannot be combined with \
+             HARNESS_PROXY_CLIENT_CERT_FILE/_PEM or HARNESS_PROXY_CLIENT_KEY_FILE/_PEM; \
+             configure either the combined identity or the split cert/key pair"
+                .into(),
+        ),
+        (None, Some(cert), Some(key)) => Ok(join_pem(&cert, &key)),
+        (None, Some(_), None) => Err(
+            "HARNESS_PROXY_CLIENT_KEY_FILE or HARNESS_PROXY_CLIENT_KEY_PEM is required \
+             alongside HARNESS_PROXY_CLIENT_CERT_FILE/_PEM"
+                .into(),
+        ),
+        (None, None, Some(_)) => Err(
+            "HARNESS_PROXY_CLIENT_CERT_FILE or HARNESS_PROXY_CLIENT_CERT_PEM is required \
+             alongside HARNESS_PROXY_CLIENT_KEY_FILE/_PEM"
+                .into(),
+        ),
+        (Some(identity), None, None) => Ok(identity),
+        (None, None, None) => Err(
+            "HARNESS_PROXY_CLIENT_IDENTITY_FILE or HARNESS_PROXY_CLIENT_IDENTITY_PEM \
+             (or the HARNESS_PROXY_CLIENT_CERT_FILE/_PEM and HARNESS_PROXY_CLIENT_KEY_FILE/_PEM \
+             pair) is required in mtls mode"
+                .into(),
+        ),
+    }
+}
+
+/// Concatenate two PEM documents, inserting the separating newline that a file
+/// written without a trailing one would otherwise be missing.
+fn join_pem(first: &str, second: &str) -> String {
+    let first = first.trim_end();
+    format!("{first}\n{second}")
+}
+
+/// Read one environment variable, treating blank as unset. A variable set to
+/// the empty string is how a deployment template says "not configured"; taking
+/// it literally would trip the mode guards and the all-or-nothing checks.
+fn env_setting(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn pem_setting(value_name: &str, file_name: &str) -> Option<String> {
-    std::env::var(value_name).ok().or_else(|| {
-        std::env::var(file_name).ok().map(|path| {
+    env_setting(value_name).or_else(|| {
+        env_setting(file_name).map(|path| {
             std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("reading {file_name} {path}: {error}"))
         })
@@ -2812,5 +2903,134 @@ mod tests {
             ),
             None
         );
+    }
+    /// Stand-ins for PEM documents. The functions under test only join and
+    /// select material, so real key bytes would add nothing but a secret-scan
+    /// finding; the handshake itself is covered end to end.
+    const CERT: &str = "--cert--\n";
+    const KEY: &str = "--key--\n";
+
+    fn identity_from(pairs: &[(&str, &str)]) -> Result<String, String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
+        client_identity_pem(|value_name, file_name| {
+            pairs
+                .iter()
+                .find(|(name, _)| name == value_name || name == file_name)
+                .map(|(_, value)| value.clone())
+        })
+    }
+
+    #[test]
+    fn combined_identity_is_used_verbatim() {
+        let combined = format!("{CERT}{KEY}");
+        assert_eq!(
+            identity_from(&[("HARNESS_PROXY_CLIENT_IDENTITY_FILE", &combined)]),
+            Ok(combined)
+        );
+    }
+
+    #[test]
+    fn split_pair_is_equivalent_to_the_combined_file() {
+        let combined = identity_from(&[(
+            "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
+            &format!("{CERT}{KEY}"),
+        )])
+        .expect("combined identity");
+        let split = identity_from(&[
+            ("HARNESS_PROXY_CLIENT_CERT_FILE", CERT),
+            ("HARNESS_PROXY_CLIENT_KEY_FILE", KEY),
+        ])
+        .expect("split identity");
+        assert_eq!(split, combined);
+    }
+
+    #[test]
+    fn split_pair_separates_a_cert_file_with_no_trailing_newline() {
+        let split = identity_from(&[
+            ("HARNESS_PROXY_CLIENT_CERT_PEM", "--cert--"),
+            ("HARNESS_PROXY_CLIENT_KEY_PEM", KEY),
+        ])
+        .expect("split identity");
+        assert_eq!(split, format!("{CERT}{KEY}"));
+    }
+
+    #[test]
+    fn half_a_split_pair_names_the_missing_half() {
+        for (configured, absent) in [
+            (
+                "HARNESS_PROXY_CLIENT_CERT_FILE",
+                "HARNESS_PROXY_CLIENT_KEY_FILE",
+            ),
+            (
+                "HARNESS_PROXY_CLIENT_KEY_FILE",
+                "HARNESS_PROXY_CLIENT_CERT_FILE",
+            ),
+        ] {
+            let error =
+                identity_from(&[(configured, CERT)]).expect_err("half a pair must be rejected");
+            assert!(error.contains(absent), "{error}");
+        }
+    }
+
+    #[test]
+    fn combined_and_split_are_not_silently_reconciled() {
+        for extra in [
+            ("HARNESS_PROXY_CLIENT_CERT_FILE", CERT),
+            ("HARNESS_PROXY_CLIENT_KEY_FILE", KEY),
+        ] {
+            let error = identity_from(&[
+                (
+                    "HARNESS_PROXY_CLIENT_IDENTITY_FILE",
+                    &format!("{CERT}{KEY}"),
+                ),
+                extra,
+            ])
+            .expect_err("combined plus split must fail");
+            assert!(
+                error.contains("HARNESS_PROXY_CLIENT_IDENTITY_FILE"),
+                "{error}"
+            );
+            assert!(error.contains(extra.0), "{error}");
+        }
+    }
+
+    #[test]
+    fn no_client_identity_at_all_is_rejected() {
+        let error = identity_from(&[]).expect_err("mtls without an identity must fail");
+        assert!(
+            error.contains("HARNESS_PROXY_CLIENT_IDENTITY_FILE"),
+            "{error}"
+        );
+        assert!(error.contains("HARNESS_PROXY_CLIENT_CERT_FILE"), "{error}");
+    }
+
+    /// The insecure-http guard rejects TLS settings by name, so a new variable
+    /// that `client_identity_pem` reads must be added there too or it escapes
+    /// the guard entirely.
+    #[test]
+    fn insecure_http_guard_covers_every_client_identity_var() {
+        for suffix in ["IDENTITY", "CERT", "KEY"] {
+            for kind in ["FILE", "PEM"] {
+                let name = format!("HARNESS_PROXY_CLIENT_{suffix}_{kind}");
+                assert!(
+                    INTERNAL_TLS_ENV_VARS.contains(&name.as_str()),
+                    "{name} is not guarded in insecure-http mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blank_env_values_read_as_unset() {
+        let name = "BLUE_TEST_BLANK_ENV_SETTING";
+        std::env::set_var(name, "   ");
+        assert_eq!(env_setting(name), None);
+        std::env::set_var(name, "/certs/client.pem");
+        assert_eq!(env_setting(name), Some("/certs/client.pem".to_string()));
+        std::env::remove_var(name);
+        assert_eq!(env_setting(name), None);
     }
 }
