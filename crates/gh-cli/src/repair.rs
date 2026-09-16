@@ -9,6 +9,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+fn program_on_path(name: &str) -> PathBuf {
+    gh_common::which(name).unwrap_or_else(|| PathBuf::from(name))
+}
+
 fn run_kimi_standalone_installer(install_root: &Path, version: &semver::Version) -> Result<()> {
     let url = "https://code.kimi.com/kimi-code/install.sh";
     let display = RepairPlan::KimiInstaller {
@@ -58,7 +62,7 @@ fn resolve_npm_install_version(
     let package = invocation.args.last().ok_or_else(|| {
         anyhow!("the {harness} install plan did not contain an npm package selector")
     })?;
-    let output = std::process::Command::new("npm")
+    let output = std::process::Command::new(program_on_path("npm"))
         .args(["view", package, "version", "--json"])
         .output()
         .with_context(|| format!("npm is required for read-only release lookup of a policy-supported {harness} version"))?;
@@ -366,10 +370,15 @@ impl Runtime for NativeRuntime {
         cliclack::log::info(format!("Running {}", plan.display()))?;
         match plan {
             RepairPlan::Command { program, args } => {
-                let status = std::process::Command::new(program)
+                let resolved = program
+                    .to_str()
+                    .filter(|program| !program.contains(std::path::MAIN_SEPARATOR))
+                    .map(program_on_path)
+                    .unwrap_or_else(|| program.clone());
+                let status = std::process::Command::new(&resolved)
                     .args(args)
                     .status()
-                    .with_context(|| format!("starting {}", program.display()))?;
+                    .with_context(|| format!("starting {}", resolved.display()))?;
                 if !status.success() {
                     bail!(
                         "installer exited with {status}; command: {}",
@@ -396,6 +405,72 @@ impl Runtime for NativeRuntime {
             .map(|path| gh_harness::detect_at(harness, path))
             .collect()
     }
+}
+
+/// Make a selected agent available without changing an existing installation's owner.
+pub(crate) fn ensure_available(
+    harness: Harness,
+    detected: Option<Detected>,
+    policy: &HarnessPolicy,
+    interactive: bool,
+    runtime: &mut impl Runtime,
+) -> Result<(Detected, HarnessContext, bool)> {
+    if let Some(detected) = detected {
+        return ensure_compatible_version(harness, detected, policy, interactive, runtime);
+    }
+    if !interactive || !cfg!(unix) {
+        let automatic_installation = if cfg!(windows) {
+            "Automatic fresh installation is unavailable on Windows."
+        } else {
+            "Automatic fresh installation requires an interactive terminal."
+        };
+        let shell = if cfg!(windows) {
+            "PowerShell or Git Bash"
+        } else {
+            "a POSIX shell"
+        };
+        let manual_installation = match supported_install(harness, policy) {
+            Ok(invocation) => format!(
+                "Install a policy-supported version by running this in {shell}:\n  {}\nEnsure npm's executable directory is on PATH, then retry `blue agent {harness}`.",
+                invocation.display
+            ),
+            Err(error) => format!(
+                "Blue could not determine a policy-supported installation command: {error}. Ask your administrator to update the {harness} policy, then retry `blue agent {harness}`."
+            ),
+        };
+        bail!(
+            "{harness} is not installed on PATH. {automatic_installation}\n\n{manual_installation}"
+        );
+    }
+    // Inventory can become stale while a user is choosing an agent.
+    if let Some(detected) = runtime.detect(harness) {
+        return ensure_compatible_version(harness, detected, policy, interactive, runtime);
+    }
+    let invocation = supported_install(harness, policy)?;
+    if npm_migration_command(&invocation).is_none() {
+        bail!("automatic fresh installation requires an npm global install plan; install {harness} manually and add it to PATH");
+    }
+    let (package, _) = invocation.args[2]
+        .rsplit_once('@')
+        .expect("validated npm selector");
+    let version = runtime.lookup(harness, &invocation)?;
+    resolve_compatibility(harness, Some(&version), Some(&version.to_string()), policy)
+        .context("published installation version is not policy-compatible")?;
+    let plan = RepairPlan::Command {
+        program: "npm".into(),
+        args: vec![
+            "install".into(),
+            "-g".into(),
+            format!("{package}@{version}"),
+        ],
+    };
+    if !runtime.confirm(&format!(
+        "{harness} is not installed. Install {harness} {version} with {}? npm must already be available, with its global executable directory on PATH.", plan.display()
+    ))? {
+        bail!("{harness} installation declined; install a policy-supported version manually and add it to PATH");
+    }
+    runtime.execute(&plan)?;
+    verify_installation(harness, None, policy, &plan, runtime)
 }
 
 pub(crate) fn ensure_compatible_version(
@@ -433,9 +508,19 @@ pub(crate) fn ensure_compatible_version(
         bail!("{harness} installation declined; {manual}");
     }
     runtime.execute(&plan)?;
+    verify_installation(harness, Some(&detected), policy, &plan, runtime)
+}
+
+fn verify_installation(
+    harness: Harness,
+    previous: Option<&Detected>,
+    policy: &HarnessPolicy,
+    plan: &RepairPlan,
+    runtime: &mut impl Runtime,
+) -> Result<(Detected, HarnessContext, bool)> {
     let refreshed = runtime.detect(harness).ok_or_else(|| {
         anyhow!(
-            "installer completed ({}), but {harness} cannot be found on PATH",
+            "installer completed ({}), but {harness} cannot be found on PATH; add the installation executable directory to PATH and retry",
             plan.display()
         )
     })?;
@@ -462,7 +547,7 @@ pub(crate) fn ensure_compatible_version(
             bail!("repair command {} did not produce a usable installation: PATH winner `{}` ({}); no compatible copy was found on PATH; {error}", plan.display(), refreshed.path.display(), refreshed.raw_version.as_deref().unwrap_or("unknown version"));
         }
     };
-    if refreshed.path != detected.path {
+    if let Some(detected) = previous.filter(|detected| refreshed.path != detected.path) {
         cliclack::log::info(format!(
             "PATH winner changed from `{}` to `{}`",
             detected.path.display(),
@@ -503,6 +588,9 @@ mod tests {
         release: Result<Version>,
         winner: Option<Detected>,
         others: Vec<Detected>,
+        initially_absent: bool,
+        confirmations: Vec<String>,
+        executed: Vec<RepairPlan>,
     }
     impl Default for Fake {
         fn default() -> Self {
@@ -514,6 +602,9 @@ mod tests {
                 release: Ok(Version::new(2, 1, 252)),
                 winner: Some(detected("/native/claude", "2.1.252")),
                 others: Vec::new(),
+                initially_absent: false,
+                confirmations: Vec::new(),
+                executed: Vec::new(),
             }
         }
     }
@@ -534,12 +625,12 @@ mod tests {
         }
         fn confirm(&mut self, message: &str) -> Result<bool> {
             self.calls.push("confirm");
-            assert!(message.contains("/native/claude"));
-            assert!(message.contains("2.1.252"));
+            self.confirmations.push(message.into());
             Ok(self.approved)
         }
-        fn execute(&mut self, _: &RepairPlan) -> Result<()> {
+        fn execute(&mut self, plan: &RepairPlan) -> Result<()> {
             self.calls.push("execute");
+            self.executed.push(plan.clone());
             if self.fails {
                 bail!("installer failure");
             }
@@ -547,6 +638,9 @@ mod tests {
         }
         fn detect(&mut self, _: Harness) -> Option<Detected> {
             self.calls.push("detect");
+            if std::mem::take(&mut self.initially_absent) {
+                return None;
+            }
             self.winner.clone()
         }
         fn candidates(&mut self, _: Harness) -> Vec<Detected> {
@@ -555,13 +649,209 @@ mod tests {
         }
     }
     fn run(fake: &mut Fake, interactive: bool) -> Result<(Detected, HarnessContext, bool)> {
-        ensure_compatible_version(
+        let result = ensure_compatible_version(
             Harness::Claude,
             detected("/native/claude", "2.1.273"),
             &HarnessPolicy::default(),
             interactive,
             fake,
+        );
+        for message in &fake.confirmations {
+            assert!(message.contains("/native/claude"));
+            assert!(message.contains("2.1.252"));
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    fn fresh(fake: &mut Fake) -> Result<(Detected, HarnessContext, bool)> {
+        ensure_available(Harness::Claude, None, &HarnessPolicy::default(), true, fake)
+    }
+
+    #[test]
+    fn absent_noninteractive_refuses_without_runtime_calls() {
+        let mut fake = Fake::default();
+        let error = ensure_available(
+            Harness::Claude,
+            None,
+            &HarnessPolicy::default(),
+            false,
+            &mut fake,
         )
+        .unwrap_err()
+        .to_string();
+        let invocation = supported_install(Harness::Claude, &HarnessPolicy::default()).unwrap();
+        assert!(error.contains(&invocation.display), "{error}");
+        assert!(error.contains("Ensure npm's executable directory is on PATH"));
+        assert!(fake.calls.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absent_windows_refuses_without_runtime_calls() {
+        let mut fake = Fake::default();
+        let error = ensure_available(
+            Harness::Claude,
+            None,
+            &HarnessPolicy::default(),
+            true,
+            &mut fake,
+        )
+        .unwrap_err()
+        .to_string();
+        let invocation = supported_install(Harness::Claude, &HarnessPolicy::default()).unwrap();
+        assert!(error.contains("Automatic fresh installation is unavailable on Windows."));
+        assert!(error.contains("PowerShell or Git Bash"));
+        assert!(error.contains(&invocation.display), "{error}");
+        assert!(fake.calls.is_empty());
+    }
+
+    #[test]
+    fn absent_harness_with_unsupported_policy_does_not_suggest_an_invalid_command() {
+        let mut fake = Fake::default();
+        let policy = HarnessPolicy {
+            version_requirement: Some(">=999.0.0".into()),
+            ..HarnessPolicy::default()
+        };
+        let error = ensure_available(Harness::Claude, None, &policy, false, &mut fake)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("could not determine a policy-supported installation command"));
+        assert!(error.contains("Ask your administrator"));
+        assert!(!error.contains("npm install"));
+        assert!(fake.calls.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_install_uses_each_adapter_package_and_exact_version() {
+        for (harness, version) in [
+            (Harness::Codex, "0.145.0"),
+            (Harness::Claude, "2.1.252"),
+            (Harness::Kimi, "0.0.0"),
+            (Harness::Opencode, "1.0.0"),
+        ] {
+            let mut winner = detected("/new/bin/agent", version);
+            winner.harness = harness;
+            let mut fake = Fake {
+                initially_absent: true,
+                release: Ok(Version::parse(version).unwrap()),
+                winner: Some(winner),
+                ..Fake::default()
+            };
+            let (winner, _, changed) =
+                ensure_available(harness, None, &HarnessPolicy::default(), true, &mut fake)
+                    .unwrap();
+            assert!(changed);
+            assert_eq!(winner.path, PathBuf::from("/new/bin/agent"));
+            assert_eq!(
+                fake.executed,
+                vec![RepairPlan::Command {
+                    program: "npm".into(),
+                    args: vec![
+                        "install".into(),
+                        "-g".into(),
+                        format!("{}@{version}", gh_harness::install::npm_package(harness))
+                    ]
+                }]
+            );
+            assert!(fake.confirmations[0].contains(version));
+            assert!(fake.confirmations[0].contains(&fake.executed[0].display()));
+            assert_eq!(
+                fake.calls,
+                vec!["detect", "lookup", "confirm", "execute", "detect"]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_failures_never_report_readiness() {
+        let cases = [
+            Fake {
+                approved: false,
+                ..Fake::default()
+            },
+            Fake {
+                release: Err(anyhow!("registry unavailable")),
+                ..Fake::default()
+            },
+            Fake {
+                release: Ok(Version::new(999, 0, 0)),
+                ..Fake::default()
+            },
+            Fake {
+                fails: true,
+                ..Fake::default()
+            },
+            Fake {
+                winner: None,
+                ..Fake::default()
+            },
+            Fake {
+                winner: Some(detected("/bad/claude", "unparseable")),
+                ..Fake::default()
+            },
+            Fake {
+                winner: Some(detected("/bad/claude", "999.0.0")),
+                ..Fake::default()
+            },
+        ];
+        for mut fake in cases {
+            fake.initially_absent = true;
+            assert!(fresh(&mut fake).is_err());
+            if !fake.approved
+                || fake.release.is_err()
+                || fake.release.as_ref().is_ok_and(|v| v.major == 999)
+            {
+                assert!(fake.executed.is_empty());
+            }
+        }
+        let mut fake = Fake {
+            initially_absent: true,
+            winner: Some(detected("/bad/claude", "999.0.0")),
+            others: vec![detected("/good/claude", "2.1.252")],
+            ..Fake::default()
+        };
+        assert!(fresh(&mut fake)
+            .unwrap_err()
+            .to_string()
+            .contains("shadows compatible"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_registry_result_cannot_override_policy() {
+        let mut fake = Fake {
+            initially_absent: true,
+            ..Fake::default()
+        };
+        let policy = HarnessPolicy {
+            version_requirement: Some("=2.1.251".into()),
+            ..HarnessPolicy::default()
+        };
+        let error = ensure_available(Harness::Claude, None, &policy, true, &mut fake).unwrap_err();
+        assert!(error.to_string().contains("not policy-compatible"));
+        assert_eq!(fake.calls, vec!["detect", "lookup"]);
+        assert!(fake.confirmations.is_empty() && fake.executed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_absence_uses_existing_owner() {
+        let mut fake = Fake {
+            winner: Some(detected("/native/claude", "999.0.0")),
+            ..Fake::default()
+        };
+        assert!(fresh(&mut fake).is_err()); // unchanged incompatible winner after repair
+        assert_eq!(
+            fake.executed,
+            vec![RepairPlan::Command {
+                program: "/native/claude".into(),
+                args: vec!["install".into(), "2.1.252".into()]
+            }]
+        );
+        assert!(fake.calls.contains(&"ownership"));
     }
 
     #[test]

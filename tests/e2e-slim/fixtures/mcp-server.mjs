@@ -1,8 +1,10 @@
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { mkdirSync, writeFileSync } from "node:fs";
 
-mkdirSync("/tmp/blue-e2e/component-markers", { recursive: true });
-writeFileSync("/tmp/blue-e2e/component-markers/mcp-started", "started\n");
+const markers = process.env.E2E_SLIM_MARKER_DIR || "/tmp/blue-e2e/component-markers";
+mkdirSync(markers, { recursive: true });
+writeFileSync(join(markers, "mcp-started"), "started\n");
 
 const input = createInterface({ input: process.stdin });
 input.on("line", (line) => {
@@ -15,7 +17,7 @@ input.on("line", (line) => {
   } else if (message.method === "tools/list") {
     result = { tools: [{ name: "blue_certify", description: "Return the Blue E2E MCP certification marker", inputSchema: { type: "object", properties: {} } }] };
   } else if (message.method === "tools/call") {
-    writeFileSync("/tmp/blue-e2e/component-markers/mcp-called", "called\n");
+    writeFileSync(join(markers, "mcp-called"), "called\n");
     result = { content: [{ type: "text", text: "BLUE_MCP_OK" }] };
   }
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n`);

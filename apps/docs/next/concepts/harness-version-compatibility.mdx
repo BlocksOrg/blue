@@ -249,3 +249,28 @@ Package variants select verified archive content only. They cannot send executab
 Blue records the selected profile, normalized version, and generated paths in harness-owned compatibility state. When the selected profile changes, Blue writes the new overlay first and removes stale files only when they were recorded previously and remain inside Blue-owned runtime locations. Native user configuration and untracked files are never cleanup targets.
 
 See [Governance configuration](/next/reference/governance-config) for the complete schema and [Troubleshooting](/next/cli/troubleshooting) for reconciliation diagnostics.
+
+## Install an absent agent
+
+In a Unix terminal, `blue <agent>`, bare `blue`, and `blue agent` offer
+policy-allowed agents that are absent from PATH. Missing agents appear after ready
+agents and repair candidates, labelled `not installed — install a policy-supported version`.
+Blue resolves an exact npm release inside both the policy and Blue's supported
+range, then asks for confirmation with **No** selected by default. The prompt
+shows the exact version and `npm install -g <package>@<version>` command.
+
+Fresh installation uses npm's configured global prefix. npm must already be
+installed and its global executable directory must be on PATH. Blue does not
+bootstrap npm, change PATH, add sudo, or retry with another installer. Existing
+installations continue to use installation-aware repair and retain their owner
+and prefix. After either operation, Blue validates the actual PATH winner before
+launching or saving a default; an installer exit code alone is not enough.
+
+Unattended calls never install an absent agent. Inside the running UI, `/agent`
+only selects ready agents and directs you to `blue agent <name>` outside the UI
+for installation or repair. Automatic fresh installation is unavailable on Windows.
+
+Interactive `blue apply` can repair an installed incompatible default with
+confirmation. `apply --yes`, piped calls, in-UI apply, and the daemon do not run
+installers. An absent default must first be installed through `blue agent <name>`;
+apply never installs every missing allowed agent.
