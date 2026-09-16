@@ -122,7 +122,62 @@ accepts plaintext east-west credentials. The processes check mounted certificate
 files every 30 seconds, adopt valid rotations without dropping in-flight
 requests, and retain the last-known-good configuration after an invalid update.
 
+#### Let the chart issue the certificates
+
+If cert-manager is installed in the cluster, set
+`blue.internalTransport.certManager.enabled=true` and skip the rest of this
+section. The chart declares the `Issuer` and `Certificate` resources, names the
+two Secrets after the release, and fills in the server SAN from the internal
+Service name — the two values a hand-written manifest gets wrong. cert-manager
+generates the keys and renews them; nothing secret goes into the release.
+
+```yaml
+blue:
+  internalTransport:
+    mode: mtls
+    certManager:
+      enabled: true
+      # Omit issuerRef for a self-signed CA scoped to this release, or point it
+      # at your own PKI:
+      # issuerRef: { name: corporate-pki, kind: ClusterIssuer }
+```
+
+The issuer must be a CA-type issuer. Both sides read `ca.crt` out of their own
+Secret, and cert-manager writes that key only when the CA is known — true for
+`SelfSigned` and `CA` issuers, **false for ACME**. `issuerRef.kind` is required
+alongside `issuerRef.name`: cert-manager defaults it to `Issuer`, which looks
+only in the release namespace and leaves the Certificate stuck `Pending` if you
+meant `ClusterIssuer`.
+
+Under `certManager`, `serverSecret`, `clientSecret`, and `clientSecretFormat`
+are ignored. Installing cert-manager itself is out of the chart's scope: it is a
+cluster-scoped singleton with its own CRDs.
+
+Turning `certManager.enabled` on for a running mTLS install is a CA cutover, not
+an in-place upgrade. Both Secrets get new content from a new CA and they do not
+swap atomically, so expect a short window of rejected handshakes; the 30-second
+reload and last-known-good behaviour keep it from becoming an outage.
+
+#### Or bring your own certificates
+
 Set both `blue.internalTransport.serverSecret` and `blue.internalTransport.clientSecret`; empty names render unusable Secret volumes.
+
+The server Secret holds `ca.crt`, `tls.crt`, and `tls.key`. The client Secret
+holds `ca.crt` plus the proxy's own identity, in whichever of two layouts your
+issuer produces:
+
+| `blue.internalTransport.clientSecretFormat` | Client Secret keys | Use it when |
+| --- | --- | --- |
+| `combined` (default) | `ca.crt`, `client.pem` | You build `client.pem` yourself by concatenating the certificate and its key |
+| `split` | `ca.crt`, `tls.crt`, `tls.key` | Your issuer emits the certificate and key as separate files |
+| chart-issued (`certManager.enabled`) | `ca.crt`, `tls.crt`, `tls.key` | The chart declares the Certificates and cert-manager fills the Secrets; the layout is forced to `split` |
+
+Prefer `split` with an automated issuer. cert-manager, Vault, SPIRE, and
+`kubectl create secret tls` all write `tls.crt` + `tls.key`, so the Certificate
+needs no `additionalOutputFormats` stanza — that field is only on by default
+from cert-manager 1.15, and enabling it earlier takes a cluster-wide feature
+gate on both the controller and the webhook. `kubectl create secret tls` cannot
+produce a combined file at all.
 
 `blue.internalTransport.mode: insecure-http` is supported for fully private,
 trusted networks. OAuth M2M remains mandatory and port 8082 must stay restricted
