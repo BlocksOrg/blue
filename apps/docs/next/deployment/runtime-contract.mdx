@@ -110,7 +110,14 @@ The Control API's `/governance-config/events` route is a server-sent event strea
 | Worker | `GET /health` on `8080` | `GET /health` on `8080` |
 | Inference proxy | `GET /health` on `8081` | `GET /ready` on `8081` |
 
-The Control API readiness endpoint verifies database connectivity. A successful liveness response alone does not prove that PostgreSQL or object storage is usable; after deployment, sign in and use the dashboard or CLI dependency-health view as an end-to-end check.
+After deployment, verify the two public origins using your own domains:
+
+```bash
+curl --fail-with-body https://api.blue.example.com/health
+curl --fail-with-body https://blue.example.com/api/health
+```
+
+The Control API should return `ok`, and the dashboard health endpoint should succeed. The Control API readiness endpoint verifies database connectivity. A successful liveness response alone does not prove that PostgreSQL or object storage is usable; after deployment, sign in and use the dashboard or CLI dependency-health view as an end-to-end check.
 
 ## Rollout responsibilities
 
