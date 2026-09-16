@@ -1529,6 +1529,50 @@ esac
     expect((await page.request.delete(`${control}/admin/invitations/${invitation.id}`)).status()).toBe(204);
   });
 
+  test("member sees a provisioning error when the gateway account is missing", async ({ page, browser }) => {
+    await loginAsAdmin(page);
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
+    const modePath = "/work/tests/e2e/artifacts/provisioner/mode";
+    const email = `missing-gateway-${Date.now()}@example.com`;
+    const created = await page.request.post(`${control}/admin/invitations`, { data: { email, role: "member" } });
+    expect(created.status(), await created.text()).toBe(201);
+    const invitation = await created.json();
+    const memberContext = await browser.newContext();
+    let memberId: string | undefined;
+    try {
+      const memberPage = await memberContext.newPage();
+      await memberPage.goto(`${dashboard}/accept-invitation?id=${invitation.id}`);
+      await memberPage.getByLabel("Password").fill("member-password-e2e");
+      await memberPage.getByRole("button", { name: "Create account" }).click();
+      await expect(memberPage).toHaveURL(/\/sessions/);
+      const identity = await memberContext.request.get(`${control}/auth/me`);
+      expect(identity.status(), await identity.text()).toBe(200);
+      memberId = (await identity.json()).id;
+
+      await memberPage.goto(`${dashboard}/gateway`);
+      await expect(memberPage.getByRole("button", { name: "Provision key" })).toBeVisible();
+      await writeFile(modePath, "account-missing\n");
+      const posted = memberPage.waitForResponse((response) =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === "/gateway",
+      );
+      await memberPage.getByRole("button", { name: "Provision key" }).click();
+      expect((await posted).status()).toBe(200);
+      await expect(memberPage.getByRole("alert")).toContainText("gateway account is not provisioned: member has no upstream account");
+      await expect(memberPage.getByRole("tab", { name: "Key" })).toBeVisible();
+
+      await memberPage.reload();
+      await expect(memberPage.getByRole("alert")).toContainText("gateway account is not provisioned: member has no upstream account");
+      const access = await memberContext.request.get(`${control}/gateway/key`);
+      expect(access.status(), await access.text()).toBe(200);
+      expect(await access.json()).toMatchObject({ status: "error", error: "gateway account is not provisioned: member has no upstream account" });
+    } finally {
+      await rm(modePath, { force: true });
+      await memberContext.close();
+      if (memberId) await page.request.delete(`${control}/admin/users/${memberId}`);
+    }
+  });
+
   test("invited member can read policy but cannot call administrator or cross-user APIs", async ({ page, browser }) => {
     await loginAsAdmin(page);
     const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
@@ -1622,6 +1666,12 @@ esac
       await expect(memberPage.getByRole("tab", { name: "Key" })).toBeVisible();
       await expect(memberPage.getByRole("tab", { name: "Overview" })).toHaveCount(0);
       await expect(memberPage.getByRole("tab", { name: "Logs" })).toHaveCount(0);
+      const reconciled = memberPage.waitForResponse((response) =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === "/gateway",
+      );
+      await memberPage.getByRole("button", { name: "Reconcile key" }).click();
+      expect((await reconciled).status()).toBe(200);
+      await expect(memberPage.getByText("ready", { exact: true })).toBeVisible();
       const deniedPaths = ["/harnesses", "/extensions", "/members", "/clients", "/gateway?tab=logs"];
       for (const path of deniedPaths) {
         const response = await memberPage.goto(`${dashboard}${path}`, { waitUntil: "commit" });

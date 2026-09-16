@@ -1,7 +1,7 @@
 "use server";
 
 import { headers } from "next/headers";
-import { redirect } from "next/navigation";
+import { redirect, unstable_rethrow } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { api } from "../lib/api";
 import { auth, authPool } from "../lib/auth";
@@ -131,9 +131,24 @@ export async function saveHarnessManagedConfig(
   }
 }
 
-export async function ensureGatewayKey(): Promise<void> {
-  await api("/gateway/key/ensure", { method: "POST", body: '{"manual":true}' });
-  revalidatePath("/gateway");
+export type GatewayKeyState = { error?: string };
+
+export async function ensureGatewayKey(_: GatewayKeyState): Promise<GatewayKeyState> {
+  try {
+    await api("/gateway/key/ensure", { method: "POST", body: '{"manual":true}' });
+    revalidatePath("/gateway");
+    return {};
+  } catch (error) {
+    unstable_rethrow(error);
+    if (!(error instanceof Error)) return { error: "Gateway key could not be provisioned." };
+    const detail = error.message.replace(/^\d{3}:\s*/, "");
+    try {
+      const parsed = JSON.parse(detail) as { error?: string };
+      return { error: parsed.error || "Gateway key could not be provisioned." };
+    } catch {
+      return { error: detail || "Gateway key could not be provisioned." };
+    }
+  }
 }
 
 export type GatewayProxyHealthState = {
