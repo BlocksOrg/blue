@@ -15,6 +15,10 @@ data "aws_route53_zone" "blue" {
       condition     = var.dashboard_subdomain != var.api_subdomain
       error_message = "dashboard_subdomain and api_subdomain must differ; both cannot be the same name."
     }
+    precondition {
+      condition     = var.inference_proxy_subdomain == "" || (var.inference_proxy_subdomain != var.dashboard_subdomain && var.inference_proxy_subdomain != var.api_subdomain)
+      error_message = "inference_proxy_subdomain must differ from dashboard_subdomain and api_subdomain."
+    }
   }
 }
 
@@ -22,12 +26,20 @@ locals {
   zone_name          = var.include_domain ? trimsuffix(data.aws_route53_zone.blue[0].name, ".") : ""
   dashboard_hostname = var.include_domain ? (var.dashboard_subdomain == "" ? local.zone_name : "${var.dashboard_subdomain}.${local.zone_name}") : null
   api_hostname       = var.include_domain ? (var.api_subdomain == "" ? local.zone_name : "${var.api_subdomain}.${local.zone_name}") : null
+  # Optional third name for gateway mode. Reserving it costs nothing, so a
+  # deployment can add the inference proxy later without reissuing the certificate.
+  inference_proxy_hostname = var.include_domain && var.inference_proxy_subdomain != "" ? "${var.inference_proxy_subdomain}.${local.zone_name}" : null
+  # Every hostname the load balancer answers for, keyed for the alias records.
+  hostnames = merge(
+    var.include_domain ? { dashboard = local.dashboard_hostname, api = local.api_hostname } : {},
+    local.inference_proxy_hostname != null ? { inference_proxy = local.inference_proxy_hostname } : {},
+  )
 }
 
 resource "aws_acm_certificate" "blue" {
   count                     = var.include_domain ? 1 : 0
   domain_name               = local.dashboard_hostname
-  subject_alternative_names = [local.api_hostname]
+  subject_alternative_names = compact([local.api_hostname, local.inference_proxy_hostname])
   validation_method         = "DNS"
 
   lifecycle { create_before_destroy = true }
@@ -65,10 +77,7 @@ data "aws_elb_hosted_zone_id" "alb" {
 
 resource "aws_route53_record" "blue" {
   #checkov:skip=CKV2_AWS_23:the alias target is var.alb_hostname, an ALB created outside this module by the AWS Load Balancer Controller; checkov renders the variable to its "" default and so misses the check's own var. escape hatch
-  for_each = var.include_domain && var.alb_hostname != "" ? {
-    dashboard = local.dashboard_hostname
-    api       = local.api_hostname
-  } : {}
+  for_each = var.alb_hostname != "" ? local.hostnames : {}
 
   zone_id = var.route53_zone_id
   name    = each.value
