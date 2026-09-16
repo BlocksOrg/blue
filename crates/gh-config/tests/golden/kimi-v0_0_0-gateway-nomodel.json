@@ -29,7 +29,7 @@
       "path": "$HOME/.config/blue/runtime/kimi/agents/reviewer.md"
     },
     {
-      "body": "default_permission_mode = \"manual\"\nextra_agent_dirs = [\"$HOME/.config/blue/runtime/kimi/agents\"]\nextra_skill_dirs = [\"$HOME/.config/blue/runtime/kimi/skills\"]\n\n[[hooks]]\ncommand = \"'$BLUE' session-upload kimi --profile 'kimi-v0_0_0'\"\nevent = \"SessionEnd\"\ntimeout = 30\n\n[[hooks]]\ncommand = \"'$BLUE' session-upload kimi --profile 'kimi-v0_0_0'\"\nevent = \"Stop\"\ntimeout = 30\n\n[[hooks]]\ncommand = \"'$BLUE' session-start kimi --profile 'kimi-v0_0_0'\"\nevent = \"SessionStart\"\ntimeout = 30\n\n[[hooks]]\ncommand = \"fixture-hook\"\nevent = \"Stop\"\n\n[providers.governed]\napi_key = \"fixture-token\"\nbase_url = \"https://gateway.example\"\ntype = \"openai\"\n",
+      "body": "default_model = \"fixture-model\"\ndefault_permission_mode = \"manual\"\nextra_agent_dirs = [\"$HOME/.config/blue/runtime/kimi/agents\"]\nextra_skill_dirs = [\"$HOME/.config/blue/runtime/kimi/skills\"]\n\n[[hooks]]\ncommand = \"'$BLUE' session-upload kimi --profile 'kimi-v0_0_0'\"\nevent = \"SessionEnd\"\ntimeout = 30\n\n[[hooks]]\ncommand = \"'$BLUE' session-upload kimi --profile 'kimi-v0_0_0'\"\nevent = \"Stop\"\ntimeout = 30\n\n[[hooks]]\ncommand = \"'$BLUE' session-start kimi --profile 'kimi-v0_0_0'\"\nevent = \"SessionStart\"\ntimeout = 30\n\n[[hooks]]\ncommand = \"fixture-hook\"\nevent = \"Stop\"\n\n[models.fixture-model]\nmax_context_size = 262144\nmodel = \"fixture-model\"\nprovider = \"governed\"\n\n[providers.governed]\napi_key = \"fixture-token\"\nbase_url = \"https://gateway.example\"\ntype = \"openai\"\n",
       "mode": 384,
       "path": "$HOME/.config/blue/runtime/kimi/config.toml"
     },

@@ -20,6 +20,16 @@ pub fn write(
     session_start_hooks: Option<Value>,
     _enforced: bool,
 ) -> Result<HarnessWrite, GhError> {
+    if wiring.is_some()
+        && (policy.gateway_models.is_empty()
+            || policy.managed_config.model.as_ref().is_some_and(|selected| {
+                !policy.gateway_models.iter().any(|model| model == selected)
+            }))
+    {
+        return Err(GhError::config(
+            "gateway-mode Claude selected model must be present in gateway_models",
+        ));
+    }
     migrate_legacy_global_config(plan, home, policy)?;
     let runtime = crate::managed_runtime_dir(home).join("claude");
     let settings_path = runtime.join("settings.json");

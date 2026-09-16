@@ -60,6 +60,13 @@ pub struct GenerationSupport {
     pub component_rules: ComponentRules,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayModelExposure {
+    Catalog,
+    SelectedOnly,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct PublicHarnessMetadata {
     pub key: &'static str,
@@ -68,6 +75,7 @@ pub struct PublicHarnessMetadata {
     pub description: &'static str,
     pub binary_names: &'static [&'static str],
     pub install_command_template: &'static str,
+    pub gateway_model_exposure: GatewayModelExposure,
     /// Backward-compatible summary derived from every generation.
     pub capabilities: Vec<&'static str>,
     /// Backward-compatible current-generation rules. Consumers should prefer
@@ -494,6 +502,10 @@ pub fn registry_metadata() -> Vec<PublicHarnessMetadata> {
                 description: metadata.description,
                 binary_names: metadata.binary_names,
                 install_command_template: metadata.install_command_template,
+                gateway_model_exposure: match metadata.key {
+                    "opencode" | "kimi" => GatewayModelExposure::Catalog,
+                    _ => GatewayModelExposure::SelectedOnly,
+                },
                 capabilities,
                 component_rules: current_support.component_rules,
                 generations: definition

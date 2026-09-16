@@ -1740,6 +1740,11 @@ components:
       properties:
         version_requirement: { type: string, description: Semver range required for the locally installed harness }
         allow_unverified_versions: { type: boolean, default: false, description: Permit matching releases beyond Blue's certified ceiling; requires version_requirement }
+        gateway_models:
+          type: array
+          uniqueItems: true
+          description: Exact gateway model IDs assigned to this harness; ignored in direct mode.
+          items: { type: string, minLength: 1 }
         managed_config: { $ref: "#/components/schemas/ManagedConfig" }
         mcp:
           type: array
