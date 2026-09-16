@@ -61,77 +61,77 @@
   "navigation": {
     "versions": [
       {
-        "version": "0.1.0",
+        "version": "0.2.0",
         "groups": [
           {
             "group": "Start here",
             "pages": [
-              "0.1.0/introduction",
-              "0.1.0/quickstart"
+              "0.2.0/introduction",
+              "0.2.0/quickstart"
             ]
           },
           {
             "group": "Deployment",
             "pages": [
-              "0.1.0/deployment/runtime-contract",
-              "0.1.0/deployment/production",
-              "0.1.0/deployment/blue-yaml",
-              "0.1.0/deployment/managed-repositories"
+              "0.2.0/deployment/runtime-contract",
+              "0.2.0/deployment/production",
+              "0.2.0/deployment/blue-yaml",
+              "0.2.0/deployment/managed-repositories"
             ]
           },
           {
             "group": "Concepts",
             "pages": [
-              "0.1.0/concepts/architecture",
-              "0.1.0/concepts/configuration",
-              "0.1.0/concepts/harness-version-compatibility",
-              "0.1.0/concepts/gateway-mode",
-              "0.1.0/concepts/authentication"
+              "0.2.0/concepts/architecture",
+              "0.2.0/concepts/configuration",
+              "0.2.0/concepts/harness-version-compatibility",
+              "0.2.0/concepts/gateway-mode",
+              "0.2.0/concepts/authentication"
             ]
           },
           {
             "group": "CLI",
             "pages": [
-              "0.1.0/cli/commands",
-              "0.1.0/cli/harnesses",
-              "0.1.0/cli/windows-paths",
-              "0.1.0/cli/troubleshooting"
+              "0.2.0/cli/commands",
+              "0.2.0/cli/harnesses",
+              "0.2.0/cli/windows-paths",
+              "0.2.0/cli/troubleshooting"
             ]
           },
           {
             "group": "Administration",
             "pages": [
-              "0.1.0/admin/dashboard",
-              "0.1.0/admin/user-management",
-              "0.1.0/admin/identity-provisioning",
-              "0.1.0/admin/managed-packages",
-              "0.1.0/admin/configuration",
-              "0.1.0/admin/gateway-access",
-              "0.1.0/admin/custom-gateway-provisioners",
-              "0.1.0/admin/session-capture"
+              "0.2.0/admin/dashboard",
+              "0.2.0/admin/user-management",
+              "0.2.0/admin/identity-provisioning",
+              "0.2.0/admin/managed-packages",
+              "0.2.0/admin/configuration",
+              "0.2.0/admin/gateway-access",
+              "0.2.0/admin/custom-gateway-provisioners",
+              "0.2.0/admin/session-capture"
             ]
           },
           {
             "group": "Development",
             "pages": [
-              "0.1.0/development/local-compose",
-              "0.1.0/development/contributing",
-              "0.1.0/development/harness-adapter-architecture",
-              "0.1.0/development/gateway-adapter-architecture"
+              "0.2.0/development/local-compose",
+              "0.2.0/development/contributing",
+              "0.2.0/development/harness-adapter-architecture",
+              "0.2.0/development/gateway-adapter-architecture"
             ]
           },
           {
             "group": "Reference",
             "pages": [
-              "0.1.0/reference/governance-config",
-              "0.1.0/reference/auth-endpoints"
+              "0.2.0/reference/governance-config",
+              "0.2.0/reference/auth-endpoints"
             ]
           },
           {
             "group": "API reference",
             "openapi": {
-              "source": "/openapi/0.1.0.yaml",
-              "directory": "0.1.0/api-reference"
+              "source": "/openapi/0.2.0.yaml",
+              "directory": "0.2.0/api-reference"
             }
           }
         ]
@@ -208,6 +208,82 @@
             "openapi": {
               "source": "/openapi/next.yaml",
               "directory": "next/api-reference"
+            }
+          }
+        ]
+      },
+      {
+        "version": "0.1.0",
+        "groups": [
+          {
+            "group": "Start here",
+            "pages": [
+              "0.1.0/introduction",
+              "0.1.0/quickstart"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "0.1.0/deployment/runtime-contract",
+              "0.1.0/deployment/production",
+              "0.1.0/deployment/blue-yaml",
+              "0.1.0/deployment/managed-repositories"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "0.1.0/concepts/architecture",
+              "0.1.0/concepts/configuration",
+              "0.1.0/concepts/harness-version-compatibility",
+              "0.1.0/concepts/gateway-mode",
+              "0.1.0/concepts/authentication"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "0.1.0/cli/commands",
+              "0.1.0/cli/harnesses",
+              "0.1.0/cli/windows-paths",
+              "0.1.0/cli/troubleshooting"
+            ]
+          },
+          {
+            "group": "Administration",
+            "pages": [
+              "0.1.0/admin/dashboard",
+              "0.1.0/admin/user-management",
+              "0.1.0/admin/identity-provisioning",
+              "0.1.0/admin/managed-packages",
+              "0.1.0/admin/configuration",
+              "0.1.0/admin/gateway-access",
+              "0.1.0/admin/custom-gateway-provisioners",
+              "0.1.0/admin/session-capture"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "0.1.0/development/local-compose",
+              "0.1.0/development/contributing",
+              "0.1.0/development/harness-adapter-architecture",
+              "0.1.0/development/gateway-adapter-architecture"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "0.1.0/reference/governance-config",
+              "0.1.0/reference/auth-endpoints"
+            ]
+          },
+          {
+            "group": "API reference",
+            "openapi": {
+              "source": "/openapi/0.1.0.yaml",
+              "directory": "0.1.0/api-reference"
             }
           }
         ]

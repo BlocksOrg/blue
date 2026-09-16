@@ -1,0 +1,142 @@
+---
+title: "CLI commands"
+description: "Reference the public harness commands and their expected behavior."
+icon: "terminal"
+---
+
+The binary is named `blue`. Run `blue --help` for the arguments supported by your installed version.
+
+## Install
+
+On a workstation with Codex, Claude, Kimi, or OpenCode already on `PATH`, install Blue:
+
+<CodeGroup>
+```bash macOS and Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BlocksOrg/blue/releases/latest/download/install.sh | sh
+```
+
+```powershell Windows PowerShell
+irm https://github.com/BlocksOrg/blue/releases/latest/download/install.ps1 | iex
+```
+</CodeGroup>
+
+The installer detects your platform, downloads the matching release asset, verifies it against the release's `SHA256SUMS`, and installs `blue` in your user path. You can [inspect the release assets and installers](https://github.com/BlocksOrg/blue/releases) before running them.
+
+| Variable | Effect |
+| --- | --- |
+| `BLUE_VERSION=0.1.0` | Install a specific release instead of the latest. |
+| `BLUE_INSTALL_DIR=/path` | Install somewhere other than `~/.local/bin`. |
+| `BLUE_UPDATE_PATH=0` | Do not add the default install directory to your shell profile. |
+
+Then connect to your organization's deployment:
+
+```bash
+blue setup      # enter the Control API URL from your administrator, then sign in
+blue doctor     # check installed agents and organization policy
+blue codex      # launch Codex through Blue; or claude, kimi, opencode
+```
+
+## Commands
+
+| Command | Behavior |
+| --- | --- |
+| `blue` | Set up or renew login when needed, reconcile policy, and launch the preferred agent. Hold Ctrl and press `]` for controls. On first run it asks which agent to use; an installed agent whose version the policy blocks is offered with a repair prompt rather than hidden. |
+| `blue version` / `blue --version` | Print the installed Blue metaharness version. |
+| `blue setup` | Clear the stored session, reconfigure the Control API connection through deployment discovery, and complete login. |
+| `blue reset [--yes]` | Disconnect the active deployment, remove Blue-managed agent overlays, and retain non-secret tenant state for a later reconnect. |
+| `blue login [--force]` | Verify the stored session with the service and, when it is missing or rejected, complete OAuth device authorization. `--force` safely retires an accessible session before re-authorizing. An inaccessible refresh token is replaced without signing out the user's other Blue sessions. |
+| `blue logout` | Revoke the refresh family when reachable and remove local tokens. |
+| `blue doctor` | Show detected harness paths, versions, and policy allow or deny state. |
+| `blue agent [NAME]` | Choose the preferred agent used by bare `blue`. In an interactive terminal this also offers installed agents whose version needs repairing, and installs a policy-supported release before saving the choice. Without a terminal only eligible agents are accepted. |
+| `blue status` | Compare desired/applied revisions and report managed-file and package health. |
+| `blue verify` | Exit non-zero when policy or managed files are stale. |
+| `blue config` | Print the resolved, personalized configuration and its source. |
+| `blue apply [--yes]` | Reconcile the configured default agent. |
+| `blue daemon [--interval N]` | Keep the default agent current and repair its package drift using TTL polling. |
+| `blue gateway` | Provision or reconcile the current user's single managed gateway key. |
+| `blue run NAME -- ARGS` | Reconcile and launch one governed native agent, notifying when a newer revision requires a restart. |
+| `blue NAME ARGS` | Shorthand for `blue run NAME -- ARGS`. |
+| `blue shim install [--dir PATH]` | Install command shims into `~/.local/bin` on Unix or `%LOCALAPPDATA%\Blue\bin` on Windows by default. |
+| `blue shim uninstall [--dir PATH]` | Remove shims previously installed by Blue from the default or specified directory. |
+
+## Typical workflow
+
+```bash
+blue login
+blue doctor
+blue agent codex
+blue apply
+blue verify
+blue codex
+```
+
+## In-session controls
+
+Hold <kbd>Ctrl</kbd> and press <kbd>]</kbd> while an agent is running. The persistent footer reports Control API connectivity as `checking`, `connected`, or `offline`. Run `/agent` to choose a new default from the interactive list. The current agent keeps running unless you then select **Quit and reload now**; otherwise the new default applies the next time Blue starts an agent. Commands that require confirmation show an interactive choice instead of accepting typed arguments. Run `/health` to check `database`, `blob_storage`, `package_storage`, and `inference_proxy`; the proxy check appears when the server supplies `gateway_inference_proxy_health_url`. Run `/version` to show the installed metaharness version.
+
+| Command | Behavior |
+| --- | --- |
+| `/status` | Show policy and managed-file status. |
+| `/health` | Check Control API dependencies. |
+| `/version` | Show the Blue metaharness version. |
+| `/gateway` | Show gateway account status. |
+| `/doctor` | Show detected agents and their policy state. |
+| `/agent` | Choose the default agent and optionally quit and reload immediately. Agents needing a version repair are named but not selectable here; run `blue agent <name>` outside Blue to install one. |
+| `/apply` | Review and confirm immediate reconciliation. |
+| `/login` | Show identity or interactively confirm reauthentication when the agent must stop. |
+| `/logout` | Interactively confirm sign-out. |
+| `/reset` | Interactively confirm tenant reset, ending the active agent. |
+| `/resume` | Pick an owned or shared portable session, verify it, then gracefully replace the active agent with the native resumed session. Escape or Ctrl-] returns to the active agent. |
+| `/help` | Show the available slash commands. |
+| `/quit` | Interactively confirm ending the agent and exiting Blue. |
+
+
+## Reset a deployment
+
+Use reset when you want to disconnect this workstation from its current Blue deployment and connect to another tenant later. Use `blue logout` instead when you only need to change the signed-in account without changing deployments.
+
+<Warning>
+  Reset ends the running agent and removes the active deployment's Blue-managed overlays and hooks. Your native agent configuration and its backups are not removed.
+</Warning>
+
+From a shell, run:
+
+```bash
+blue reset
+```
+
+The confirmation defaults to No. For automation, pass `--yes`. From the Ctrl-<kbd>]</kbd> control screen, enter `/reset` to review the action and then `/reset yes` to confirm it.
+
+When you confirm, Blue:
+
+1. Identifies the tenant by its canonical Control API URL and saves its non-secret local state in a tenant-specific archive.
+2. Retains your preferred agent, local mode preferences, governance cache, applied-state fingerprints, managed package data, merge approvals, MCP staging data, and queued session uploads.
+3. Removes Blue-owned agent overlays, managed hooks, and package projections. Personal native agent configuration and backup files remain in place.
+4. Attempts bounded remote gateway and OAuth cleanup without persisting any rotated credential, then always deletes the local session even when remote cleanup reports an error. Credentials are never put in the archive.
+5. Removes the active `blue.toml` and governance cache so policy from the previous tenant cannot be used by a different tenant.
+
+Blue keeps a separate installation ID for each tenant under `~/.config/blue/identities` on Unix or `%APPDATA%\Blue\identities` on Windows. Reconnecting to the same tenant reuses its ID; connecting to another tenant creates a different one. See [Windows paths and migration](/0.2.0/cli/windows-paths) for the complete native layout.
+
+### Connect again
+
+After reset, start Blue normally:
+
+```bash
+blue codex
+```
+
+Bare `blue` and interactive `blue <agent>` launches detect that no deployment is active and prompt for a Control API URL. If the canonical URL matches a saved tenant, Blue automatically restores that tenant's non-secret state, refreshes its discovery metadata, starts a new login, and regenerates the removed managed overlays. Queued session uploads remain inactive until their tenant is restored.
+
+Entering a new URL starts with clean tenant state. Running `blue setup` while another tenant is active performs the same archive-and-detach transition before connecting to the new URL.
+
+## Exit behavior
+
+For an interactive terminal, the wrapper attaches the agent to a pseudo-terminal and forwards arguments, input, output, resize events, signals, and the native exit code. Redirected or piped execution uses native inherited handles without allocating a pseudo-terminal. Governance or reconciliation failures occur before launch and return a non-zero harness exit status.
+
+Package reconciliation is independent per package. Successful packages activate even if another package fails, and a failed update retains its last usable version when its adapter remains compatible. The command still exits non-zero and the affected harness cannot launch until every required package is active.
+
+Packages modified locally are never silently deleted. Removal unregisters them from the governed overlay and moves modified owned content beneath the metaharness package quarantine for inspection.
+
+## Automation
+
+Use `blue verify` in machine checks. Use `blue apply --yes` only when the organization has approved noninteractive merges; backups and atomic writes still apply.

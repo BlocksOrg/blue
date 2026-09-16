@@ -1,0 +1,60 @@
+---
+title: "Authentication and authorization"
+description: "Learn how dashboard sessions, CLI device authorization, API scopes, and gateway identities are separated."
+icon: "key"
+---
+
+The dashboard and CLI authenticate differently. Better Auth owns both flows, but a browser session cookie is never reused as a CLI credential.
+
+## Dashboard users
+
+The workspace runs in either local password mode or managed OIDC mode. The login page asks for email first, then either requests a password or redirects to the configured identity provider. Better Auth issues HTTP-only browser sessions and publishes signing keys for API token verification. OIDC mode permits only active, SCIM-provisioned identities plus the protected password-based bootstrap administrator.
+
+## CLI device authorization
+
+```mermaid
+sequenceDiagram
+  participant CLI
+  participant Auth as Better Auth
+  participant Browser
+  participant API as Control API
+  CLI->>Auth: Request device code
+  Auth-->>CLI: User code and temporary browser URL
+  CLI->>Browser: Open temporary link automatically
+  Browser->>Auth: Confirm matching code and approve
+  CLI->>Auth: Poll token endpoint
+  Auth-->>CLI: Access and refresh tokens
+  CLI->>API: Audience-bound bearer token
+  API-->>CLI: Authorized response
+```
+
+The browser URL contains an opaque, short-lived token rather than the user code. The page displays the code read-only for comparison with the terminal and offers explicit authorize and deny actions. If the default browser cannot be launched, the CLI prints the link and continues polling.
+
+Access tokens expire after 15 minutes. Refresh tokens rotate and are stored with the session in `~/.config/blue/session.json` on Unix or `%APPDATA%\Blue\session.json` on Windows using owner-only permissions. Each refresh replays the resource indicator the grant was issued against, so the renewed token keeps the same Control API audience. `blue logout` attempts remote revocation and always removes the local token file.
+
+### Session binding and re-authorization
+
+The device grant is bound to the browser session that approved it, and gateway mode reads that binding every time it mints an inference token. The two lifetimes differ: the browser session lasts 12 hours, the refresh token 30 days. A CLI session can therefore keep refreshing its access token long after the sign-in behind it has expired, and the Control API answers `401` with the reason.
+
+`blue login` verifies with the service rather than trusting the local expiry, so it reports a rejected session instead of "Already logged in". When the deployment uses device authorization, it starts a new one; `blue` does the same at launch. Refresh, gateway cleanup, and identity requests have bounded timeouts. An unreachable identity or control service is reported as unverified and never triggers a browser flow; retry after the service recovers.
+
+Use `blue login --force` to re-authorize while a session is still valid — switching accounts, or replacing a session you no longer trust. Blue first rotates the old refresh token, revokes the gateway session with the resulting access token, revokes that latest refresh token, and removes the local session. Only then does it open the replacement authorization. Closing or declining that browser authorization leaves the workstation signed out.
+
+If the old refresh token is permanently invalid, Blue makes a best-effort attempt to revoke that session's gateway binding with the existing access token and then completes a normal replacement login. It does not revoke sessions on other machines. An unauthorized cleanup response is treated as already revoked because dashboard-wide revocation invalidates the access token and gateway session together. Other cleanup failures produce a warning and the binding expires automatically. For a potentially compromised session, an administrator can use **Revoke sessions** in the member menu to invalidate every browser, CLI, and gateway session for the account before the user signs in again.
+
+## Scopes
+
+| Scope | Purpose |
+| --- | --- |
+| `governance:read` | Read personalized governance policy and gateway key metadata |
+| `session:write` | Presign and complete raw-session uploads |
+| `client-status:write` | Report installed harnesses and reconciliation health |
+| `gateway:resolve` | Resolve validated user/session pairs for the inference proxy's internal gateway requests |
+
+Administrative endpoints additionally require an administrator role in the same organization. Session visibility is organization-scoped; non-admin users see only their own captured sessions.
+
+User-management operations invalidate browser, OAuth, and device credentials when roles or access states change. The Control API also records a token cutoff and rejects previously issued bearer tokens, so an administrator claim cannot remain usable until its normal expiry. See [Manage users and invitations](/0.2.0/admin/user-management).
+
+## Gateway identity
+
+Gateway access matches the authenticated governance user to LiteLLM by case-insensitive email. The deployment provisions one managed key per user; a missing LiteLLM user produces a provisioning error. Run `blue gateway` to provision or reconcile it.

@@ -78,7 +78,7 @@ services:
     build:
       context: ../apps/dashboard
       args:
-        BLUE_DEPLOYMENT_VERSION: ${BLUE_DEPLOYMENT_VERSION:-0.1.0}
+        BLUE_DEPLOYMENT_VERSION: ${BLUE_DEPLOYMENT_VERSION:-0.2.0}
     environment:
       BLUE_ENVIRONMENT: development
       CONTROL_API_URL: http://control-api:8080

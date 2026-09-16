@@ -1,0 +1,78 @@
+---
+title: "Troubleshooting"
+description: "Diagnose authentication, reconciliation, gateway streaming, and session upload failures."
+icon: "wrench"
+---
+
+Start with these commands:
+
+```bash
+blue doctor
+blue status
+blue verify
+```
+
+Set `HARNESS_LOG=debug` for more client diagnostics.
+
+<AccordionGroup>
+  <Accordion title="The CLI says a harness is not installed">
+    In a Unix terminal, run `blue agent <name>` or `blue <name>` to approve a fresh installation. Bare `blue` and `blue agent` also list allowed absent agents with an installation hint. Blue shows the exact policy-supported version and npm command; confirmation defaults to No. npm must already be installed, with its global executable directory on PATH. Fresh installs use npm's configured global prefix, while repairs preserve the detected installation method and prefix.
+
+    Blue verifies the PATH winner after installation. If it is missing, unparseable, or incompatible, fix PATH before retrying. Declining or failing installation does not save a new default or write managed agent configuration. Unattended calls refuse installation, and `/agent` inside the running UI directs you to the terminal command. Automatic fresh installation is unavailable on Windows; install a policy-supported release manually there.
+  </Accordion>
+  <Accordion title="The harness version is blocked">
+    Run the native CLI with `--version`, then use `blue apply`, `blue status`, or `blue run` to compare the inventory's normalized native harness version and compatibility result with the organization's `version_requirement`. `blue doctor` reports the configuration source, session, revision, allowed harnesses, and each detected path, version, and allowed/denied state, but not the compatibility profile. In an interactive terminal, approve Blue's installation-aware repair prompt (when the installation method supports repair) to install the highest published release inside the policy and certified range, or ask an administrator to change the range. The prompt is reachable from the first-run agent picker and from `blue agent <name>` as well as from `blue <agent>`: a blocked agent stays in those lists, labelled `installed — needs a policy-supported version`.
+    Interactive `blue apply` can also repair an installed incompatible stored default. `apply --yes`, piped apply, in-UI apply, and the daemon never run installers. For an absent default, first use `blue agent <name>`.
+
+    For Homebrew, legacy Kimi uv, or unrecognized installations, follow the short manual guidance. When supported, Blue prints a policy-constrained npm migration command. Install npm first and remove the old copy through its manager, or use a separate npm prefix and put its executable directory first on PATH. See [manual migration](/0.2.0/concepts/harness-version-compatibility#repair-an-incompatible-installation). Automatic replacement remains unsupported for these methods and for Windows layouts.
+  </Accordion>
+  <Accordion title="A harness repair installed a version but Blue still detects another one">
+    Blue repairs supported, recognized layouts: npm-compatible global packages at their detected prefix, native Claude through its detected binary, and default standalone Kimi/OpenCode installations through their native installers. Homebrew, legacy Kimi uv, and unrecognized layouts receive manual guidance; Blue never falls back to npm for an unsupported installation method. It may suggest a command for you to migrate manually; that command is not executed by Blue. Matching manually copied npm-compatible packages are eligible; recognition does not prove which installer created them. Native repair still needs npm for read-only exact-release lookup.
+
+    After repair, Blue freshly resolves `PATH`. A changed compatible winner is used immediately. If the winner remains incompatible and a compatible copy is found later, the error names both files. Move the compatible directory earlier on `PATH`, or uninstall the shadowing entry through its owner. Blue does not remove copies automatically. If no compatible copy exists, the error reports the actual path/version and failed repair command. Compare these paths with `command -v claude` (or the affected harness). See [Repair an incompatible installation](/0.2.0/concepts/harness-version-compatibility#repair-an-incompatible-installation) for layout recognition evidence and manual-repair limits.
+  </Accordion>
+  <Accordion title="A package has no matching adapter variant">
+    Compare the installed native harness version with the package adapter's variant ranges. Ranges must not overlap. Blue uses the adapter's fallback fields when no variant matches; a variant-only adapter must contain a matching range. The last usable package activation is retained while the affected launch remains blocked.
+  </Accordion>
+  <Accordion title="Apply asks about the same merge every time">
+    Run `blue verify` and inspect whether another process changes the managed overlay after reconciliation. Identical desired and current values are skipped; recurring prompts indicate a real file or revision difference.
+  </Accordion>
+  <Accordion title="A direct agent launch still uses governed settings">
+    Run `blue apply` to reconcile managed values, and confirm you are not invoking an installed shim. Governed settings should live only in launch-scoped overlays.
+  </Accordion>
+  <Accordion title="Gateway access is denied">
+    The governance and LiteLLM users must have the same email. The deployment provisions and reconciles one managed key for that user; run `blue gateway` to retry it before fetching personalized policy.
+  </Accordion>
+  <Accordion title="The agent reconnects or the stream ends early">
+    Check the inference proxy and LiteLLM logs, confirm the proxy listens on the URL delivered by `blue config`, and verify that the managed key allows the configured model and wire protocol.
+  </Accordion>
+  <Accordion title="Captured sessions do not appear">
+    Confirm the global policy has a top-level `session_upload` block, apply the current revision, and finish a native agent session so its lifecycle hook runs. Then check Control API and object-storage logs for presign, upload, verification, and completion errors.
+  </Accordion>
+  <Accordion title="A managed package failed to activate">
+    Run `blue status` to identify the package and harness. Confirm the archive URL is reachable, its configured SHA-256 matches the exact bytes, every adapter path exists, and a helper asset covers the current OS and architecture. A previous working version remains available when its adapter is still compatible, but the affected governed launch stays blocked until reconciliation succeeds.
+  </Accordion>
+  <Accordion title="A package download reports an unsupported redirect">
+    `blue status` reports `public package redirects and environment proxies are unsupported` when a public package URL answers with a redirect. Blue downloads the recorded URL and never follows one. A GitHub release-asset URL always redirects to a short-lived signed URL, so the final URL is not a usable substitute; ask an administrator to republish the package from `github:owner/repository@ref` or a managed repository connection. See [public repositories and archives](/0.2.0/admin/managed-packages).
+  </Accordion>
+  <Accordion title="A package host resolves to a private address">
+    `package URL must resolve only to public addresses` means this client's resolver returned at least one non-public address for the package host; Blue rejects the whole answer set rather than falling back to the public addresses in it. Split-horizon or internal DNS that rewrites a public hostname causes this on an otherwise reachable host. The fix is a managed package source connection with its own host allowlist, not a client-side override.
+  </Accordion>
+  <Accordion title="A removed package is quarantined">
+    Reconciliation detected local changes in metaharness-owned content and disabled the package without deleting those changes. Inspect the quarantine path reported by client status, preserve anything needed, and remove it manually when it is no longer useful.
+  </Accordion>
+</AccordionGroup>
+
+## Reset authentication
+
+```bash
+blue login --force
+```
+
+For an accessible session, this rotates to its latest token generation, revokes its gateway and refresh sessions, removes the local credential, and then starts a new device authorization flow. Closing or declining that authorization leaves you signed out. It does not delete configuration overlays or captured sessions.
+
+`blue login` on its own already asks the service whether the stored session still works, so it re-authorizes without `--force` whenever the service rejects it. A temporary identity or Control API outage stops before opening a browser and preserves a usable local session for retry.
+
+If the old refresh credential is permanently invalid, Blue tries to revoke that session's gateway binding with its existing access token and then completes a normal replacement login. Other Blue sessions are not affected. An unauthorized cleanup response is treated as already revoked because dashboard-wide revocation invalidates both credentials together. Other cleanup failures produce a warning and the binding expires automatically. If the session may be compromised, ask an administrator to use **Revoke sessions** for the account before signing in again.
+
+To disconnect the deployment itself, use `blue reset`. Reset archives non-secret tenant state, removes active Blue-owned overlays, and prompts for a Control API URL the next time you run bare `blue` or an interactive `blue <agent>` command. See [Reset a deployment](/0.2.0/cli/commands#reset-a-deployment).
