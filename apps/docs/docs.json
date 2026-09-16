@@ -160,6 +160,7 @@
             "pages": [
               "next/concepts/architecture",
               "next/concepts/configuration",
+              "next/concepts/managed-configuration",
               "next/concepts/harness-version-compatibility",
               "next/concepts/gateway-mode",
               "next/concepts/authentication"

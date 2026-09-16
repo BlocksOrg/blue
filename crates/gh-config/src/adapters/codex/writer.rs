@@ -1,4 +1,4 @@
-//! Shared Codex-family writer → `~/.codex/config.toml`.
+//! Shared Codex-family writer → `~/.codex/blue.config.toml`.
 //!
 //! Managed model/approval/sandbox flags + `[mcp_servers.*]`, and (gateway mode)
 //! a `[model_providers.governed]` block whose `env_key` names the env var the
