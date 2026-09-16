@@ -7,9 +7,10 @@ Run from a **fresh Windows test account** in PowerShell:
 ```
 
 Requires Git, stable Rust's MSVC toolchain, Visual Studio C++ Build Tools and a
-Windows SDK. Run the suite manually on a Windows machine or an EC2 Windows
-Full/Base VM. It requires no Docker, backend credentials, npm registry access or
-inference calls at test runtime.
+Windows SDK. The `End-to-end (Windows CLI)` workflow runs on Windows Server 2022
+for PRs (including drafts), main and manual dispatch. The same command works on
+an EC2 Windows Full/Base VM. It requires no Docker, backend credentials, npm
+registry access or inference calls at test runtime.
 
 The suite drives the actual `blue.exe` in a Windows pseudo-console. Blue reads a
 local governance policy, discovers a simulated npm installation (`codex`,
@@ -34,9 +35,9 @@ run alongside another Blue/Codex process. Use a disposable VM/account for local
 runs; an interrupted process can leave directories requiring manual cleanup.
 
 Each launch has a 60-second deadline, progress output and captured terminal
-output on failure. This standalone Cargo workspace is deliberately separate from
-`tests/e2e` and `tests/e2e-slim`; their Linux workflows and deployment image
-dependencies are unchanged.
+output on failure. CI uploads the run transcript. This standalone Cargo workspace
+is deliberately separate from `tests/e2e` and `tests/e2e-slim`; their Linux
+workflows and deployment image dependencies are unchanged.
 
 This is client process E2E using a fixture agent and file policy, not backend
 login, real inference or a certification of the real Codex UI. Those remain
