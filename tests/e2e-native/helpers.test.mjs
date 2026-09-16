@@ -2,11 +2,23 @@ import test from "node:test";
 import { validateAwsConfiguration } from "./preflight.mjs";
 import { verifyWindowsIsolation } from "./windows-isolation.mjs";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, win32 } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import YAML from "yaml";
-import { cells, binDirectory, validatePackage } from "./install-agents.mjs";
+import {
+  cells,
+  binDirectory,
+  prepareWindowsAgentStateCleanup,
+  validatePackage,
+} from "./install-agents.mjs";
 import { prepareFixtures, sha256, repo } from "./prepare-fixtures.mjs";
 import { assertFreePorts, sanitize, portsFor } from "./backend.mjs";
 import { waitFor } from "./process.mjs";
@@ -24,6 +36,54 @@ test("canonical lock supplies every unique pin and historical cell without slim 
 test("npm prefix selection uses the native layout", () => {
   assert.equal(binDirectory("C:\\install", "win32"), "C:\\install");
   assert.equal(binDirectory("/install", "linux"), "/install/bin");
+});
+test("Windows agent verification removes only runner-owned state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blue agent state "));
+  const env = {
+    USERPROFILE: join(root, "profile"),
+    APPDATA: join(root, "roaming"),
+    LOCALAPPDATA: join(root, "local"),
+  };
+  const owned = [
+    join(env.USERPROFILE, ".codex", "tmp", "marker"),
+    join(env.USERPROFILE, ".config", "opencode", "marker"),
+    join(env.LOCALAPPDATA, "Blue", "marker"),
+  ];
+  const unrelated = join(env.USERPROFILE, "Documents", "keep.txt");
+  try {
+    const cleanup = await prepareWindowsAgentStateCleanup({
+      platform: "win32",
+      env,
+    });
+    for (const path of [...owned, unrelated]) {
+      await mkdir(resolve(path, ".."), { recursive: true });
+      await writeFile(path, "test");
+    }
+    await cleanup();
+    for (const path of owned)
+      await assert.rejects(access(path), { code: "ENOENT" });
+    assert.equal(await readFile(unrelated, "utf8"), "test");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+test("Windows agent verification refuses pre-existing state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "blue existing state "));
+  const env = {
+    USERPROFILE: join(root, "profile"),
+    APPDATA: join(root, "roaming"),
+    LOCALAPPDATA: join(root, "local"),
+  };
+  try {
+    await mkdir(join(env.USERPROFILE, ".codex"), { recursive: true });
+    await assert.rejects(
+      prepareWindowsAgentStateCleanup({ platform: "win32", env }),
+      /fresh Windows account required/,
+    );
+    await access(join(env.USERPROFILE, ".codex"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 test("fixture generation preserves legacy bytes and renders native policies as data", async () => {
   const dir = await mkdtemp(join(tmpdir(), "blue fixtures # "));

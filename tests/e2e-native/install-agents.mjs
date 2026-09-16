@@ -1,11 +1,51 @@
 import semver from "semver";
-import { readFile, mkdir, writeFile, rm } from "node:fs/promises";
-import { join, delimiter, resolve } from "node:path";
+import { readFile, mkdir, writeFile, rm, lstat } from "node:fs/promises";
+import { join, delimiter, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { repo } from "./prepare-fixtures.mjs";
 import { run } from "./process.mjs";
 export const binDirectory = (prefix, platform = process.platform) =>
-  platform === "win32" ? prefix : join(prefix, "bin");
+  platform === "win32" ? prefix : posix.join(prefix, "bin");
+export async function prepareWindowsAgentStateCleanup({
+  platform = process.platform,
+  env = process.env,
+  remove = rm,
+  inspect = lstat,
+} = {}) {
+  if (platform !== "win32") return async () => {};
+  for (const key of ["USERPROFILE", "APPDATA", "LOCALAPPDATA"])
+    if (!env[key]) throw new Error(`${key} is required on Windows`);
+  const owned = [
+    ...[
+      ".config/blue",
+      ".cache/blue",
+      ".codex",
+      ".claude",
+      ".claude.json",
+      ".claude.json.backup",
+      ".kimi",
+      ".kimi-code",
+      ".config/opencode",
+      ".local/share/opencode",
+      ".local/state/opencode",
+      ".cache/opencode",
+    ].map((relative) => join(env.USERPROFILE, relative)),
+    ...[env.APPDATA, env.LOCALAPPDATA].flatMap((root) =>
+      ["Blue", "opencode", "kimi"].map((name) => join(root, name)),
+    ),
+  ];
+  for (const path of owned)
+    try {
+      await inspect(path);
+      throw new Error(`fresh Windows account required; refusing ${path}`);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  return async () =>
+    Promise.all(
+      owned.map((path) => remove(path, { recursive: true, force: true })),
+    );
+}
 export async function cells(matrix = true) {
   const lock = JSON.parse(
     await readFile(join(repo, "tests/e2e/agents.lock.json")),
@@ -98,6 +138,7 @@ export async function installAgents(directory, matrix = true) {
       throw new Error(`${cell.agent} ${cell.version}: ${error.message}`);
     }
   }
+  const cleanupAgentState = await prepareWindowsAgentStateCleanup();
   try {
     for (const cell of expected) {
       const prefix = join(directory, cell.agent, cell.version),
@@ -151,10 +192,14 @@ export async function installAgents(directory, matrix = true) {
         )
       )
         report.cells.push({ ...cell, status: "not-run" });
-    await writeFile(
-      join(directory, "install-report.json"),
-      JSON.stringify(report, null, 2),
-    );
+    try {
+      await writeFile(
+        join(directory, "install-report.json"),
+        JSON.stringify(report, null, 2),
+      );
+    } finally {
+      await cleanupAgentState();
+    }
   }
   const path = join(directory, "matrix.json");
   await writeFile(path, JSON.stringify(manifest, null, 2));
