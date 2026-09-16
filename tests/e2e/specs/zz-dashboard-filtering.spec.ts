@@ -824,4 +824,41 @@ test.describe.serial("dashboard table filtering", () => {
   }
 
   test("members and invitations apply, combine, remove, and clear filters", verifyMembersAndInvitations);
+
+  test("regenerated invitation link remains visible until the result dialog closes", async () => {
+    test.skip(!invitationsEnabled, "Invitations are disabled for identity-provider-managed workspaces");
+    const page = await openAdminPage();
+    const email = `regenerate-${Date.now()}@example.com`;
+    const original = await createInvitation(page.request, email, "member");
+
+    await page.goto(`/members?tab=invited&q=${encodeURIComponent(email)}`, { waitUntil: "commit" });
+    const row = rowWith(page, email);
+    await expect(row).toBeVisible();
+    await row.getByRole("button", { name: `Actions for ${email}` }).click();
+    await page.getByText("Regenerate invitation link", { exact: true }).click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "Regenerate invitation link?" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Regenerate link" }).click();
+    await expect(dialog.getByRole("heading", { name: "Share replacement invitation link" })).toBeVisible();
+
+    const replacementUrl = await dialog.getByLabel("Invitation link").inputValue();
+    const replacementId = new URL(replacementUrl).searchParams.get("id");
+    expect(replacementId).toBeTruthy();
+    expect(replacementId).not.toBe(original.id);
+
+    const originalResponse = await page.request.get(`${control}/admin/invitations/${original.id}`);
+    expect(originalResponse.status(), await originalResponse.text()).toBe(200);
+    expect((await originalResponse.json() as { status: string }).status).toBe("canceled");
+
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(rowWith(page, email)).toBeVisible();
+
+    const replacementResponse = await page.request.get(`${control}/admin/invitations/${replacementId}`);
+    expect(replacementResponse.status(), await replacementResponse.text()).toBe(200);
+    expect((await replacementResponse.json() as { status: string }).status).toBe("pending");
+    const cleanup = await page.request.delete(`${control}/admin/invitations/${replacementId}`);
+    expect(cleanup.status(), await cleanup.text()).toBe(204);
+  });
 });

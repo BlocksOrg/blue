@@ -407,7 +407,6 @@ export async function regenerateInvitation(
       `/admin/invitations/${form.get("invitation_id")}/regenerate`,
       { method: "POST" },
     );
-    revalidatePath("/members");
     return { invitationId: invitation.id, email: invitation.email, invitationUrl: invitation.invitation_url };
   } catch (error) {
     return { error: invitationError(error) };

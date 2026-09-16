@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,12 +32,20 @@ export function InvitationLinkResult({ email, url }: { email: string; url: strin
         <Label htmlFor="issued-invitation-url">Invitation link</Label>
         <div className="flex gap-2">
           <Input id="issued-invitation-url" value={url} readOnly onFocus={(event) => event.currentTarget.select()} />
-          <Button type="button" variant="outline" onClick={copy}>Copy</Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={copy}
+            aria-label={copyStatus === "copied" ? "Invitation link copied" : "Copy invitation link"}
+            title={copyStatus === "copied" ? "Copied" : "Copy invitation link"}
+          >
+            {copyStatus === "copied" ? <Check /> : <Copy />}
+          </Button>
         </div>
-        <p className="text-sm" aria-live="polite">
-          {copyStatus === "copied" && "Copied to clipboard."}
-          {copyStatus === "failed" && "Copy failed. Select and copy the link manually."}
-        </p>
+        {copyStatus === "failed" && (
+          <p className="text-sm" role="alert">Copy failed. Select and copy the link manually.</p>
+        )}
       </div>
     </div>
   );

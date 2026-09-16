@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Ellipsis } from "lucide-react";
 import {
   cancelInvitation,
@@ -122,9 +123,17 @@ function RegenerateInvitationDialog({ invitation, open, onOpenChange }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const router = useRouter();
   const [state, action, pending] = useActionState(regenerateInvitation, {});
+
+  function handleOpenChange(next: boolean) {
+    if (pending) return;
+    onOpenChange(next);
+    if (!next && state.invitationUrl) router.refresh();
+  }
+
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{state.invitationUrl ? "Share replacement invitation link" : "Regenerate invitation link?"}</DialogTitle>
@@ -134,7 +143,7 @@ function RegenerateInvitationDialog({ invitation, open, onOpenChange }: {
           <form action={action}>
             <input type="hidden" name="invitation_id" value={invitation.id} />
             {state.error && <p role="alert" className="mb-4 text-sm text-destructive">{state.error}</p>}
-            <DialogFooter><Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={pending}>{pending ? "Regenerating…" : "Regenerate link"}</Button></DialogFooter>
+            <DialogFooter><Button type="button" variant="outline" disabled={pending} onClick={() => handleOpenChange(false)}>Cancel</Button><Button type="submit" disabled={pending}>{pending ? "Regenerating…" : "Regenerate link"}</Button></DialogFooter>
           </form>
         )}
       </DialogContent>
