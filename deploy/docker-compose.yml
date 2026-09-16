@@ -56,9 +56,7 @@ services:
       HARNESS_GATEWAY_ENCRYPTION_KEY: ${HARNESS_GATEWAY_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
       HARNESS_GATEWAY_JWT_ISSUER: http://127.0.0.1:8080
       HARNESS_GATEWAY_JWT_AUDIENCE: blue-inference-proxy
-      HARNESS_GATEWAY_JWT_ACTIVE_KID: e2e-slim-rsa-1
       HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /var/run/blue/gateway-jwt/signing-key.pem
-      HARNESS_GATEWAY_JWT_JWKS_FILE: /var/run/blue/gateway-jwt/jwks.json
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       HARNESS_LISTEN: 0.0.0.0:8080
@@ -68,8 +66,7 @@ services:
       - ./blue.gateway.yaml:/etc/blue/blue.gateway.yaml:ro
       - ./blue.capture.yaml:/etc/blue/blue.capture.yaml:ro
       - ./local-gateway-provisioner.mjs:/etc/blue/local-gateway-provisioner.mjs:ro
-      - ../tests/e2e-slim/fixtures/jwks/jwt-signing-key.pem:/var/run/blue/gateway-jwt/signing-key.pem:ro
-      - ../tests/e2e-slim/fixtures/jwks/jwks.json:/var/run/blue/gateway-jwt/jwks.json:ro
+      - ../tests/fixtures/jwt/signing-key.pem:/var/run/blue/gateway-jwt/signing-key.pem:ro
     ports: ["8080:8080"]
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:

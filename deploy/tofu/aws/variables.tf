@@ -33,6 +33,37 @@ variable "include_bucket" {
 # eks_cluster_name or vpc_id means this module creates it; setting either
 # attaches to infrastructure someone else owns and named.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Domain — var.include_domain. Names Blue on a Route 53 hosted zone you already
+# own: one ACM certificate covering both hostnames (validated with records in
+# that zone) and, once the load balancer exists, the records that point at it.
+# ---------------------------------------------------------------------------
+variable "include_domain" {
+  type        = bool
+  default     = false
+  description = "Issue an ACM certificate for the dashboard and API hostnames and manage their Route 53 records. Requires route53_zone_id."
+}
+variable "route53_zone_id" {
+  type        = string
+  default     = ""
+  description = "Hosted zone the hostnames live in. Its name is read back, so subdomains are relative to it."
+}
+variable "dashboard_subdomain" {
+  type        = string
+  default     = ""
+  description = "Dashboard label relative to the zone (\"app\" on example.com gives app.example.com). Empty means the zone apex."
+}
+variable "api_subdomain" {
+  type        = string
+  default     = "api"
+  description = "Control API label relative to the zone. Empty means the zone apex; it must differ from dashboard_subdomain."
+}
+variable "alb_hostname" {
+  type        = string
+  default     = ""
+  description = "DNS name of the load balancer the chart's Ingress created. Empty until it exists; set it on a second apply to create the records."
+}
+
 variable "eks_cluster_name" {
   type        = string
   default     = ""
@@ -147,4 +178,23 @@ variable "package_noncurrent_retention_days" {
 variable "deletion_protection" {
   type    = bool
   default = true
+}
+variable "generate_gateway_jwt_key" {
+  type        = bool
+  default     = false
+  description = "Gateway mode only: generate the gateway inference JWT signing key into its own Secrets Manager secret, for the Helm chart's blue.inferenceJwt.secret"
+}
+variable "gateway_jwt_key_versions" {
+  type        = list(string)
+  default     = ["1"]
+  description = "Gateway inference JWT signing keys to generate, newest first. The first key signs. A second key, kept during a rotation, is only published so tokens it signed keep verifying."
+  validation {
+    condition = (
+      length(var.gateway_jwt_key_versions) >= 1 &&
+      length(var.gateway_jwt_key_versions) <= 2 &&
+      length(distinct(var.gateway_jwt_key_versions)) == length(var.gateway_jwt_key_versions) &&
+      alltrue([for version in var.gateway_jwt_key_versions : trimspace(version) != ""])
+    )
+    error_message = "gateway_jwt_key_versions must hold one or two distinct, non-empty entries."
+  }
 }

@@ -63,6 +63,23 @@ ingress-fronted install is unconfigurable without them.
 {{- define "blue.provisionerExecutableImage" -}}
 {{- printf "%s@%s" .Values.blue.provisionerExecutable.image.repository .Values.blue.provisionerExecutable.image.digest }}
 {{- end }}
+{{/*
+Internal mTLS Secret names and client layout. When
+blue.internalTransport.certManager.enabled the chart issues both Secrets itself
+and names them after the release, so no consumer template branches on the flag.
+cert-manager always writes tls.crt + tls.key, so the client layout is derived
+rather than validated: Helm cannot tell a user-set "combined" from the default,
+and failing on that pair would reject every ordinary cert-manager install.
+*/}}
+{{- define "blue.internalTransport.serverSecretName" -}}
+{{- if .Values.blue.internalTransport.certManager.enabled }}{{ printf "%s-internal-tls-server" (include "blue.fullname" .) }}{{- else }}{{ .Values.blue.internalTransport.serverSecret }}{{- end }}
+{{- end }}
+{{- define "blue.internalTransport.clientSecretName" -}}
+{{- if .Values.blue.internalTransport.certManager.enabled }}{{ printf "%s-internal-tls-client" (include "blue.fullname" .) }}{{- else }}{{ .Values.blue.internalTransport.clientSecret }}{{- end }}
+{{- end }}
+{{- define "blue.internalTransport.clientSecretFormat" -}}
+{{- if .Values.blue.internalTransport.certManager.enabled }}split{{- else }}{{ .Values.blue.internalTransport.clientSecretFormat }}{{- end }}
+{{- end }}
 {{- define "blue.validate" -}}
 {{- if and .Values.blue.production (not .Values.blue.existingSecret) -}}
 {{- fail "blue.existingSecret is required when blue.production=true" -}}
@@ -94,7 +111,14 @@ ingress-fronted install is unconfigurable without them.
 {{- if and .Values.blue.enableInferenceProxy (not .Values.blue.gatewayType) -}}
 {{- fail "blue.gatewayType is required when blue.enableInferenceProxy=true" -}}
 {{- end -}}
-{{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") (or (not .Values.blue.internalTransport.serverSecret) (not .Values.blue.internalTransport.clientSecret)) -}}
-{{- fail "blue.internalTransport.serverSecret and clientSecret are required for gateway mTLS" -}}
+{{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") (not .Values.blue.internalTransport.certManager.enabled) (or (not .Values.blue.internalTransport.serverSecret) (not .Values.blue.internalTransport.clientSecret)) -}}
+{{- fail "blue.internalTransport.serverSecret and clientSecret are required for gateway mTLS unless blue.internalTransport.certManager.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.blue.internalTransport.certManager.enabled (ne .Values.blue.internalTransport.mode "mtls") -}}
+{{- fail "blue.internalTransport.certManager.enabled requires blue.internalTransport.mode=mtls; nothing consumes the certificates otherwise" -}}
+{{- end -}}
+{{- $issuerRef := default dict .Values.blue.internalTransport.certManager.issuerRef -}}
+{{- if and $issuerRef.name (not $issuerRef.kind) -}}
+{{- fail "blue.internalTransport.certManager.issuerRef.kind is required alongside issuerRef.name; set Issuer or ClusterIssuer explicitly" -}}
 {{- end -}}
 {{- end }}

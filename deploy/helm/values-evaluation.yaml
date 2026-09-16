@@ -5,7 +5,6 @@ blue:
   # audience already defaults in values.yaml.
   inferenceJwt:
     secret: blue-evaluation-gateway-jwt
-    activeKid: evaluation
 
 image:
   tag: latest

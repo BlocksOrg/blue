@@ -7,7 +7,8 @@ import {
   oauthDeviceAuthorization,
   oauthProvider,
 } from "@better-auth/oauth-provider";
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
+import { parse as parseConnectionString } from "pg-connection-string";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import {
   bindDeviceExchangeToBrowserSession,
@@ -62,11 +63,20 @@ function hashClientSecret(secret: string): string {
   return createHash("sha256").update(secret).digest("base64url");
 }
 
-export const authPool = new Pool({
-  connectionString:
-    process.env.AUTH_DATABASE_URL ??
+/** Parsed with libpq semantics so `sslmode` in HARNESS_DATABASE_URL means the
+ * same thing here as it does for the Rust services: `require` encrypts without
+ * verifying the server certificate (what managed databases such as RDS need),
+ * `verify-full` verifies against `sslrootcert`. Without this, node-postgres
+ * treats `require` as `verify-full` and rejects the RDS certificate chain. */
+const authDatabaseConfig = parseConnectionString(
+  process.env.AUTH_DATABASE_URL ??
     process.env.HARNESS_DATABASE_URL ??
     "postgres://harness:harness@127.0.0.1:5433/governance",
+  { useLibpqCompat: true },
+) as unknown as PoolConfig;
+
+export const authPool = new Pool({
+  ...authDatabaseConfig,
   options: "-c search_path=auth,public",
 });
 

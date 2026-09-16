@@ -23,11 +23,11 @@
         "inferenceProxyClientId": { "type": "string" },
         "inferenceJwt": {
           "type": "object",
-          "required": ["secret", "activeKid", "audience"],
+          "required": ["secret", "audience"],
           "properties": {
             "secret": { "type": "string" },
-            "activeKid": { "type": "string" },
-            "audience": { "type": "string", "minLength": 1 }
+            "audience": { "type": "string", "minLength": 1 },
+            "includePreviousKey": { "type": "boolean" }
           }
         },
         "internalTransport": {
@@ -36,7 +36,33 @@
           "properties": {
             "mode": { "enum": ["mtls", "insecure-http"] },
             "serverSecret": { "type": "string" },
-            "clientSecret": { "type": "string" }
+            "clientSecret": { "type": "string" },
+            "clientSecretFormat": { "enum": ["combined", "split"] },
+            "certManager": {
+              "type": "object",
+              "required": ["enabled"],
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "issuerRef": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "kind": { "enum": ["Issuer", "ClusterIssuer"] }
+                  }
+                },
+                "duration": { "type": "string", "minLength": 1 },
+                "renewBefore": { "type": "string", "minLength": 1 },
+                "caDuration": { "type": "string", "minLength": 1 },
+                "privateKey": {
+                  "type": "object",
+                  "required": ["algorithm", "size"],
+                  "properties": {
+                    "algorithm": { "enum": ["RSA", "ECDSA", "Ed25519"] },
+                    "size": { "type": "integer" }
+                  }
+                }
+              }
+            }
           }
         },
         "existingSecret": { "type": "string" },
@@ -97,13 +123,14 @@
         "then": { "required": ["gatewayType", "inferenceJwt"], "allOf": [
           { "properties": { "gatewayType": { "minLength": 1 } } },
           { "properties": { "inferenceJwt": { "properties": {
-            "secret": { "minLength": 1 }, "activeKid": { "minLength": 1 }
+            "secret": { "minLength": 1 }
           } } } },
           {
           "if": { "properties": { "internalTransport": { "properties": { "mode": { "const": "mtls" } } } } },
-          "then": { "properties": { "internalTransport": { "properties": {
-            "serverSecret": { "minLength": 1 }, "clientSecret": { "minLength": 1 }
-          } } } }
+          "then": { "properties": { "internalTransport": { "anyOf": [
+            { "required": ["certManager"], "properties": { "certManager": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } } },
+            { "properties": { "serverSecret": { "minLength": 1 }, "clientSecret": { "minLength": 1 } } }
+          ] } } }
         }] }
       }, {
         "if": { "properties": { "production": { "const": true } } },
@@ -225,6 +252,7 @@
       "required": ["enabled", "databaseCidrs", "redisCidrs", "externalHttpsCidrs"],
       "properties": {
         "enabled": { "type": "boolean" },
+        "ingressCidrs": { "type": "array", "items": { "type": "string" } },
         "databaseCidrs": { "type": "array", "items": { "type": "string" } },
         "databasePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "redisCidrs": { "type": "array", "items": { "type": "string" } },

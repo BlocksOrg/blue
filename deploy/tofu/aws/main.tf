@@ -24,10 +24,18 @@ resource "aws_kms_alias" "blue" {
 # for evaluation clusters; production keeps S3.
 # ---------------------------------------------------------------------------
 resource "aws_s3_bucket" "packages" {
+  #checkov:skip=CKV_AWS_21:versioning is attached by aws_s3_bucket_versioning.blue; checkov drops graph edges into count-guarded resources
+  #checkov:skip=CKV_AWS_145:KMS SSE is attached by aws_s3_bucket_server_side_encryption_configuration.blue
+  #checkov:skip=CKV2_AWS_6:the public access block is attached by aws_s3_bucket_public_access_block.blue
+  #checkov:skip=CKV2_AWS_61:lifecycle rules are attached by aws_s3_bucket_lifecycle_configuration.packages
   count         = var.include_bucket ? 1 : 0
   bucket_prefix = "${local.bucket_name}-packages-"
 }
 resource "aws_s3_bucket" "sessions" {
+  #checkov:skip=CKV_AWS_21:versioning is attached by aws_s3_bucket_versioning.blue; checkov drops graph edges into count-guarded resources
+  #checkov:skip=CKV_AWS_145:KMS SSE is attached by aws_s3_bucket_server_side_encryption_configuration.blue
+  #checkov:skip=CKV2_AWS_6:the public access block is attached by aws_s3_bucket_public_access_block.blue
+  #checkov:skip=CKV2_AWS_61:lifecycle rules are attached by aws_s3_bucket_lifecycle_configuration.sessions
   count         = var.include_bucket ? 1 : 0
   bucket_prefix = "${local.bucket_name}-sessions-"
 }
@@ -102,6 +110,7 @@ resource "aws_db_subnet_group" "blue" {
   subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "database" {
+  #checkov:skip=CKV2_AWS_5:attached to aws_db_instance.blue via vpc_security_group_ids
   count       = var.include_database ? 1 : 0
   name_prefix = "${local.name_prefix}-database-"
   description = "PostgreSQL access from Blue workloads"
@@ -140,6 +149,7 @@ resource "aws_elasticache_subnet_group" "blue" {
   subnet_ids = local.private_subnet_ids
 }
 resource "aws_security_group" "redis" {
+  #checkov:skip=CKV2_AWS_5:attached to aws_elasticache_replication_group.blue via security_group_ids
   count       = var.include_redis ? 1 : 0
   name_prefix = "${local.name_prefix}-redis-"
   description = "Redis access from Blue workloads"
@@ -262,6 +272,29 @@ resource "aws_secretsmanager_secret" "runtime" {
 resource "aws_secretsmanager_secret_version" "runtime" {
   secret_id     = aws_secretsmanager_secret.runtime.id
   secret_string = jsonencode(local.runtime_secret)
+}
+
+# Gateway inference JWT signing keys, newest first. They get their own secret
+# because every pod loads the runtime secret, and only the Control API may hold
+# these keys. The Control API works out the public JWKS from them.
+resource "tls_private_key" "gateway_jwt" {
+  for_each  = var.generate_gateway_jwt_key ? toset(var.gateway_jwt_key_versions) : toset([])
+  algorithm = "RSA"
+  rsa_bits  = local.gateway_jwt_rsa_bits
+}
+resource "aws_secretsmanager_secret" "gateway_jwt" {
+  count       = var.generate_gateway_jwt_key ? 1 : 0
+  name_prefix = "${local.name_prefix}/gateway-jwt-"
+  kms_key_id  = aws_kms_key.blue.arn
+}
+resource "aws_secretsmanager_secret_version" "gateway_jwt" {
+  count     = var.generate_gateway_jwt_key ? 1 : 0
+  secret_id = aws_secretsmanager_secret.gateway_jwt[0].id
+  # Key names match the files the chart mounts from blue.inferenceJwt.secret.
+  secret_string = jsonencode(merge(
+    { "signing-key.pem" = tls_private_key.gateway_jwt[var.gateway_jwt_key_versions[0]].private_key_pem_pkcs8 },
+    length(var.gateway_jwt_key_versions) > 1 ? { "previous-signing-key.pem" = tls_private_key.gateway_jwt[var.gateway_jwt_key_versions[1]].private_key_pem_pkcs8 } : {},
+  ))
 }
 
 data "aws_iam_policy_document" "assume" {

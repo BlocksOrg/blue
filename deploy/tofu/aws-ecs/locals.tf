@@ -81,7 +81,6 @@ locals {
     HARNESS_INTERNAL_ALLOWED_CLIENT_ID = var.inference_proxy_client_id
     HARNESS_GATEWAY_JWT_ISSUER         = local.control_api_url
     HARNESS_GATEWAY_JWT_AUDIENCE       = "blue-inference-proxy"
-    HARNESS_GATEWAY_JWT_ACTIVE_KID     = var.gateway_jwt_active_kid
   } : {})
 
   # worker (singleton) — mirrors deploy/helm/templates/worker-deployment.yaml.

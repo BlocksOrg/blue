@@ -90,6 +90,7 @@ deployments:
 | `include_database` | `true` | RDS PostgreSQL, its subnet group, security group, monitoring role, and `HARNESS_DATABASE_URL` | The chart renders its evaluation StatefulSet (`database.deployStandalone`), or another database already exists |
 | `include_bucket` | `true` | Package and session buckets, their encryption/versioning/lifecycle rules, and the workload role's S3 grants | The chart renders its evaluation MinIO (`minio.deployStandalone`), or another S3-compatible store already exists |
 | `include_redis` | `true` | ElastiCache Redis and `HARNESS_REDIS_URL` | Governance-only deployments — see below |
+| `include_domain` | `false` | An ACM certificate for the dashboard and API hostnames, its validation records, and (once `alb_hostname` is set) alias records pointing at the load balancer | DNS lives outside Route 53, or a certificate already exists |
 
 Nothing in Blue reads `HARNESS_REDIS_URL`. It is published for the
 organization-operated LiteLLM gateway that gateway mode talks to, which is why
@@ -101,7 +102,19 @@ created, so a missing dependency surfaces as a startup failure rather than a
 connection to nowhere. `helm_values` mirrors the same choice back to the chart:
 skipping the database or the buckets here sets the matching `deployStandalone`
 to `true` there. The chart rejects both in production, so a production stack
-keeps `include_database` and `include_bucket` on.
+keeps `include_database` and `include_bucket` on. `helm_values` also fills the
+chart's `networkPolicy` CIDR lists with the VPC CIDR, since the load balancer,
+RDS and Redis all live there, and leaves HTTPS egress open because S3 and STS
+have no fixed range.
+
+`include_domain` takes `route53_zone_id` plus two labels, `dashboard_subdomain`
+and `api_subdomain`, relative to that zone (`app` and `api` on `example.com`
+give `app.example.com` and `api.example.com`; an empty label means the apex).
+The zone's name is read back, so nothing repeats the domain. The load balancer
+only exists after the chart's Ingress is installed, so the records are a second
+apply: `tofu apply -var alb_hostname=<ingress hostname>`. `certificate_arn`,
+`dashboard_hostname` and `api_hostname` are output for the chart and
+`IngressClassParams`.
 
 ## Naming and tags
 
@@ -128,6 +141,32 @@ tofu output -json helm_values > generated-values.json
 Sync the JSON object at `runtime_secret_arn` to a Kubernetes Secret named by
 `blue.existingSecret`, using External Secrets or your existing secret delivery
 system. Do not commit the secret value or rendered Kubernetes Secret.
+
+## Gateway JWT signing keys
+
+In gateway mode the Control API signs the tokens the inference proxy accepts.
+Set `generate_gateway_jwt_key = true` and this module generates that RSA key and
+stores it in its own secret, `gateway_jwt_secret_arn`. It is kept out of the
+runtime secret because every pod loads that one, and only the Control API may
+hold this key. You never write a public key or JWKS: the Control API works it
+out from the private key.
+
+Sync `gateway_jwt_secret_arn` to a Kubernetes Secret with its keys mapped one to
+one (`signing-key.pem`, plus `previous-signing-key.pem` during a rotation). Name
+it as `helm_values` says in `blue.inferenceJwt.secret`. This module does not turn
+on gateway mode itself: the rest of the chart's gateway settings are still yours
+to set.
+
+To rotate the key:
+
+1. Put a new version first, for example `gateway_jwt_key_versions = ["2", "1"]`,
+   apply, and sync. Key 2 signs new tokens, and key 1 stays published so tokens
+   it already signed keep working.
+2. After the token lifetime has passed (12 hours by default), remove the old
+   version, `["2"]`, apply, and sync again.
+
+The private keys are stored in OpenTofu state, like the generated passwords.
+Keep state encrypted and access-controlled.
 
 For a self-contained deployment that runs Blue on **ECS Fargate behind an ALB**
 (no Kubernetes), see the sibling [`../aws-ecs/`](../aws-ecs/README.md) module.

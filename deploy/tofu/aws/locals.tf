@@ -34,6 +34,7 @@ locals {
   nat_count = local.create_vpc ? (var.single_nat_gateway ? 1 : var.az_count) : 0
 
   vpc_id             = local.create_vpc ? aws_vpc.this[0].id : var.vpc_id
+  vpc_cidr           = local.create_vpc ? aws_vpc.this[0].cidr_block : data.aws_vpc.attached[0].cidr_block
   public_subnet_ids  = local.create_vpc ? aws_subnet.public[*].id : var.public_subnet_ids
   private_subnet_ids = local.create_vpc ? aws_subnet.private[*].id : var.private_subnet_ids
 
@@ -66,7 +67,11 @@ locals {
       HARNESS_BOOTSTRAP_ADMIN_PASSWORD = random_password.bootstrap_admin.result
     },
     var.include_database ? {
-      HARNESS_DATABASE_URL = "postgres://${var.database_username}:${random_password.database[0].result}@${aws_db_instance.blue[0].address}:${aws_db_instance.blue[0].port}/${var.database_name}"
+      # RDS refuses plaintext connections by default (rds.force_ssl), so every
+      # client is told to encrypt. `require` encrypts without verifying the
+      # server certificate, the same as libpq; the Rust services and the
+      # dashboard both read it that way.
+      HARNESS_DATABASE_URL = "postgres://${var.database_username}:${random_password.database[0].result}@${aws_db_instance.blue[0].address}:${aws_db_instance.blue[0].port}/${var.database_name}?sslmode=require"
     } : {},
     var.include_redis ? {
       HARNESS_REDIS_URL = "rediss://default:${random_password.redis_auth[0].result}@${aws_elasticache_replication_group.blue[0].primary_endpoint_address}:6379/0"
@@ -78,4 +83,11 @@ locals {
   # "Verify generated secret contracts" check (which cannot read managed-resource
   # attributes without state, but can evaluate a local).
   bootstrap_admin_password_length = 48
+
+  # Generated secret contract: RSA size of the gateway JWT signing keys, asserted
+  # by the same CI check.
+  gateway_jwt_rsa_bits = 3072
+
+  # Kubernetes Secret the operator syncs gateway_jwt_secret_arn into.
+  gateway_jwt_kubernetes_secret = "${local.name_prefix}-gateway-jwt"
 }
