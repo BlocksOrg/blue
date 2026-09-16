@@ -39,6 +39,7 @@ environment                        = "production"
 # route53_zone_id     = "Z0123456789EXAMPLE"
 # dashboard_subdomain = "app"
 # api_subdomain       = "api"
+# inference_proxy_subdomain = "iproxy"   # optional; gateway mode's third name
 
 kubernetes_namespace               = "blue"
 kubernetes_service_account         = "blue"

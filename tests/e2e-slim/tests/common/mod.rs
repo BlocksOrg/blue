@@ -40,13 +40,13 @@ pub fn assert_governed_model(home: &Home, agent: &str, expected: &str) {
         "codex" => read_toml(&root.join(".codex/blue.config.toml"))
             .get("model")
             .and_then(|value| value.as_str().map(str::to_owned)),
-        "claude" => read_json(&root.join(".config/blue/runtime/claude/settings.json"))
+        "claude" => read_json(&home.data_path().join("runtime/claude/settings.json"))
             .get("model")
             .and_then(|value| value.as_str().map(str::to_owned)),
-        "kimi" => read_toml(&root.join(".config/blue/runtime/kimi/config.toml"))
+        "kimi" => read_toml(&home.data_path().join("runtime/kimi/config.toml"))
             .get("default_model")
             .and_then(|value| value.as_str().map(str::to_owned)),
-        "opencode" => read_json(&root.join(".config/blue/runtime/opencode/opencode.json"))
+        "opencode" => read_json(&home.data_path().join("runtime/opencode/opencode.json"))
             .get("model")
             .and_then(|value| value.as_str().map(str::to_owned)),
         other => panic!("unknown agent {other}"),
@@ -78,11 +78,11 @@ pub fn assert_mcp_registered(home: &Home, agent: &str) {
         }
         "claude" | "kimi" => {
             let file = if agent == "claude" {
-                ".config/blue/runtime/claude/mcp.json"
+                "runtime/claude/mcp.json"
             } else {
-                ".config/blue/runtime/kimi/mcp.json"
+                "runtime/kimi/mcp.json"
             };
-            let mcp = read_json(&root.join(file));
+            let mcp = read_json(&home.data_path().join(file));
             assert_eq!(
                 mcp.pointer("/mcpServers/e2e-remote/command")
                     .and_then(serde_json::Value::as_str),
@@ -91,7 +91,7 @@ pub fn assert_mcp_registered(home: &Home, agent: &str) {
             );
         }
         "opencode" => {
-            let config = read_json(&root.join(".config/blue/runtime/opencode/opencode.json"));
+            let config = read_json(&home.data_path().join("runtime/opencode/opencode.json"));
             // OpenCode collapses command+args into one array under mcp.<name>.
             let first = config
                 .pointer("/mcp/e2e-remote/command/0")
@@ -112,7 +112,7 @@ pub fn assert_mcp_registered(home: &Home, agent: &str) {
 /// for the skill folder rather than hard-coding four paths.
 pub fn assert_example_skill_materialized(home: &Home, agent: &str) {
     assert!(
-        find_example_skill(home.path()),
+        find_example_skill(home.data_path()) || find_example_skill(&home.path().join(".codex")),
         "{agent}: `blue apply` should materialize the managed `example` skill under {}",
         home.path().display()
     );
