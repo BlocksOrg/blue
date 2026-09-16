@@ -72,7 +72,7 @@ Replace `codex` with `claude`, `kimi`, or `opencode`. Running bare `blue`
 launches your preferred agent.
 
 For version pinning, custom installation directories, and the complete setup
-flow, read the [Quickstart](https://docs.bluee.sh/next/quickstart#install-the-workstation-cli).
+flow, read [CLI commands](https://docs.bluee.sh/next/cli/commands#install).
 
 ## Deploy Blue
 

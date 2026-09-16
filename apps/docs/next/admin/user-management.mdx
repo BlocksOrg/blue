@@ -6,6 +6,8 @@ icon: "users"
 
 In password mode, Blue uses invitation-only onboarding. Administrators choose an email and role; the recipient follows the invitation link and sets a password. In OIDC mode, invitations are disabled and the identity provider provisions users and groups through SCIM. See [Identity provider provisioning](/next/admin/identity-provisioning).
 
+The reference implementation does not send email. Invitation links are built from `HARNESS_AUTH_PUBLIC_URL` and written to the Control API log; copy them from there, or connect that delivery boundary to SMTP or a transactional mail provider before relying on invitations in production.
+
 ## Account lifecycle
 
 ```mermaid
