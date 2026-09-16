@@ -52,7 +52,7 @@ cliclack = "=0.3.6"
 console = "=0.15.11"
 similar = "=2.7.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
-portable-pty = "0.8"
+portable-pty = "0.9"
 vt100 = "0.15"
 vte = "0.11"
 crossterm = "0.28"
