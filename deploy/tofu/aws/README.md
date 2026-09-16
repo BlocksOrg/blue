@@ -110,11 +110,13 @@ have no fixed range.
 `include_domain` takes `route53_zone_id` plus two labels, `dashboard_subdomain`
 and `api_subdomain`, relative to that zone (`app` and `api` on `example.com`
 give `app.example.com` and `api.example.com`; an empty label means the apex).
+An optional `inference_proxy_subdomain` adds a third name for gateway mode;
+reserving it up front costs nothing and saves reissuing the certificate later.
 The zone's name is read back, so nothing repeats the domain. The load balancer
 only exists after the chart's Ingress is installed, so the records are a second
 apply: `tofu apply -var alb_hostname=<ingress hostname>`. `certificate_arn`,
-`dashboard_hostname` and `api_hostname` are output for the chart and
-`IngressClassParams`.
+`dashboard_hostname`, `api_hostname` and `inference_proxy_hostname` are output
+for the chart and `IngressClassParams`.
 
 ## Naming and tags
 

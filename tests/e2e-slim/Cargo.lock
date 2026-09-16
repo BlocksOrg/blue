@@ -244,6 +244,7 @@ dependencies = [
  "time",
  "toml",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
