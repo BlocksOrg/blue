@@ -3,18 +3,22 @@ import test from "node:test";
 import { resolveMemberFilters, resolveMembersTab } from "./members-view.ts";
 
 test("managed organizations can open identity but not invitations", () => {
-  assert.equal(resolveMembersTab("identity", true), "identity");
-  assert.equal(resolveMembersTab("invited", true), "members");
+  assert.equal(resolveMembersTab("identity", true, false), "identity");
+  assert.equal(resolveMembersTab("invited", true, false), "members");
 });
 
 test("unmanaged organizations can open invitations but not identity", () => {
-  assert.equal(resolveMembersTab("invited", false), "invited");
-  assert.equal(resolveMembersTab("identity", false), "members");
+  assert.equal(resolveMembersTab("invited", false, true), "invited");
+  assert.equal(resolveMembersTab("identity", false, true), "members");
 });
 
 test("members remains the default tab", () => {
-  assert.equal(resolveMembersTab("", true), "members");
-  assert.equal(resolveMembersTab("unknown", false), "members");
+  assert.equal(resolveMembersTab("", true, false), "members");
+  assert.equal(resolveMembersTab("unknown", false, true), "members");
+});
+
+test("OIDC without SCIM still hides invitations", () => {
+  assert.equal(resolveMembersTab("invited", false, false), "members");
 });
 
 test("member filters keep supported values", () => {

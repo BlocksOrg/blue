@@ -15,7 +15,7 @@ import { api, requireIdentity } from "@/lib/api";
 import { RefreshButton } from "./refresh-button";
 import { GatewayTabs, type GatewayTab } from "./gateway-tabs";
 import { ProxyHealthRow } from "./proxy-health-row";
-import { ensureGatewayKey } from "@/app/actions";
+import { GatewayKeyForm } from "./gateway-key-form";
 
 type GatewayStatus = {
   enabled: boolean;
@@ -248,7 +248,7 @@ export default async function GatewayPage({ searchParams }: { searchParams: Prom
         {access?.error && <div className="border-t p-4"><Alert variant="destructive"><AlertCircle /><AlertTitle>Provisioning failed</AlertTitle><AlertDescription>{access.error}</AlertDescription></Alert></div>}
         {validationError && <div className="border-t p-4"><Alert><AlertCircle /><AlertTitle>Key verification unavailable</AlertTitle><AlertDescription>{validationError} The stored key was left unchanged.</AlertDescription></Alert></div>}
         {access?.status === "invalid" && <div className="border-t p-4"><Alert variant="destructive"><AlertCircle /><AlertTitle>Upstream credential is invalid</AlertTitle><AlertDescription>{access.invalidation_reason ?? "The credential was rejected or revoked by the upstream gateway."} Provision a new credential to restore gateway access.</AlertDescription></Alert></div>}
-        <form action={ensureGatewayKey} className="flex justify-end border-t p-4"><Button type="submit" disabled={access?.status === "recovering" || Boolean(access?.next_retry_at && new Date(access.next_retry_at).getTime() > Date.now())}>{access?.status === "invalid" ? "Provision new key" : access?.status === "missing" ? "Provision key" : access?.status === "recovering" ? "Recovering…" : "Reconcile key"}</Button></form>
+        <GatewayKeyForm label={access?.status === "invalid" ? "Provision new key" : access?.status === "missing" ? "Provision key" : access?.status === "recovering" ? "Recovering…" : "Reconcile key"} disabled={access?.status === "recovering" || Boolean(access?.next_retry_at && new Date(access.next_retry_at).getTime() > Date.now())} existingError={access?.error} />
       </section>
         )}
         logs={(
