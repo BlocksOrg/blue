@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+# Supersede in-flight runs for the same PR. Without this, a rapid push sequence
+# keeps every earlier run alive, and this workflow is the expensive one (Rust
+# builds plus two Windows jobs) on every push, draft or not.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Does this change touch anything outside docs/website? Gates `image` below.
   changes:
