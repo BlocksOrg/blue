@@ -143,11 +143,6 @@ variable "blue_config_yaml" {
   EOT
 }
 
-variable "docs_url" {
-  type    = string
-  default = "https://docs.blocks.team"
-}
-
 variable "gateway_type" {
   type        = string
   default     = "litellm"

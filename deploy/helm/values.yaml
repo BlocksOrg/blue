@@ -80,7 +80,6 @@ blue:
   publicUrls:
     dashboard: https://blue.example.com
     controlApi: https://api.blue.example.com
-    docs: https://docs.example.com
     inferenceProxy: https://inference.blue.example.com
   env: {}
 

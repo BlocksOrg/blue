@@ -109,11 +109,10 @@
         },
         "publicUrls": {
           "type": "object",
-          "required": ["dashboard", "controlApi", "docs", "inferenceProxy"],
+          "required": ["dashboard", "controlApi", "inferenceProxy"],
           "properties": {
             "dashboard": { "type": "string", "format": "uri" },
             "controlApi": { "type": "string", "format": "uri" },
-            "docs": { "type": "string", "format": "uri" },
             "inferenceProxy": { "type": "string", "format": "uri" }
           }
         }

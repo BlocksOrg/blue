@@ -39,7 +39,6 @@ spec:
             # Confidential OAuth client seeded for the inference proxy's M2M auth.
             # HARNESS_PROXY_OAUTH_CLIENT_SECRET is supplied via `blue.existingSecret`.
             - { name: HARNESS_INFERENCE_PROXY_CLIENT_ID, value: {{ .Values.blue.inferenceProxyClientId | quote }} }
-            - { name: DOCS_URL, value: {{ .Values.blue.publicUrls.docs | quote }} }
             - name: HARNESS_DATABASE_URL
               valueFrom:
                 secretKeyRef: { name: {{ include "blue.databaseSecretName" . | quote }}, key: HARNESS_DATABASE_URL, optional: false }

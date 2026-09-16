@@ -58,10 +58,11 @@ const adminItems = [
   { href: "/clients", label: "Clients" },
 ];
 
+const DOCS_URL = "https://docs.bluee.sh";
+
 export function DashboardSidebar({
   email,
   role,
-  docsUrl,
   gatewayEnabled,
   currentRevision,
   blueConfig,
@@ -70,7 +71,6 @@ export function DashboardSidebar({
 }: {
   email: string;
   role: "admin" | "member";
-  docsUrl: string;
   gatewayEnabled: boolean;
   currentRevision: string;
   blueConfig: BlueConfigExport | null;
@@ -228,7 +228,7 @@ export function DashboardSidebar({
                 <DropdownMenuItem
                   render={
                     <a
-                      href={docsUrl}
+                      href={DOCS_URL}
                       target="_blank"
                       rel="noreferrer"
                       className="w-full"
