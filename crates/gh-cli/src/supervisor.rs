@@ -472,6 +472,16 @@ fn agent_repair_guidance(names: &[String]) -> Option<String> {
     ))
 }
 
+fn agent_install_guidance(names: &[String]) -> Option<String> {
+    let first = names.first()?;
+    let action = if cfg!(windows) {
+        "Automatic installation is unavailable on Windows; install a policy-supported version manually and add it to PATH.".to_owned()
+    } else {
+        format!("Run `blue agent {first}` outside Blue to install one.")
+    };
+    Some(format!("Not installed: {}. {action}", names.join(", ")))
+}
+
 fn agent_selector(options: &commands::AgentOptions) -> Option<ControlPrompt> {
     if options.eligible.is_empty() {
         return None;
@@ -2984,6 +2994,9 @@ pub fn supervise(
                                             guidance,
                                         );
                                     }
+                                    if let Some(guidance) = agent_install_guidance(&options.needs_install) {
+                                        append_transcript(&mut transcript, guidance);
+                                    }
                                     prompt = agent_selector(&options);
                                 }
                                 Err(error) => append_transcript(
@@ -3507,6 +3520,28 @@ mod tests {
     }
 
     #[test]
+    fn missing_agents_get_guidance_but_no_tui_selection() {
+        let options = commands::AgentOptions {
+            eligible: vec![],
+            needs_repair: vec!["claude".into()],
+            needs_install: vec!["codex".into()],
+            current: None,
+        };
+        assert!(agent_selector(&options).is_none());
+        assert!(agent_install_guidance(&[]).is_none());
+        let guidance = agent_install_guidance(&options.needs_install).unwrap();
+        assert!(guidance.contains("Not installed: codex"));
+        assert!(guidance.contains(if cfg!(windows) {
+            "unavailable on Windows"
+        } else {
+            "blue agent codex"
+        }));
+        assert!(agent_repair_guidance(&options.needs_repair)
+            .unwrap()
+            .contains("claude"));
+    }
+
+    #[test]
     fn agent_repair_guidance_handles_one_or_many_agents() {
         assert_eq!(agent_repair_guidance(&[]), None);
         assert_eq!(
@@ -3528,6 +3563,7 @@ mod tests {
         let repair_only = commands::AgentOptions {
             eligible: Vec::new(),
             needs_repair: vec!["codex".into()],
+            needs_install: vec!["kimi".into()],
             current: Some("codex".into()),
         };
         assert!(agent_selector(&repair_only).is_none());
@@ -3535,6 +3571,7 @@ mod tests {
         let mixed = commands::AgentOptions {
             eligible: vec!["claude".into()],
             needs_repair: vec!["codex".into()],
+            needs_install: vec!["kimi".into()],
             current: Some("claude".into()),
         };
         let selector = agent_selector(&mixed).unwrap();
