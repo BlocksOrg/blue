@@ -12,6 +12,6 @@
     "release:docs": "node scripts/release-version.mjs"
   },
   "devDependencies": {
-    "mint": "4.2.836"
+    "mint": "4.2.891"
   }
 }

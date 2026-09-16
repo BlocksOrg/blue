@@ -12,7 +12,7 @@
     "@astrojs/check": "^0.9.4",
     "@emnapi/core": "^1.11.3",
     "@emnapi/wasi-threads": "^1.2.3",
-    "astro": "^7.2.10",
+    "astro": "^7.3.2",
     "typescript": "^5.9.2"
   }
 }

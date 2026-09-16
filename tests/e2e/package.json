@@ -8,9 +8,9 @@
     "test:full": "playwright test --grep-invert @certification"
   },
   "devDependencies": {
-    "@playwright/test": "1.55.0",
+    "@playwright/test": "1.63.0",
     "@types/node": "24.3.0",
     "typescript": "5.9.2",
-    "yaml": "2.8.1"
+    "yaml": "2.9.1"
   }
 }
