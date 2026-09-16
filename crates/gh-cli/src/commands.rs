@@ -425,23 +425,20 @@ struct HarnessChoice {
     hint: &'static str,
 }
 
-/// The harnesses a picker may offer, with the hint shown beside each.
-///
-/// An installed agent whose version is wrong stays in the list and is labelled
-/// rather than dropped: selecting one reaches `ensure_compatible_version`,
-/// which offers to install a policy-supported release. Dropping it here is
-/// what hid Codex on first run entirely.
-///
-/// Incompatible agents sort last — stably, so the highlighted first row is a
-/// ready agent without disturbing catalogue order among equals.
+const HINT_NEEDS_INSTALL: &str = "not installed — install a policy-supported version";
+
+/// Offer allowed installed and absent agents, with ready entries first, then
+/// repair candidates, then fresh installs. Preserve catalogue order per group.
 fn harness_choices(inventory: &HarnessInventory, current: Option<&str>) -> Vec<HarnessChoice> {
     let mut choices = inventory
         .entries
         .iter()
-        .filter(|entry| entry.repairable())
+        .filter(|entry| entry.repairable() || entry.installable())
         .map(|entry| HarnessChoice {
             name: entry.name.clone(),
-            hint: if entry.compatibility_error.is_some() {
+            hint: if !entry.installed {
+                HINT_NEEDS_INSTALL
+            } else if entry.compatibility_error.is_some() {
                 HINT_NEEDS_REPAIR
             } else if current == Some(entry.name.as_str()) {
                 HINT_CURRENT
@@ -450,14 +447,18 @@ fn harness_choices(inventory: &HarnessInventory, current: Option<&str>) -> Vec<H
             },
         })
         .collect::<Vec<_>>();
-    choices.sort_by_key(|choice| choice.hint == HINT_NEEDS_REPAIR);
+    choices.sort_by_key(|choice| match choice.hint {
+        HINT_NEEDS_INSTALL => 2,
+        HINT_NEEDS_REPAIR => 1,
+        _ => 0,
+    });
     choices
 }
 
 fn choose_preferred_harness(cfg: &BlueToml, inventory: &HarnessInventory) -> Result<String> {
     let choices = harness_choices(inventory, cfg.ui.preferred_harness.as_deref());
     if choices.is_empty() {
-        bail!("no eligible coding agent is installed; run `blue doctor`, then install one allowed by policy");
+        bail!("no policy-allowed, client-supported agent is available for this operation; run `blue doctor` or `blue agent <name>` in a terminal");
     }
     let names = choices
         .iter()
@@ -657,6 +658,39 @@ fn configured_default_harness(cfg: &BlueToml, inventory: &HarnessInventory) -> R
     selected.parse().context("parsing configured default agent")
 }
 
+fn apply_default_harness(
+    cfg: &BlueToml,
+    inventory: &HarnessInventory,
+    interactive: bool,
+) -> Result<Harness> {
+    if interactive {
+        if let Some(preferred) = cfg.ui.preferred_harness.as_deref() {
+            if let Ok(selected) = validate_agent_selection(&inventory.repairable_names(), preferred)
+            {
+                return selected.parse().context("parsing configured default agent");
+            }
+        }
+    }
+    configured_default_harness(cfg, inventory)
+}
+
+fn apply_prompts_allowed(assume_yes: bool, quiet: bool) -> bool {
+    interactive_terminal() && !assume_yes && !quiet
+}
+
+fn inventory_detected(inventory: &HarnessInventory, harness: Harness) -> Option<Detected> {
+    let entry = inventory
+        .entries
+        .iter()
+        .find(|entry| entry.name == harness.key() && entry.installed)?;
+    Some(Detected {
+        harness,
+        path: entry.path.clone()?,
+        raw_version: entry.raw_version.clone(),
+        version: entry.version.clone(),
+    })
+}
+
 fn inventory_for_harness(inventory: &HarnessInventory, harness: Harness) -> HarnessInventory {
     HarnessInventory {
         entries: inventory
@@ -715,11 +749,23 @@ fn repair_selected_harness(
     harness: Harness,
     interactive: bool,
 ) -> Result<()> {
-    if let Err(error) = repair_incompatible_inventory(config, inventory, interactive, Some(harness))
-    {
-        report_inventory_failure(cfg, session, inventory, harness, &config.revision, &error);
-        return Err(error);
-    }
+    gh_harness::ensure_allowed(harness, &config.allowed_harnesses)?;
+    let policy = config.policy(harness.key()).cloned().unwrap_or_default();
+    let result = ensure_available(
+        harness,
+        inventory_detected(inventory, harness),
+        &policy,
+        interactive,
+    );
+    let (detected, context, _) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            report_inventory_failure(cfg, session, inventory, harness, &config.revision, &error);
+            return Err(error);
+        }
+    };
+    update_inventory_after_version_check(inventory, &detected, &context);
+    validate_agent_selection(&inventory.eligible_names(), harness.key())?;
     Ok(())
 }
 
@@ -728,30 +774,27 @@ impl AgentContext {
         let eligible = self.inventory.eligible_names();
         if eligible.is_empty() {
             bail!(
-                "no eligible coding agent is installed; run `blue doctor`, then install one allowed by policy"
+                "no eligible coding agent is installed; run `blue agent <name>` in an interactive terminal to install or repair one allowed by policy"
             );
         }
         Ok(eligible)
     }
 }
 
-/// Persist `name` as the default agent, repairing its version first when it is
-/// installed but incompatible.
+/// Persist `name` only after selected installation or version repair succeeds.
 ///
-/// Non-interactive callers keep the strict eligible-only gate: without a
-/// terminal `repair_incompatible_inventory` is a no-op, so accepting an
-/// incompatible agent here would store a default that the next `blue run`
-/// cannot start.
+/// Non-interactive callers keep the strict eligible-only gate so they cannot
+/// store a default that needs an installation prompt before launch.
 fn commit_preferred_agent(ctx: &mut AgentContext, name: &str) -> Result<String> {
     let interactive = interactive_terminal();
     let offered = if interactive {
-        ctx.inventory.repairable_names()
+        ctx.inventory.selectable_names()
     } else {
         ctx.inventory.eligible_names()
     };
     if offered.is_empty() {
         bail!(
-            "no eligible coding agent is installed; run `blue doctor`, then install one allowed by policy"
+            "no eligible coding agent is installed; run `blue agent <name>` in an interactive terminal to install or repair one allowed by policy"
         );
     }
     let selected = validate_agent_selection(&offered, name)?;
@@ -774,10 +817,15 @@ pub(crate) struct AgentOptions {
     /// from the TUI — running an installer under it would corrupt the display —
     /// but named there so they are not silently missing from the list.
     pub needs_repair: Vec<String>,
+    /// Absent candidates are guidance-only in the TUI, like repair candidates.
+    pub needs_install: Vec<String>,
     pub current: Option<String>,
 }
 
-fn agent_option_names(inventory: &HarnessInventory) -> Result<(Vec<String>, Vec<String>)> {
+#[allow(clippy::type_complexity)]
+fn agent_option_names(
+    inventory: &HarnessInventory,
+) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let eligible = inventory.eligible_names();
     let needs_repair = inventory
         .entries
@@ -785,20 +833,27 @@ fn agent_option_names(inventory: &HarnessInventory) -> Result<(Vec<String>, Vec<
         .filter(|entry| entry.repairable() && entry.compatibility_error.is_some())
         .map(|entry| entry.name.clone())
         .collect::<Vec<_>>();
-    if eligible.is_empty() && needs_repair.is_empty() {
+    let needs_install = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.installable())
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    if eligible.is_empty() && needs_repair.is_empty() && needs_install.is_empty() {
         bail!(
-            "no eligible coding agent is installed; run `blue doctor`, then install one allowed by policy"
+            "no policy-allowed, client-supported agent is available for this operation; run `blue doctor` or `blue agent <name>` in a terminal"
         );
     }
-    Ok((eligible, needs_repair))
+    Ok((eligible, needs_repair, needs_install))
 }
 
 pub(crate) fn agent_options() -> Result<AgentOptions> {
     let ctx = agent_context()?;
-    let (eligible, needs_repair) = agent_option_names(&ctx.inventory)?;
+    let (eligible, needs_repair, needs_install) = agent_option_names(&ctx.inventory)?;
     Ok(AgentOptions {
         eligible,
         needs_repair,
+        needs_install,
         current: ctx.cfg.ui.preferred_harness,
     })
 }
@@ -829,7 +884,7 @@ pub fn agent(name: Option<&str>) -> Result<()> {
             let choices = harness_choices(&ctx.inventory, ctx.cfg.ui.preferred_harness.as_deref());
             if choices.is_empty() {
                 bail!(
-                    "no eligible coding agent is installed; run `blue doctor`, then install one allowed by policy"
+                    "no policy-allowed, client-supported agent is available for this operation; run `blue doctor` or `blue agent <name>` in a terminal"
                 );
             }
             let mut prompt = cliclack::select("Choose your default coding agent");
@@ -2315,6 +2370,21 @@ fn show_harness_inventory(inventory: &HarnessInventory, styled: bool) -> Result<
     Ok(())
 }
 
+fn ensure_available(
+    harness: Harness,
+    detected: Option<Detected>,
+    policy: &HarnessPolicy,
+    interactive: bool,
+) -> Result<(Detected, HarnessContext, bool)> {
+    crate::repair::ensure_available(
+        harness,
+        detected,
+        policy,
+        interactive,
+        &mut crate::repair::NativeRuntime,
+    )
+}
+
 fn ensure_compatible_version(
     harness: Harness,
     detected: Detected,
@@ -2454,25 +2524,10 @@ fn run_prepared(
         show_harness_inventory(&inventory, false)?;
     }
     gh_harness::ensure_allowed(harness, &config.allowed_harnesses)?;
-    let detected_entry = inventory
-        .entries
-        .iter()
-        .find(|entry| entry.name == harness.key())
-        .filter(|entry| entry.installed)
-        .ok_or_else(|| anyhow!("harness `{harness}` is allowed but not installed on PATH"))?;
-
+    let detected = inventory_detected(&inventory, harness);
     let policy = config.policy(harness.key()).cloned().unwrap_or_default();
-    let detected = Detected {
-        harness,
-        path: detected_entry
-            .path
-            .clone()
-            .expect("installed harness has a path"),
-        raw_version: detected_entry.raw_version.clone(),
-        version: detected_entry.version.clone(),
-    };
     let (detected, context, version_repaired) =
-        match ensure_compatible_version(harness, detected, &policy, interactive)
+        match ensure_available(harness, detected, &policy, interactive)
             .context("checking installed harness version")
         {
             Ok(result) => result,
@@ -3298,9 +3353,9 @@ fn apply_internal(assume_yes: bool, quiet: bool, target_override: Option<Harness
     let applied = load_applied_state()?;
     let mut inventory = discover_inventory_cached(&config.allowed_harnesses, applied.as_ref());
     gh_agent::evaluate_inventory(&config, &mut inventory);
-    let target = target_override
-        .map(Ok)
-        .unwrap_or_else(|| configured_default_harness(&cfg, &inventory))?;
+    let target = target_override.map(Ok).unwrap_or_else(|| {
+        apply_default_harness(&cfg, &inventory, apply_prompts_allowed(assume_yes, quiet))
+    })?;
     apply_loaded(
         &cfg, &client, &session, &config, inventory, target, assume_yes, quiet, true,
     )?;
@@ -3319,8 +3374,8 @@ fn apply_loaded(
     quiet: bool,
     report_success: bool,
 ) -> Result<()> {
-    let interactive = std::io::stdin().is_terminal() && !assume_yes;
-    let styled = interactive && !quiet;
+    let interactive = apply_prompts_allowed(assume_yes, quiet);
+    let styled = interactive;
     if !quiet {
         show_harness_inventory(&inventory, styled)?;
     }
@@ -5376,7 +5431,7 @@ mod tests {
     }
 
     #[test]
-    fn repaired_version_invalidates_fast_path_and_refreshes_inventory() {
+    fn installation_or_repair_invalidates_fast_path_and_refreshes_inventory() {
         let root =
             std::env::temp_dir().join(format!("harness-repaired-version-{}", uuid::Uuid::new_v4()));
         let managed = root.join("managed.toml");
@@ -5437,6 +5492,11 @@ mod tests {
         );
         assert!(entry.compatibility_error.is_none());
         assert!(!entry.reconciled);
+        inventory.entries[0].installed = false;
+        inventory.entries[0].path = None;
+        update_inventory_after_version_check(&mut inventory, &detected, &context);
+        assert!(inventory.entries[0].eligible());
+        assert_eq!(inventory.entries[0].path.as_ref(), Some(&detected.path));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6105,14 +6165,12 @@ mod tests {
     }
 
     #[test]
-    fn picker_drops_agents_that_are_not_allowed_or_not_installed() {
+    fn picker_drops_agents_that_are_not_allowed_or_supported() {
         let mut disallowed = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
         disallowed.api_allowed = false;
-        let mut missing = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
-        missing.installed = false;
         let mut unsupported = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
         unsupported.client_supported = false;
-        for codex in [disallowed, missing, unsupported] {
+        for codex in [disallowed, unsupported] {
             let inventory = HarnessInventory {
                 entries: vec![codex],
             };
@@ -6243,7 +6301,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_agent_selection_accepts_a_repairable_install_but_not_a_missing_one() {
+    fn interactive_agent_selection_accepts_repair_and_install_candidates() {
         let mut codex = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
         codex.compatibility_error = Some("policy requires >=0.200.0".into());
         let mut claude = test_inventory_entry("claude", PathBuf::from("/usr/local/bin/claude"));
@@ -6253,16 +6311,17 @@ mod tests {
         };
 
         // An interactive `blue agent codex` gets as far as the repair prompt.
-        let offered = inventory.repairable_names();
+        let offered = inventory.selectable_names();
         assert_eq!(
             validate_agent_selection(&offered, "codex").unwrap(),
             "codex"
         );
 
-        // A harness that is not on PATH at all still reports `not eligible` —
-        // `tests/e2e-slim/src/lib.rs` keys its skip logic off that exact string.
-        let error = validate_agent_selection(&offered, "claude").unwrap_err();
-        assert!(error.to_string().contains("agent `claude` is not eligible"));
+        assert_eq!(
+            validate_agent_selection(&offered, "claude").unwrap(),
+            "claude"
+        );
+        assert!(validate_agent_selection(&inventory.eligible_names(), "claude").is_err());
 
         // Non-interactive callers keep the strict gate, so a scripted
         // `blue agent codex` fails instead of storing an unusable default.
@@ -6278,19 +6337,73 @@ mod tests {
             entries: vec![codex],
         };
 
-        let (eligible, needs_repair) = agent_option_names(&inventory).unwrap();
+        let (eligible, needs_repair, needs_install) = agent_option_names(&inventory).unwrap();
         assert!(eligible.is_empty());
         assert_eq!(needs_repair, vec!["codex"]);
 
         let mut missing = test_inventory_entry("codex", PathBuf::from("/usr/local/bin/codex"));
         missing.installed = false;
-        let error = agent_option_names(&HarnessInventory {
+        assert!(needs_install.is_empty());
+        let (eligible, repair, install) = agent_option_names(&HarnessInventory {
             entries: vec![missing],
         })
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("no eligible coding agent is installed"));
+        .unwrap();
+        assert!(eligible.is_empty() && repair.is_empty());
+        assert_eq!(install, vec!["codex"]);
+    }
+
+    #[test]
+    fn picker_orders_ready_repair_and_absent_and_apply_stays_installed_only() {
+        let mut cfg = BlueToml::default();
+        cfg.ui.preferred_harness = Some("codex".into());
+        let mut codex = test_inventory_entry("codex", "/bin/codex".into());
+        codex.installed = false;
+        codex.compatibility_error = Some("missing".into());
+        let mut claude = test_inventory_entry("claude", "/bin/claude".into());
+        claude.compatibility_error = Some("unsupported".into());
+        let kimi = test_inventory_entry("kimi", "/bin/kimi".into());
+        let inventory = HarnessInventory {
+            entries: vec![codex.clone(), claude, kimi],
+        };
+        let choices = harness_choices(&inventory, Some("codex"));
+        assert_eq!(
+            choices.iter().map(|c| c.hint).collect::<Vec<_>>(),
+            vec![HINT_READY, HINT_NEEDS_REPAIR, HINT_NEEDS_INSTALL]
+        );
+        assert!(apply_default_harness(&cfg, &inventory, true).is_err());
+        cfg.ui.preferred_harness = Some("claude".into());
+        assert_eq!(
+            apply_default_harness(&cfg, &inventory, true).unwrap(),
+            Harness::Claude
+        );
+        assert!(apply_default_harness(&cfg, &inventory, false).is_err());
+        assert!(configured_default_harness(&cfg, &inventory).is_err());
+        for name in ["opencode", "unknown"] {
+            cfg.ui.preferred_harness = Some(name.into());
+            assert!(apply_default_harness(&cfg, &inventory, true).is_err());
+        }
+        for (allowed, supported) in [(false, true), (true, false)] {
+            let mut denied = test_inventory_entry("codex", "/bin/codex".into());
+            denied.api_allowed = allowed;
+            denied.client_supported = supported;
+            cfg.ui.preferred_harness = Some("codex".into());
+            assert!(apply_default_harness(
+                &cfg,
+                &HarnessInventory {
+                    entries: vec![denied]
+                },
+                true
+            )
+            .is_err());
+        }
+        let missing = HarnessInventory {
+            entries: vec![codex],
+        };
+        assert_eq!(harness_choices(&missing, None)[0].hint, HINT_NEEDS_INSTALL);
+        assert_eq!(
+            choose_preferred_harness(&BlueToml::default(), &missing).unwrap(),
+            "codex"
+        );
     }
 
     #[test]

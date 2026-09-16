@@ -16,10 +16,14 @@ Set `HARNESS_LOG=debug` for more client diagnostics.
 
 <AccordionGroup>
   <Accordion title="The CLI says a harness is not installed">
-    Run the native binary with `--version`, then confirm its directory is on the same `PATH` used to launch `blue`. `doctor` prints the path it detected for every supported harness.
+    In a Unix terminal, run `blue agent <name>` or `blue <name>` to approve a fresh installation. Bare `blue` and `blue agent` also list allowed absent agents with an installation hint. Blue shows the exact policy-supported version and npm command; confirmation defaults to No. npm must already be installed, with its global executable directory on PATH. Fresh installs use npm's configured global prefix, while repairs preserve the detected installation method and prefix.
+
+    Blue verifies the PATH winner after installation. If it is missing, unparseable, or incompatible, fix PATH before retrying. Declining or failing installation does not save a new default or write managed agent configuration. Unattended calls refuse installation, and `/agent` inside the running UI directs you to the terminal command. Automatic fresh installation is unavailable on Windows; install a policy-supported release manually there.
   </Accordion>
   <Accordion title="The harness version is blocked">
     Run the native CLI with `--version`, then use `blue apply`, `blue status`, or `blue run` to compare the inventory's normalized native harness version and compatibility result with the organization's `version_requirement`. `blue doctor` reports the configuration source, session, revision, allowed harnesses, and each detected path, version, and allowed/denied state, but not the compatibility profile. In an interactive terminal, approve Blue's installation-aware repair prompt (when the installation method supports repair) to install the highest published release inside the policy and certified range, or ask an administrator to change the range. The prompt is reachable from the first-run agent picker and from `blue agent <name>` as well as from `blue <agent>`: a blocked agent stays in those lists, labelled `installed — needs a policy-supported version`.
+    Interactive `blue apply` can also repair an installed incompatible stored default. `apply --yes`, piped apply, in-UI apply, and the daemon never run installers. For an absent default, first use `blue agent <name>`.
+
     For Homebrew, legacy Kimi uv, or unrecognized installations, follow the short manual guidance. When supported, Blue prints a policy-constrained npm migration command. Install npm first and remove the old copy through its manager, or use a separate npm prefix and put its executable directory first on PATH. See [manual migration](/next/concepts/harness-version-compatibility#repair-an-incompatible-installation). Automatic replacement remains unsupported for these methods and for Windows layouts.
   </Accordion>
   <Accordion title="A harness repair installed a version but Blue still detects another one">
