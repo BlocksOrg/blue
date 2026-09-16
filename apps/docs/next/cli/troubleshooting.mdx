@@ -40,6 +40,9 @@ Set `HARNESS_LOG=debug` for more client diagnostics.
   <Accordion title="A direct agent launch still uses governed settings">
     Run `blue apply` to reconcile managed values, and confirm you are not invoking an installed shim. Governed settings should live only in launch-scoped overlays.
   </Accordion>
+  <Accordion title="An MCP server or token I configured is missing in a governed session">
+    Confirm the server is declared in the configuration file you own rather than in a Blue-owned output, which is rebuilt from policy on every reconcile and discards hand edits. Personal servers belong in `~/.codex/config.toml`, `~/.claude.json`, `~/.kimi-code/mcp.json`, or `~/.config/opencode/opencode.json`. Run `blue apply` afterwards; Kimi Code seeds its isolated home at reconcile time, so an edit there reaches a governed session only after apply. See [Managed configuration](/next/concepts/managed-configuration).
+  </Accordion>
   <Accordion title="Gateway access is denied">
     The governance and LiteLLM users must have the same email. The deployment provisions and reconciles one managed key for that user; run `blue gateway` to retry it before fetching personalized policy.
   </Accordion>
