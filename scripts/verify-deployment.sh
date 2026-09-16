@@ -129,6 +129,24 @@ grep -q 'name: gateway-jwt' /tmp/blue-gateway-production.yaml
 grep -q 'name: BLUE_GATEWAY_ENABLED' /tmp/blue-gateway-production.yaml
 grep -q 'value: "true"' /tmp/blue-gateway-production.yaml
 
+# The worker loads the same gateway envelope as the Control API, so it needs the
+# same signing-key mount or it exits at startup. Render it on its own; the greps
+# above are file-wide and pass on the API's copy.
+helm template blue "$chart" \
+  "${production_network[@]}" \
+  "${gateway_jwt[@]}" \
+  --set blue.existingSecret=blue-runtime \
+  --set image.digest="$digest" \
+  --set blue.enableInferenceProxy=true \
+  --set blue.gatewayType=litellm \
+  --set blue.internalTransport.serverSecret=blue-internal-server \
+  --set blue.internalTransport.clientSecret=blue-internal-client \
+  --show-only templates/worker-deployment.yaml \
+  > /tmp/blue-gateway-worker.yaml
+grep -q 'mountPath: /var/run/blue/gateway-jwt' /tmp/blue-gateway-worker.yaml
+grep -q 'secretName: "blue-gateway-jwt"' /tmp/blue-gateway-worker.yaml
+grep -q 'name: HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE' /tmp/blue-gateway-worker.yaml
+
 helm template blue "$chart" \
   "${production_network[@]}" \
   "${gateway_jwt[@]}" \
