@@ -85,15 +85,6 @@ services:
       timeout: 3s
       retries: 30
 
-  docs:
-    image: node:22-bookworm-slim
-    command: ["node", "-e", "require('http').createServer((_, response) => response.end('Blue E2E docs\\n')).listen(3000, '0.0.0.0')"]
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-
   blue:
     image: ${BLUE_E2E_IMAGE:-blue-e2e-custom:local}
     build:
@@ -133,7 +124,6 @@ services:
       AUTH_DATABASE_URL: postgres://harness:harness@postgres:5432/governance
       CONTROL_API_URL: http://127.0.0.1:8080
       CONTROL_API_PUBLIC_URL: http://127.0.0.1:8080
-      DOCS_URL: http://docs:3000
       HARNESS_BLOB_BUCKET: raw-sessions
       HARNESS_PACKAGE_BUCKET: package-artifacts
       HARNESS_BLOB_REGION: us-east-1
@@ -258,7 +248,6 @@ services:
     depends_on:
       blue: { condition: service_healthy }
       blue-governance-only: { condition: service_healthy }
-      docs: { condition: service_healthy }
 
 volumes:
   package-fixture:

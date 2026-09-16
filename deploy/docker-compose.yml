@@ -99,7 +99,6 @@ services:
       HARNESS_OIDC_ISSUER: ${HARNESS_OIDC_ISSUER:-}
       HARNESS_OIDC_CLIENT_ID: ${HARNESS_OIDC_CLIENT_ID:-}
       HARNESS_OIDC_CLIENT_SECRET: ${HARNESS_OIDC_CLIENT_SECRET:-}
-      DOCS_URL: ${HARNESS_DOCS_URL:-https://docs.bluee.sh}
     ports: ["3000:3000"]
     depends_on:
       control-api: { condition: service_started }

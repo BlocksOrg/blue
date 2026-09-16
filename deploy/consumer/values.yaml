@@ -19,7 +19,6 @@ blue:
   publicUrls:
     dashboard: https://blue.example.com
     controlApi: https://api.blue.example.com
-    docs: https://docs.example.com
   env:
     HARNESS_AUTH_MODE: password
     HARNESS_SCIM_BEARER_TOKEN: ""

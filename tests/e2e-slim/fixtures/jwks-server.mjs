@@ -3,8 +3,7 @@
 //
 //   GET  /jwks         — the public JWK set, so control-api can verify the RS256
 //                        user tokens the Rust test minter signs (no dashboard /
-//                        Better Auth required). Mirrors the throwaway `docs`
-//                        node service in tests/e2e/docker-compose.yml.
+//                        Better Auth required).
 //
 //   POST /oauth2/token — a client-credentials token issuer standing in for the
 //                        dashboard's Better Auth OAuth endpoint. Used ONLY by the
