@@ -1,4 +1,5 @@
-//! Conservative installation ownership detection, used only on the repair path.
+//! Filesystem-based installation layout recognition, used only on the repair path.
+//! Detection spawns no external commands and does not prove installer provenance.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -14,13 +15,23 @@ pub struct Installation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallMethod {
-    NpmGlobal { prefix: PathBuf, package: String },
+    /// An npm-compatible global layout, regardless of which installer created it.
+    NpmGlobal {
+        prefix: PathBuf,
+        package: String,
+    },
     ClaudeNative,
-    KimiStandalone { root: PathBuf },
+    KimiStandalone {
+        root: PathBuf,
+    },
     OpenCodeStandalone,
-    Homebrew { package: String },
+    Homebrew {
+        package: String,
+    },
     KimiUvLegacy,
-    Unknown { reason: String },
+    Unknown {
+        reason: String,
+    },
 }
 
 pub fn npm_package(harness: Harness) -> &'static str {
@@ -32,24 +43,12 @@ pub fn npm_package(harness: Harness) -> &'static str {
     }
 }
 
-/// No registry requests: npm is probed only after filesystem ownership matches.
+/// Recognize filesystem layouts without spawning external commands.
+/// A matching npm layout does not prove npm originally installed the package.
 pub fn detect_installation(detected: &Detected) -> Installation {
     let home =
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-    inspect(detected, home.as_deref(), &|prefix, root| {
-        [("prefix", prefix), ("root", root)]
-            .into_iter()
-            .all(|(operation, expected)| {
-                std::process::Command::new("npm")
-                    .args([operation, "-g", "--prefix"])
-                    .arg(prefix)
-                    .output()
-                    .ok()
-                    .filter(|output| output.status.success())
-                    .and_then(|output| String::from_utf8(output.stdout).ok())
-                    .is_some_and(|output| same_file(Path::new(output.trim()), expected))
-            })
-    })
+    inspect(detected, home.as_deref())
 }
 
 fn unknown(reason: impl Into<String>) -> InstallMethod {
@@ -93,11 +92,7 @@ fn native_binary(path: &Path) -> bool {
     )
 }
 
-fn inspect(
-    detected: &Detected,
-    home: Option<&Path>,
-    npm_owns: &dyn Fn(&Path, &Path) -> bool,
-) -> Installation {
+fn inspect(detected: &Detected, home: Option<&Path>) -> Installation {
     let canonical =
         match std::fs::canonicalize(&detected.path) {
             Ok(path) if path.is_file() => path,
@@ -109,7 +104,7 @@ fn inspect(
                 ),
             },
         };
-    let method = classify(detected, &canonical, home, npm_owns);
+    let method = classify(detected, &canonical, home);
     Installation {
         executable: detected.path.clone(),
         canonical,
@@ -117,16 +112,12 @@ fn inspect(
     }
 }
 
-fn classify(
-    detected: &Detected,
-    canonical: &Path,
-    home: Option<&Path>,
-    npm_owns: &dyn Fn(&Path, &Path) -> bool,
-) -> InstallMethod {
+fn classify(detected: &Detected, canonical: &Path, home: Option<&Path>) -> InstallMethod {
     let harness = detected.harness;
     let package = npm_package(harness);
-    // The bin entry and package root must belong to the same prefix. A package
-    // symlink into pnpm's store (or npm link) is not proof of npm ownership.
+    // Recognize npm-compatible layouts, including manually copied packages.
+    // The bin entry and canonical package root must share a prefix; package
+    // symlinks into pnpm's store (or npm link) are unsupported.
     if let Some(bin) = detected
         .path
         .parent()
@@ -148,7 +139,6 @@ fn classify(
                             == Some(package_dir.as_path())
                         && target
                             .is_some_and(|target| same_file(&package_dir.join(target), canonical))
-                        && npm_owns(prefix, &root)
                     {
                         return InstallMethod::NpmGlobal {
                             prefix: prefix.to_owned(),
@@ -156,7 +146,7 @@ fn classify(
                         };
                     }
                 }
-                return unknown("npm-shaped installation lacks matching package/bin metadata or npm global ownership probes failed");
+                return unknown("npm-shaped installation lacks matching package/bin metadata or canonical package layout");
             }
         }
     }
@@ -229,7 +219,7 @@ fn classify(
             };
         }
     }
-    unknown("installation ownership is unverified (standalone copy, custom root, or unsupported manager/wrapper)")
+    unknown("installation layout is unrecognized (standalone copy, custom root, or unsupported manager/wrapper)")
 }
 
 #[cfg(test)]
@@ -269,7 +259,6 @@ mod tests {
                     raw_version: None,
                 },
                 Some(&self.0),
-                &|_, _| true,
             )
         }
     }
@@ -299,8 +288,9 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn npm_uses_exact_bin_metadata_and_owning_prefix_for_every_harness() {
+    fn npm_compatible_manual_layouts_preserve_prefix_for_every_harness() {
         let f = Fixture::new();
+        // Assemble files and symlinks manually: npm is neither run nor required.
         for harness in Harness::ALL {
             for prefix in ["nvm/versions/node/v24", "custom prefix"] {
                 let prefix = format!("{prefix}/{}", harness.key());
@@ -316,11 +306,7 @@ mod tests {
                     version: None,
                     raw_version: None,
                 };
-                let installation = inspect(&detected, Some(&f.0), &|actual_prefix, root| {
-                    assert_eq!(actual_prefix, f.0.join(&prefix));
-                    assert_eq!(root, f.0.join(&prefix).join("lib/node_modules"));
-                    true
-                });
+                let installation = inspect(&detected, Some(&f.0));
                 assert_eq!(
                     installation.method,
                     InstallMethod::NpmGlobal {
@@ -328,26 +314,31 @@ mod tests {
                         package: npm_package(harness).into()
                     }
                 );
+                for (label, invalid_metadata) in [
+                    ("wrong bin target", metadata.to_string().replace("cli.js", "other.js")),
+                    ("wrong package name", serde_json::json!({"name": "other-package", "bin": { harness.key(): "cli.js" }}).to_string()),
+                    ("malformed metadata", "{".into()),
+                ] {
+                    std::fs::write(&metadata_path, invalid_metadata).unwrap();
+                    assert!(matches!(
+                        inspect(&detected, Some(&f.0)).method,
+                        InstallMethod::Unknown { .. }
+                    ), "{label}");
+                    std::fs::write(&metadata_path, metadata.to_string()).unwrap();
+                }
+                std::fs::remove_file(&metadata_path).unwrap();
                 assert!(matches!(
-                    inspect(&detected, Some(&f.0), &|_, _| false).method,
+                    inspect(&detected, Some(&f.0)).method,
                     InstallMethod::Unknown { .. }
                 ));
-                std::fs::write(
-                    metadata_path,
-                    metadata.to_string().replace("cli.js", "other.js"),
-                )
-                .unwrap();
-                assert!(matches!(
-                    f.inspect(harness, path).method,
-                    InstallMethod::Unknown { .. }
-                ));
+                std::fs::write(&metadata_path, metadata.to_string()).unwrap();
             }
         }
     }
 
     #[test]
     #[cfg(unix)]
-    fn pnpm_store_and_linked_packages_do_not_prove_npm_ownership() {
+    fn pnpm_store_and_linked_package_layouts_are_unsupported() {
         let f = Fixture::new();
         let target = f.file("store/.pnpm/codex/bin/codex.js", "node");
         f.file(
@@ -366,7 +357,7 @@ mod tests {
             raw_version: None,
         };
         assert!(matches!(
-            inspect(&detected, Some(&f.0), &|_, _| panic!("must not probe npm")).method,
+            inspect(&detected, Some(&f.0)).method,
             InstallMethod::Unknown { .. }
         ));
     }

@@ -68,22 +68,27 @@ Run `blue apply` or launch through `blue run` to see the normalized version, sel
 In a terminal, `blue run` and `blue apply` identify the detected executable's
 installation method before offering repair. The prompt shows the active path,
 method, exact release, and command. The default answer is **No**. Blue never
-falls back to another installer if ownership is unverified or an installer fails.
+falls back to another installer if the installation method is unrecognized or
+unsupported, or if an installer fails.
 
-| Installation | Ownership evidence | Repair |
+| Installation | Recognition evidence | Repair |
 | --- | --- | --- |
-| npm global (all four harnesses, Unix) | `<prefix>/bin/<agent>` resolves to the expected package under `<prefix>/lib/node_modules`; package name and `bin` metadata match, and read-only npm global root/prefix probes confirm that prefix | `npm install -g --prefix <owned-prefix> <package>@<exact-version>` |
+| npm-compatible global layout (all four harnesses, Unix) | `<prefix>/bin/<agent>` resolves to the expected package under `<prefix>/lib/node_modules`; package name and `bin` target match the resolved executable, and the package directory equals its canonical path (no linked or redirected package directories) | `npm install -g --prefix <detected-prefix> <package>@<exact-version>` |
 | Claude native (Unix) | Native binary in `~/.local/share/claude/versions/<version>`, reached through `~/.local/bin/claude`; relative symlink chains are resolved | Detected executable: `install <exact-version>` |
 | Homebrew Claude/Codex/OpenCode | Resolved target under the matching `Caskroom` or `Cellar` package, including custom prefixes | Refuse automatic arbitrary-version pinning; use manual vendor/Homebrew guidance |
 | Kimi standalone (Unix) | Regular native binary at the documented default `~/.kimi-code/bin/kimi`, without redirected parent directories | Official installer with exact `--version`, `KIMI_INSTALL_DIR`, and `KIMI_NO_MODIFY_PATH=1`; the child PATH excludes the installation's bin so the installer skips legacy migration |
 | Kimi legacy uv tool | Target belongs to a Python environment with `uv-receipt.toml` identifying `kimi-cli` and `pyvenv.cfg` | Refuse: legacy Python versions are not the current npm release line |
 | OpenCode standalone (Unix) | Regular native binary at the default `~/.opencode/bin/opencode`, without redirected parent directories | Detected executable: `upgrade <exact-version> --method curl` |
-| Codex standalone/release download, custom Kimi/OpenCode roots, pnpm/bun wrappers, Windows wrappers/native layouts, other unverified copies | No supported ownership proof | Refuse automatic replacement; manually install a policy-compatible release at the active path |
+| Codex standalone/release download, custom Kimi/OpenCode roots, pnpm/bun wrappers, Windows wrappers/native layouts, other unrecognized layouts | No supported installation layout | Refuse automatic replacement; manually install a policy-compatible release at the active path |
+
+A manually copied package matching the npm-compatible layout is also eligible
+for npm repair. Recognition uses only filesystem checks and does not prove npm
+originally installed the package; detection does not run npm or any other command.
 
 The standalone installers leave no ownership receipt. Blue limits recognition
 to their documented default layout and native executable format; arbitrary files
 and release-style filenames do not establish provenance. Windows layouts remain
-unsupported for automatic repair until equivalent ownership checks are available.
+unsupported for automatic repair until equivalent layout checks are available.
 
 Supported repair methods currently require **npm for read-only release lookup**,
 even for native installations. Blue resolves an exact published version with
@@ -126,7 +131,7 @@ manager can still replace the installed binary. The selected compatibility
 version's atomic operation set owns this control, so a later harness version can
 adopt a changed vendor mechanism without altering older intervals.
 
-Daemon runs, redirected/non-interactive commands, and `blue apply --yes` never install native CLIs. They fail closed and print ownership-aware manual guidance for an operator.
+Daemon runs, redirected/non-interactive commands, and `blue apply --yes` never install native CLIs. They fail closed and print installation-aware manual guidance for an operator.
 
 ## Breaking-version profiles
 
