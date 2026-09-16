@@ -2,13 +2,21 @@ name: Release
 
 on:
   push:
-    tags: ["v*.*.*"]
+    # `v*.*.*` on its own glob-matches `v0.2.0-rc.g1a2b3c4` too, so creating a
+    # candidate tag would fire a second, non-candidate run that dies at
+    # check-release-version.sh. The negation also closes the standing footgun
+    # where any hand-made prerelease tag starts the full publish pipeline.
+    tags: ["v*.*.*", "!v*-*"]
   workflow_dispatch:
     inputs:
       tag:
         description: vMAJOR.MINOR.PATCH version to assemble from the selected ref without publishing
         required: true
         default: v0.1.0
+      candidate:
+        description: Publish a release candidate from the selected ref — a prerelease Release carrying every artifact. Ignores `tag`.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,6 +37,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
       ref: ${{ steps.version.outputs.ref }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -37,13 +46,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then tag="$GITHUB_REF_NAME"; publish=true; else tag="${{ inputs.tag }}"; publish=false; fi
+          if [[ "${{ inputs.candidate }}" == "true" ]]; then
+            # The candidate name is resolved exactly as dev-image.yml:51-64
+            # resolves it, with the extractor check-release-version.sh uses, so a
+            # candidate image and a candidate Release cut from the same SHA carry
+            # the identical version. The tag input is ignored: a candidate names
+            # itself off the tree and the commit, never off an operator's typing.
+            version="$(sed -n '/\[workspace.package\]/,/^$/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+            if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "could not read a MAJOR.MINOR.PATCH workspace version (got '$version')" >&2
+              exit 1
+            fi
+            tag="v${version}-rc.g$(git rev-parse --short=7 HEAD)"
+            publish=true
+            prerelease=true
+          elif [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            tag="$GITHUB_REF_NAME"; publish=true; prerelease=false
+          else
+            tag="${{ inputs.tag }}"; publish=false; prerelease=false
+          fi
           scripts/check-release-version.sh "$tag"
           # A draft Release for this tag is expected — release-please creates it
           # when the release PR merges. A *published* one means the tag already
           # shipped, and rebuilding over it would stomp a live release's assets
           # (`upload --clobber`, `edit --latest`). Check before ~30 minutes of
-          # builds, not after.
+          # builds, not after. For a candidate this means re-cutting the same
+          # commit refuses rather than replacing a published candidate's assets.
           if [[ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)" == "false" ]]; then
             echo "$tag is already published; refusing to rebuild over it" >&2
             exit 1
@@ -52,6 +80,7 @@ jobs:
             echo "tag=$tag"
             echo "version=${tag#v}"
             echo "publish=$publish"
+            echo "prerelease=$prerelease"
             echo "ref=$GITHUB_SHA"
           } >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -61,7 +90,12 @@ jobs:
           cache-dependency-path: apps/docs/package-lock.json
       - run: npm ci
         working-directory: apps/docs
-      - run: npm run check:release -- "${{ steps.version.outputs.version }}"
+      # `apps/docs/<version>/` is frozen at release time by design, so a
+      # candidate cut before the freeze has no snapshot to check — and
+      # check-release-snapshot.mjs hard-rejects a non-X.Y.Z string anyway.
+      # `npm run validate` stays: it is version-independent.
+      - if: steps.version.outputs.prerelease != 'true'
+        run: npm run check:release -- "${{ steps.version.outputs.version }}"
         working-directory: apps/docs
       - run: npm run validate
         working-directory: apps/docs
@@ -103,10 +137,20 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: ${{ matrix.target }}
+      # Only for a candidate, and written through $GITHUB_ENV rather than a job
+      # `env:` with a ternary — an empty BLUE_BUILD_VERSION is still *set*, and
+      # `option_env!` would bake an empty version into every release binary.
+      - if: needs.validate.outputs.prerelease == 'true'
+        shell: bash
+        run: echo "BLUE_BUILD_VERSION=${{ needs.validate.outputs.version }}" >> "$GITHUB_ENV"
       - run: cargo build --locked --release -p gh-cli --target ${{ matrix.target }}
       - if: runner.os != 'Windows'
         run: |
-          target/${{ matrix.target }}/release/blue version
+          # Exact match, not a smoke test: this is the only place that proves a
+          # candidate archive contains a binary calling itself a candidate.
+          actual="$(target/${{ matrix.target }}/release/blue version)"
+          echo "$actual"
+          test "$actual" = "Blue metaharness ${{ needs.validate.outputs.version }}"
           mkdir release
           cp target/${{ matrix.target }}/release/blue release/blue
           cp LICENSE release/LICENSE
@@ -114,7 +158,10 @@ jobs:
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          target/${{ matrix.target }}/release/blue.exe version
+          $actual = & target/${{ matrix.target }}/release/blue.exe version
+          Write-Host $actual
+          $expected = "Blue metaharness ${{ needs.validate.outputs.version }}"
+          if ($actual -ne $expected) { throw "blue version printed '$actual', expected '$expected'" }
           New-Item -ItemType Directory release
           Copy-Item target/${{ matrix.target }}/release/blue.exe release/blue.exe
           Copy-Item LICENSE release/LICENSE
@@ -142,6 +189,15 @@ jobs:
       mode: registry
       enable-arm: true
       push: ${{ needs.validate.outputs.publish == 'true' }}
+      # Pin the resolved SHA, as `binaries` and `publish` do. A candidate is cut
+      # from a branch, which can move mid-run; the tag names one commit.
+      ref: ${{ needs.validate.outputs.ref }}
+      # A release digest only ever lands in ghcr.io/blocksorg/blue. Candidates go
+      # to the separate -rc package #113 established, and never move `latest`
+      # (metadata-action already collapses the rollup tags for a prerelease, but
+      # `tag-latest` is unconditional and has to be turned off explicitly).
+      image-name: ${{ needs.validate.outputs.prerelease == 'true' && format('{0}-rc', github.repository) || '' }}
+      tag-latest: ${{ needs.validate.outputs.prerelease != 'true' }}
       tag: ${{ needs.validate.outputs.tag }}
       deployment-version: ${{ needs.validate.outputs.version }}
 
@@ -175,7 +231,13 @@ jobs:
       - run: |
           cp scripts/install.sh scripts/install.ps1 release/
           BLUE_USE_PUBLISHED_SDK=${{ needs.validate.outputs.publish == 'true' && '1' || '0' }} scripts/package-deployment.sh "${{ needs.validate.outputs.tag }}" release
-          helm package deploy/helm --destination release
+          # --version/--app-version explicitly: `helm package` names the .tgz
+          # from Chart.yaml, but the push below names it from the tag. Those
+          # agree only because set-version.sh keeps them in lockstep, and a
+          # candidate's tag deliberately carries more than the tree does.
+          helm package deploy/helm --destination release \
+            --version "${{ needs.validate.outputs.version }}" \
+            --app-version "${{ needs.validate.outputs.version }}"
           cd release
           sha256sum blue-v*.tar.gz blue-v*.zip blue-deployment-* blue-*.tgz blue-sbom.spdx.json install.sh install.ps1 > SHA256SUMS
       - if: needs.validate.outputs.publish == 'true'
@@ -190,7 +252,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - if: needs.validate.outputs.publish == 'true'
         run: helm push "release/blue-${{ needs.validate.outputs.version }}.tgz" "oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts"
-      - if: needs.validate.outputs.publish == 'true'
+      - if: needs.validate.outputs.publish == 'true' && needs.validate.outputs.prerelease != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -202,6 +264,42 @@ jobs:
           fi
           gh release upload "${{ needs.validate.outputs.tag }}" release/* --clobber
           gh release edit "${{ needs.validate.outputs.tag }}" --draft=false --latest
+      - if: needs.validate.outputs.publish == 'true' && needs.validate.outputs.prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `--prerelease` is the entire isolation mechanism, not a label:
+          # GET /releases/latest is defined as the most recent non-prerelease,
+          # non-draft Release, and that is what both installers follow when
+          # BLUE_VERSION is unset. So `--latest` must never appear here.
+          #
+          # No `--verify-tag`: the candidate tag does not exist yet. `--target`
+          # creates it at the commit `validate` resolved, so the tag, the six
+          # archives, the image and the chart all name one commit.
+          gh release create "${{ needs.validate.outputs.tag }}" \
+            --target "${{ needs.validate.outputs.ref }}" \
+            --prerelease --generate-notes --title "${{ needs.validate.outputs.tag }}"
+          gh release upload "${{ needs.validate.outputs.tag }}" release/* --clobber
+          {
+            echo "## Release candidate published"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`${{ needs.validate.outputs.version }}\` |"
+            echo "| Commit | \`${{ needs.validate.outputs.ref }}\` |"
+            echo "| Release | prerelease \`${{ needs.validate.outputs.tag }}\` |"
+            echo "| Image | \`${{ needs.image.outputs.image }}:${{ needs.image.outputs.version }}\` |"
+            echo "| Digest | \`${{ needs.image.outputs.digest }}\` |"
+            echo
+            echo "Install it — \`latest\` still resolves to the newest real release:"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh \\"
+            echo "  | BLUE_VERSION=${{ needs.validate.outputs.version }} sh"
+            echo '```'
+            echo
+            echo "The candidate chart still defaults \`image.repository\` to the **release** package, so deploying it needs \`--set image.repository=ghcr.io/${GITHUB_REPOSITORY,,}-rc\`."
+          } >> "$GITHUB_STEP_SUMMARY"
       - if: needs.validate.outputs.publish != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

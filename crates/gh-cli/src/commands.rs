@@ -67,7 +67,7 @@ fn interactive_terminal() -> bool {
 }
 
 pub(crate) fn version_text() -> String {
-    format!("Blue metaharness {}", env!("CARGO_PKG_VERSION"))
+    format!("Blue metaharness {}", gh_common::blue_version())
 }
 
 pub fn version() -> Result<()> {
@@ -2076,7 +2076,7 @@ fn report_status_with_attempt(
     let body = serde_json::json!({
         "instance_id": id,
         "hostname": hostname,
-        "client_version": env!("CARGO_PKG_VERSION"),
+        "client_version": gh_common::blue_version(),
         "platform": std::env::consts::OS,
         "architecture": std::env::consts::ARCH,
         "config_revision": state.map(|item| item.revision.as_str()),

@@ -16,6 +16,7 @@ pub mod network;
 pub mod path_search;
 pub mod paths;
 pub mod shim;
+pub mod version;
 
 pub use atomic::{
     create_owner_only_dir, create_owner_only_dir_all, prepare_atomic, prepare_atomic_in,
@@ -29,3 +30,4 @@ pub use shim::{
     legacy_managed_shim, managed_shim, render_shim, shim_path, valid_managed_shim, MAX_SHIM_BYTES,
     SHIM_MARKER,
 };
+pub use version::blue_version;

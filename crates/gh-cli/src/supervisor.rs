@@ -1178,7 +1178,7 @@ impl StartupView {
         let mut lines = vec![String::new(), String::new()];
         lines.extend(BLUE_ASCII.map(|line| format!("  {}", accent(line))));
         lines.extend([
-            format!("  Metaharness v{}", env!("CARGO_PKG_VERSION")),
+            format!("  Metaharness v{}", gh_common::blue_version()),
             String::new(),
             format!("  {:<12} {}", "Connection", self.connection),
             format!("  {:<12} {}", "Identity", self.identity),
@@ -4050,7 +4050,7 @@ mod tests {
         };
         let plain = view.frame(false);
         assert!(plain.starts_with("\r\x1b[2K\r\n\r\x1b[2K\r\n\r\x1b[2K   ____  _\r\n"));
-        assert!(plain.contains(&format!("Metaharness v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(plain.contains(&format!("Metaharness v{}", gh_common::blue_version())));
         assert!(plain.contains("Connection"));
         assert!(plain.contains("Starting codex…  Hold Ctrl and press ] for controls."));
         assert!(!plain.contains("\x1b[36m"));
