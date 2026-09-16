@@ -48,7 +48,7 @@ use e2e_slim::{AgentMatrix, AgentSelection, Home};
 /// The current lock-pin version for `agent` (the newest/blessed cell). Read from
 /// the shared lock so it tracks the single source of truth for the pin.
 fn lock_pin_version(agent: &str) -> String {
-    let lock = read_agents_json("agents.lock.json");
+    let lock = read_agents_json("../e2e/agents.lock.json");
     lock.pointer(&format!("/agents/{agent}/version"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or_else(|| panic!("agents.lock.json has no version for {agent}"))
@@ -69,7 +69,7 @@ fn read_agents_json(file: &str) -> serde_json::Value {
 /// managed MCP tool.
 fn cell_args(agent: &str, version: &str, is_pin: bool, prompt: &str) -> Vec<String> {
     let raw = if is_pin {
-        read_agents_json("agents.lock.json")
+        read_agents_json("../e2e/agents.lock.json")
             .pointer(&format!("/agents/{agent}/arguments"))
             .and_then(serde_json::Value::as_array)
             .cloned()
@@ -115,7 +115,10 @@ fn assert_session_uploaded(home: &Home, agent: &str, nonce: &str) {
                 .cloned()
                 .unwrap_or_default();
             items.into_iter().find_map(|item| {
-                if item.get("harness").and_then(serde_json::Value::as_str) != Some(agent) {
+                if item.get("harness").and_then(serde_json::Value::as_str) != Some(agent)
+                    || item.get("user_email").and_then(serde_json::Value::as_str)
+                        != Some(home.email())
+                {
                     return None;
                 }
                 let id = item.get("id").and_then(serde_json::Value::as_str)?;
@@ -129,7 +132,17 @@ fn assert_session_uploaded(home: &Home, agent: &str, nonce: &str) {
                                 == Some("complete")
                         })
                     })
-                    .then(|| id.to_owned())
+                    .then(|| {
+                        let bundle = e2e_slim::parse_session_bundle(&home.download_upload(id));
+                        (bundle
+                            .manifest
+                            .get("harness")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(agent)
+                            && bundle.any_file_contains(nonce.as_bytes()))
+                        .then(|| id.to_owned())
+                    })
+                    .flatten()
             })
         },
     );
@@ -139,9 +152,9 @@ fn assert_session_uploaded(home: &Home, agent: &str, nonce: &str) {
     // would never match.
     let bundle = e2e_slim::parse_session_bundle(&home.download_upload(&id));
     assert!(
-        bundle.any_file_contains(nonce.as_bytes()) || bundle.any_file_contains(b"BLUE_MCP_OK"),
+        bundle.any_file_contains(nonce.as_bytes()),
         "{agent}: uploaded session bundle is not attributable to this invocation: \
-         expected nonce `{nonce}` or BLUE_MCP_OK in {} archived file(s): {}",
+         expected nonce `{nonce}` in {} archived file(s): {}",
         bundle.files.len(),
         bundle.manifest
     );
@@ -193,6 +206,10 @@ fn certify_cell(agent: &str, version: &str) {
         "Invocation marker: {nonce}. Use the blue_certify MCP tool now, then reply with exactly \
          the tool's returned text and nothing else."
     );
+    let markers = home.marker_path();
+    if markers.exists() {
+        std::fs::remove_dir_all(&markers).expect("clearing invocation markers");
+    }
     let output = home.run_agent(agent, &cell_args(agent, version, is_pin, &prompt));
     let combined = format!(
         "{}{}",
@@ -203,7 +220,6 @@ fn certify_cell(agent: &str, version: &str) {
         output.status.success(),
         "`blue run {agent}` exited non-zero:\n{combined}"
     );
-    let markers = Path::new("/tmp/blue-e2e/component-markers");
     assert!(
         markers.join("mcp-started").is_file(),
         "{agent}: mcp-started marker missing (MCP server never launched):\n{combined}"
@@ -245,6 +261,8 @@ fn certify_cell(agent: &str, version: &str) {
         3,
         "{agent}: spend log recorded the inference JWT, not a swapped virtual key: {entry}"
     );
+    drop(home); // Native state and asynchronous children must be clean before recording success.
+    e2e_slim::record_cell("gateway", agent, version);
 }
 
 // The expected upstream model per agent lives in `common::AGENTS` — the

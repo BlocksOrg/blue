@@ -28,6 +28,39 @@ fn bootstrap_login_and_auth_me() {
         .success()
         .stdout(contains("Already logged in"));
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(home.session_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    #[cfg(windows)]
+    {
+        // Local Administrators/SYSTEM are expected; other ordinary accounts are not.
+        let status = std::process::Command::new("powershell.exe")
+            .env("BLUE_TEST_SESSION", home.session_path())
+            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:BLUE_TEST_SESSION
+$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$allowed = @($user, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0')
+foreach ($entry in $acl.Access) {
+  $sid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+  if ($entry.AccessControlType -eq 'Allow' -and $sid -notin $allowed) { throw "Unexpected session ACL principal $sid" }
+}
+"#]).status().expect("checking native session ACL");
+        assert!(
+            status.success(),
+            "session file must be isolated to the disposable account"
+        );
+    }
+
     // `/auth/me` exercises the full JWKS verification path server-side.
     let (status, body) = home.auth_me();
     assert_eq!(

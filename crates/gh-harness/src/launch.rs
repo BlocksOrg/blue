@@ -68,6 +68,69 @@ impl Drop for PtySession {
     }
 }
 
+#[cfg(not(windows))]
+fn pty_command(bin: &Path, args: &[String]) -> Result<CommandBuilder, GhError> {
+    let mut cmd = CommandBuilder::new(bin);
+    cmd.args(args);
+    Ok(cmd)
+}
+
+/// A pseudo-console child is started by `CreateProcessW`, which only accepts a
+/// PE image as its application: handed a batch file it fails with `%1 is not a
+/// valid Win32 application`. Every npm-installed agent on Windows is a
+/// `<name>.cmd` wrapper, so run those the way `cmd.exe` itself would —
+/// matching what `std::process::Command` does for the non-PTY path.
+#[cfg(windows)]
+fn pty_command(bin: &Path, args: &[String]) -> Result<CommandBuilder, GhError> {
+    if !is_batch_file(bin) {
+        let mut cmd = CommandBuilder::new(bin);
+        cmd.args(args);
+        return Ok(cmd);
+    }
+    if let Some(argument) = cmd_reserved_argument(args) {
+        return Err(GhError::other(format!(
+            "cannot pass `{argument}` to `{}`: it is a Windows batch wrapper, and the \
+             command interpreter would interpret `{}` instead of forwarding it. Install a \
+             native build of the agent, or give this argument inside the agent instead.",
+            bin.display(),
+            CMD_RESERVED.iter().collect::<String>(),
+        )));
+    }
+    // `/d` skips AutoRun commands, `/e:ON` keeps command extensions on (npm's
+    // wrappers need them), and `/v:OFF` leaves `!` literal.
+    let comspec =
+        std::env::var_os("ComSpec").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe"));
+    let mut cmd = CommandBuilder::new(comspec);
+    // A quoted batch path as the first token after `/c` triggers cmd's
+    // outer-quote stripping once argv contains additional quotes. Prefix with
+    // CALL so the path's quotes survive (e.g. an npm prefix containing spaces).
+    // CALL reparses its arguments; cmd_reserved_argument above rejects the
+    // expansion and control characters that could change on that second pass.
+    cmd.args(["/d", "/e:ON", "/v:OFF", "/c", "call"]);
+    cmd.arg(bin);
+    cmd.args(args);
+    Ok(cmd)
+}
+
+#[cfg(windows)]
+fn is_batch_file(bin: &Path) -> bool {
+    bin.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    })
+}
+
+/// What `cmd.exe` acts on rather than forwards. Everything else — spaces,
+/// quotes, backslashes — survives the interpreter byte for byte: the wrapper
+/// passes `%*` on unchanged, and the agent parses it back with the same rules
+/// the arguments were quoted under.
+#[cfg(windows)]
+const CMD_RESERVED: &[char] = &['%', '&', '|', '<', '>', '^', '(', ')', '\r', '\n'];
+
+#[cfg(windows)]
+fn cmd_reserved_argument(args: &[String]) -> Option<&String> {
+    args.iter().find(|arg| arg.contains(CMD_RESERVED))
+}
+
 impl PtySession {
     pub fn spawn(
         bin: &Path,
@@ -85,8 +148,7 @@ impl PtySession {
                 pixel_height: 0,
             })
             .map_err(|e| GhError::other(format!("openpty: {e}")))?;
-        let mut cmd = CommandBuilder::new(bin);
-        cmd.args(args);
+        let mut cmd = pty_command(bin, args)?;
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
         }
@@ -360,6 +422,19 @@ static TERMINAL_MODES_ACTIVE: std::sync::atomic::AtomicBool =
 /// can otherwise leave mouse movement and focus changes arriving as input.
 pub const TERMINAL_MODE_RESET: &[u8] = b"\x1b[r\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[<u\x1b[=0u\x1b[>4;0m\x1b[?1l\x1b>\x1b[?1049l\x1b[r\x1b[?25h";
 
+/// ConPTY can leave a Git Bash terminal displaying the child's last frame
+/// after the alternate screen is restored. Clear the restored primary screen
+/// so the next shell prompt cannot be painted over that stale frame.
+#[cfg(windows)]
+const WINDOWS_TERMINAL_SURFACE_RESET: &[u8] = b"\x1b[r\x1b[2J\x1b[H\x1b[?25h";
+
+fn reset_terminal_modes(stdout: &mut impl Write) -> std::io::Result<()> {
+    stdout.write_all(TERMINAL_MODE_RESET)?;
+    #[cfg(windows)]
+    stdout.write_all(WINDOWS_TERMINAL_SURFACE_RESET)?;
+    stdout.flush()
+}
+
 #[cfg(unix)]
 static mut SAVED_TERMIOS: std::mem::MaybeUninit<libc::termios> = std::mem::MaybeUninit::uninit();
 
@@ -410,8 +485,7 @@ impl Drop for TerminalModeGuard {
         #[cfg(unix)]
         TERMINAL_MODES_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         let mut stdout = std::io::stdout();
-        let _ = stdout.write_all(TERMINAL_MODE_RESET);
-        let _ = stdout.flush();
+        let _ = reset_terminal_modes(&mut stdout);
         self.active = false;
     }
 }
@@ -622,5 +696,71 @@ mod tests {
         let output = String::from_utf8_lossy(&output);
         assert!(output.contains("ready"));
         assert!(output.contains(":hello"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_reset_clears_the_restored_primary_screen() {
+        let mut output = Vec::new();
+        reset_terminal_modes(&mut output).unwrap();
+        assert!(output.ends_with(b"\x1b[?1049l\x1b[r\x1b[?25h\x1b[r\x1b[2J\x1b[H\x1b[?25h"));
+    }
+
+    /// npm installs every agent on Windows as a `.cmd` wrapper, and ConPTY
+    /// starts its child through `CreateProcessW`, which rejects one outright.
+    #[test]
+    fn windows_runs_a_batch_agent_through_the_command_interpreter() {
+        let native = pty_command(Path::new(r"C:\agents\codex.exe"), &["--help".into()]).unwrap();
+        assert_eq!(
+            native.get_argv(),
+            &[
+                std::ffi::OsString::from(r"C:\agents\codex.exe"),
+                std::ffi::OsString::from("--help"),
+            ]
+        );
+
+        let batch = pty_command(
+            Path::new(r"C:\Users\dev\AppData\Roaming\npm\codex.CMD"),
+            &["--model".into(), "gpt-5".into()],
+        )
+        .unwrap();
+        let argv = batch.get_argv();
+        assert!(Path::new(&argv[0])
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe")));
+        assert_eq!(
+            &argv[1..],
+            &[
+                std::ffi::OsString::from("/d"),
+                std::ffi::OsString::from("/e:ON"),
+                std::ffi::OsString::from("/v:OFF"),
+                std::ffi::OsString::from("/c"),
+                std::ffi::OsString::from("call"),
+                std::ffi::OsString::from(r"C:\Users\dev\AppData\Roaming\npm\codex.CMD"),
+                std::ffi::OsString::from("--model"),
+                std::ffi::OsString::from("gpt-5"),
+            ]
+        );
+    }
+
+    /// Quotes and spaces survive `cmd.exe` unchanged, so they stay on the
+    /// batch path; what it would interpret is refused instead of mangled.
+    #[test]
+    fn only_arguments_the_interpreter_would_reinterpret_are_refused() {
+        let batch = Path::new(r"C:\npm\claude.cmd");
+        assert!(pty_command(batch, &[r#"fix the "a b" module"#.into()]).is_ok());
+        assert!(pty_command(batch, &["--dir".into(), r"C:\code\app".into()]).is_ok());
+        for reserved in ["a&b", "%USERPROFILE%", "a|b", "a>b", "a^b", "(a)", "a\r\nb"] {
+            assert!(
+                pty_command(batch, &[reserved.into()]).is_err(),
+                "{reserved} would not reach the agent intact"
+            );
+            // A native agent takes the same argument unchanged.
+            assert!(pty_command(Path::new(r"C:\npm\claude.exe"), &[reserved.into()]).is_ok());
+        }
     }
 }
