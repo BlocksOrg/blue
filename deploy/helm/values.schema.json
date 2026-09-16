@@ -36,7 +36,33 @@
           "properties": {
             "mode": { "enum": ["mtls", "insecure-http"] },
             "serverSecret": { "type": "string" },
-            "clientSecret": { "type": "string" }
+            "clientSecret": { "type": "string" },
+            "clientSecretFormat": { "enum": ["combined", "split"] },
+            "certManager": {
+              "type": "object",
+              "required": ["enabled"],
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "issuerRef": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "kind": { "enum": ["Issuer", "ClusterIssuer"] }
+                  }
+                },
+                "duration": { "type": "string", "minLength": 1 },
+                "renewBefore": { "type": "string", "minLength": 1 },
+                "caDuration": { "type": "string", "minLength": 1 },
+                "privateKey": {
+                  "type": "object",
+                  "required": ["algorithm", "size"],
+                  "properties": {
+                    "algorithm": { "enum": ["RSA", "ECDSA", "Ed25519"] },
+                    "size": { "type": "integer" }
+                  }
+                }
+              }
+            }
           }
         },
         "existingSecret": { "type": "string" },
@@ -101,9 +127,10 @@
           } } } },
           {
           "if": { "properties": { "internalTransport": { "properties": { "mode": { "const": "mtls" } } } } },
-          "then": { "properties": { "internalTransport": { "properties": {
-            "serverSecret": { "minLength": 1 }, "clientSecret": { "minLength": 1 }
-          } } } }
+          "then": { "properties": { "internalTransport": { "anyOf": [
+            { "required": ["certManager"], "properties": { "certManager": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } } },
+            { "properties": { "serverSecret": { "minLength": 1 }, "clientSecret": { "minLength": 1 } } }
+          ] } } }
         }] }
       }, {
         "if": { "properties": { "production": { "const": true } } },
