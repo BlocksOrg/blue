@@ -13,6 +13,6 @@
     "@emnapi/core": "^1.11.3",
     "@emnapi/wasi-threads": "^1.2.3",
     "astro": "^7.2.10",
-    "typescript": "^5.9.2"
+    "typescript": "^7.0.2"
   }
 }
