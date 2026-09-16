@@ -20,6 +20,9 @@ printf '%s\n' 'extendedKeyUsage=clientAuth' > "$out/client.ext"
 openssl x509 -req -days 2 -sha256 -in "$out/client.csr" \
   -CA "$out/ca.crt" -CAkey "$out/ca.key" -CAcreateserial \
   -extfile "$out/client.ext" -out "$out/client.crt"
+# Keep all three: client.pem is the proxy's combined-identity default, and the
+# separate files back both its split cert/key path and the Node specs, whose
+# https client wants cert and key apart.
 cat "$out/client.crt" "$out/client.key" > "$out/client.pem"
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -sha256 \
