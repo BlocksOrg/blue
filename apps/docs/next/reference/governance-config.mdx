@@ -100,6 +100,8 @@ accepted risk.
 
 The presence of top-level `gateway` enables gateway mode for every allowed coding agent and connects Blue to an upstream gateway operated by your organization. Blue does not bundle that gateway. `litellm` is the first and currently only supported type. The Control API injects `proxy_url` and the authenticated user's session-bound inference `token`; each agent inherits its model from its own `managed_config`, or leaves model selection to the agent when none is managed. `auth_style` remains on the wire, but `bearer` is the only supported client-to-proxy value.
 
+OpenCode is the exception to leaving model selection to the agent. Its governed runtime config merges over the user's own, so an unpinned model would survive next to the governed provider it no longer resolves against. When OpenCode has no managed model, Blue keeps the agent's native model if the gateway serves it, otherwise pins a governed default, and warns at launch so the gap stays visible. Set `managed_config.available_models` to the list your gateway actually serves to control that catalog.
+
 ## Managed packages
 
 Harness policies may declare a semver `version_requirement`. Blue parses the installed CLI's native version output and fails before changing files or launching when the version is missing, unparsable, or outside that range. Package adapters may add ordered `variants` with inclusive `introduced` and optional exclusive `before` boundaries; the top-level adapter fields are the fallback layout. See [Harness version compatibility](/next/concepts/harness-version-compatibility) for interval migration and lifecycle behavior.
