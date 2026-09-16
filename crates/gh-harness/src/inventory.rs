@@ -61,11 +61,16 @@ impl HarnessInventoryEntry {
     }
 
     /// Allowed by policy, known to this client, and present on PATH — the
-    /// installed version may still be wrong. This is the set the interactive
-    /// surfaces may *offer*, because selecting one runs the version repair.
+    /// installed version may still be wrong. These are installed candidates
+    /// for version repair.
     /// [`eligible`](Self::eligible) is the stricter "can launch right now" set.
     pub fn repairable(&self) -> bool {
         self.api_allowed && self.client_supported && self.installed
+    }
+
+    /// Allowed, client-supported candidates for fresh installation.
+    pub fn installable(&self) -> bool {
+        self.api_allowed && self.client_supported && !self.installed
     }
 
     pub fn eligible(&self) -> bool {
@@ -170,12 +175,21 @@ impl HarnessInventory {
             .collect()
     }
 
-    /// Every harness a picker may offer, compatible or not. Superset of
+    /// Installed repair candidates, compatible or not. Superset of
     /// [`eligible_names`](Self::eligible_names).
     pub fn repairable_names(&self) -> Vec<String> {
         self.entries
             .iter()
             .filter(|entry| entry.repairable())
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// Terminal selections may repair installed agents or install absent ones.
+    pub fn selectable_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.repairable() || entry.installable())
             .map(|entry| entry.name.clone())
             .collect()
     }
@@ -279,6 +293,32 @@ mod tests {
         // codex/claude are allowed but not installed, kimi is installed but not
         // allowed, future-agent is allowed but unknown to this client.
         assert!(inventory.repairable_names().is_empty());
+    }
+
+    #[test]
+    fn installable_truth_table_and_selectable_order() {
+        let mut inventory = HarnessInventory::discover_with_detector(
+            &["codex".into(), "claude".into(), "future-agent".into()],
+            |_| None,
+        );
+        assert_eq!(inventory.selectable_names(), vec!["codex", "claude"]);
+        assert!(inventory.eligible_names().is_empty());
+        let entry = &mut inventory.entries[0];
+        for allowed in [false, true] {
+            for supported in [false, true] {
+                for installed in [false, true] {
+                    entry.api_allowed = allowed;
+                    entry.client_supported = supported;
+                    entry.installed = installed;
+                    assert_eq!(entry.installable(), allowed && supported && !installed);
+                    if !installed {
+                        assert!(!entry.eligible());
+                    }
+                }
+            }
+        }
+        assert_eq!(inventory.selectable_names(), vec!["codex", "claude"]);
+        assert_eq!(inventory.repairable_names(), vec!["codex"]);
     }
 
     #[test]
