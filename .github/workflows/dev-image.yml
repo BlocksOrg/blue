@@ -1,0 +1,123 @@
+name: Dev image
+
+# Ad-hoc release candidate image, cut from any ref on demand.
+#
+# This publishes ONE artifact — the multi-arch deployment image — to a separate
+# GHCR package, `ghcr.io/blocksorg/blue-rc`. It creates no git tag, no GitHub
+# Release, no CLI archives, no chart and no deployment bundle, and it never
+# moves `latest`. Nothing it produces can be mistaken for a release: a release
+# digest only ever lands in `ghcr.io/blocksorg/blue`.
+#
+# The candidate is named `<workspace version>-rc.g<short sha>` — the version is
+# read with the same extractor `scripts/check-release-version.sh` and `ci.yml`
+# use, so a candidate always carries the version the release gate will later
+# validate, and the short SHA makes repeated cuts of the same version distinct.
+#
+# Access control is `workflow_dispatch` itself: dispatching requires write
+# access to the repository, so only a maintainer can pick the ref that gets
+# built. Do not add other triggers without a guard job — `deploy/Dockerfile`
+# runs with `packages: write` here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable-arm:
+        description: Also build linux/arm64 on a native arm runner. Off by default — candidates are usually pulled on amd64 and this roughly doubles the spend.
+        type: boolean
+        default: false
+
+# Serialize per ref: two overlapping cuts of the same branch would race to
+# publish tags derived from the same SHA.
+concurrency:
+  group: dev-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.candidate.outputs.tag }}
+      version: ${{ steps.candidate.outputs.version }}
+      sha: ${{ steps.candidate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same one-liner as scripts/check-release-version.sh:12 — scoped to the
+          # [workspace.package] section so [workspace.dependencies] can't match.
+          version="$(sed -n '/\[workspace.package\]/,/^$/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "could not read a MAJOR.MINOR.PATCH workspace version (got '$version')" >&2
+            exit 1
+          fi
+          sha="$(git rev-parse HEAD)"
+          # `rc.g<sha7>` is a valid semver prerelease, which is what keeps this
+          # off the rollup tags: metadata-action rewrites {{major}} and
+          # {{major}}.{{minor}} to {{version}} for a prerelease, so all three
+          # semver lines collapse onto the one candidate tag. A candidate must
+          # never squat `0.1.0`, `0.1` or `0` — those belong to the release.
+          candidate="${version}-rc.g$(git rev-parse --short=7 HEAD)"
+          {
+            echo "version=${candidate}"
+            echo "tag=v${candidate}"
+            echo "sha=${sha}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Cutting ${candidate} from ${sha}"
+
+  image:
+    needs: resolve
+    uses: ./.github/workflows/images.yml
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    with:
+      mode: registry
+      push: true
+      enable-arm: ${{ inputs.enable-arm }}
+      # Pin the resolved SHA rather than re-resolving the branch: the tag names a
+      # specific commit and the build must match it even if the branch moves.
+      ref: ${{ needs.resolve.outputs.sha }}
+      image-name: ${{ github.repository }}-rc
+      tag: ${{ needs.resolve.outputs.tag }}
+      tag-latest: false
+      deployment-version: ${{ needs.resolve.outputs.version }}
+
+  report:
+    needs: [resolve, image]
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+          VERSION: ${{ needs.image.outputs.version }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Candidate image published"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Commit | \`${SHA}\` |"
+            echo "| Image | \`${IMAGE}:${VERSION}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+            echo
+            echo "No git tag was created, no GitHub Release was published, and \`latest\` was not moved."
+            echo
+            echo "Deploy it — production mode requires the digest, not the tag:"
+            echo
+            echo '```bash'
+            echo "helm upgrade --install blue oci://ghcr.io/blocksorg/charts/blue \\"
+            echo "  --set image.repository=${IMAGE} \\"
+            echo "  --set image.digest=${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

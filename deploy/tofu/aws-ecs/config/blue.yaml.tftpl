@@ -56,7 +56,6 @@ gateway:
   inference_jwt:
     issuer: os.environ/HARNESS_GATEWAY_JWT_ISSUER
     audience: os.environ/HARNESS_GATEWAY_JWT_AUDIENCE
-    active_kid: os.environ/HARNESS_GATEWAY_JWT_ACTIVE_KID
   secret_encryption:
     provider: environment
     key: os.environ/HARNESS_GATEWAY_ENCRYPTION_KEY

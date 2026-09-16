@@ -23,7 +23,7 @@ use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::Serialize;
 
 /// Key id shared by the signing header and the served JWK. Must byte-match the
-/// `kid` in `fixtures/jwks/jwks.json`.
+/// `kid` in `tests/fixtures/jwt/jwks.json`.
 pub const KID: &str = "e2e-slim-rsa-1";
 /// Token issuer. Must byte-match compose `HARNESS_AUTH_ISSUER`.
 pub const ISSUER: &str = "https://e2e-slim.blue.test/";
@@ -38,7 +38,7 @@ pub const SCOPES: &str = "governance:read session:write client-status:write";
 
 /// Committed, **test-only** RSA private key (PKCS#8 PEM). Signs the RS256 user
 /// tokens; the matching public JWK is served by `jwks-server.mjs`.
-const SIGNING_KEY_PEM: &[u8] = include_bytes!("../fixtures/jwks/jwt-signing-key.pem");
+const SIGNING_KEY_PEM: &[u8] = include_bytes!("../../fixtures/jwt/signing-key.pem");
 
 /// Handle to the running slim stack, resolved from the environment.
 pub struct Stack {

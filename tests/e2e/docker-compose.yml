@@ -150,9 +150,7 @@ services:
       HARNESS_GATEWAY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       HARNESS_GATEWAY_JWT_ISSUER: http://127.0.0.1:8080
       HARNESS_GATEWAY_JWT_AUDIENCE: blue-inference-proxy
-      HARNESS_GATEWAY_JWT_ACTIVE_KID: e2e-slim-rsa-1
-      HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /gateway-jwt/jwt-signing-key.pem
-      HARNESS_GATEWAY_JWT_JWKS_FILE: /gateway-jwt/jwks.json
+      HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /gateway-jwt/signing-key.pem
       HARNESS_GATEWAY_JWKS_URL: https://127.0.0.1:8082/internal/gateway/jwks
       HARNESS_INFERENCE_PROXY_URL: http://blue:8081
       HARNESS_INFERENCE_PROXY_HEALTH_URL: http://127.0.0.1:8081
@@ -162,7 +160,13 @@ services:
       HARNESS_INTERNAL_TLS_KEY_FILE: /certs/tls.key
       HARNESS_INTERNAL_TLS_CLIENT_CA_FILE: /certs/ca.crt
       HARNESS_INTERNAL_CA_FILE: /certs/ca.crt
-      HARNESS_PROXY_CLIENT_IDENTITY_FILE: /certs/client.pem
+      # The proxy accepts its client identity as one combined file or as a
+      # separate cert/key pair. Default to combined, the layout the chart ships;
+      # export BLUE_E2E_PROXY_IDENTITY_FILE= plus the CERT/KEY pair to run the
+      # same stack against the split path. Blank reads as unset.
+      HARNESS_PROXY_CLIENT_IDENTITY_FILE: ${BLUE_E2E_PROXY_IDENTITY_FILE-/certs/client.pem}
+      HARNESS_PROXY_CLIENT_CERT_FILE: ${BLUE_E2E_PROXY_CERT_FILE-}
+      HARNESS_PROXY_CLIENT_KEY_FILE: ${BLUE_E2E_PROXY_KEY_FILE-}
       HARNESS_GATEWAY_RESOLVER_URL: https://127.0.0.1:8082/internal/gateway/resolve
       HARNESS_GATEWAY_EVENT_URL: https://127.0.0.1:8082/internal/gateway/events
       HARNESS_GATEWAY_CREDENTIAL_INVALID_URL: https://127.0.0.1:8082/internal/gateway/credential-invalid
@@ -185,7 +189,7 @@ services:
       - ./fixtures/blue.yaml:/etc/blue/blue.yaml:ro
       - package-fixture:/fixtures:ro
       - mtls-certs:/certs:ro
-      - ../e2e-slim/fixtures/jwks:/gateway-jwt:ro
+      - ../fixtures/jwt:/gateway-jwt:ro
       - ./artifacts/provisioner:/e2e-provisioner-state
     depends_on:
       mtls-certs: { condition: service_completed_successfully }

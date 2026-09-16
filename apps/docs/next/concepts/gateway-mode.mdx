@@ -89,9 +89,7 @@ gateway:
   inference_jwt:
     issuer: https://api.blue.example.com
     audience: blue-inference-proxy
-    active_kid: gateway-2026-09
     private_key_file: /var/run/blue/gateway-jwt/signing-key.pem
-    jwks_file: /var/run/blue/gateway-jwt/jwks.json
   secret_encryption:
     provider: aws-kms
     key_id: arn:aws:kms:us-west-2:123456789012:key/example
@@ -115,6 +113,19 @@ invalid rotations retain the last-known-good configuration. The Control API
 also pins the token's `sub`, `client_id`, and `azp` claims to the configured
 proxy client id.
 
+The proxy's client certificate and private key may arrive as one combined PEM
+(`HARNESS_PROXY_CLIENT_IDENTITY_FILE`) or as a separate pair
+(`HARNESS_PROXY_CLIENT_CERT_FILE` and `HARNESS_PROXY_CLIENT_KEY_FILE`), matching
+the split files the Control API already takes. Configure exactly one of the two;
+setting both, or only half of the pair, is a startup error that names the
+offending variable. Rotating either file of a split pair is picked up by the same
+30-second reload.
+
+The Helm chart can issue this pair for you: with
+`blue.internalTransport.certManager.enabled`, it declares the `Issuer` and
+`Certificate` resources and cert-manager generates and renews both certificates,
+so no Secret has to be made by hand.
+
 `insecure-http` is available only as a deliberate trusted-network tradeoff.
 OAuth M2M and NetworkPolicy isolation remain mandatory, but virtual keys are
 plaintext on the wire and there is no client-certificate check. A VPC or an API
@@ -130,7 +141,7 @@ gaps before selecting it.
 | Provisioner | In-process built-in or pinned deployment-trusted executable selected by `gateway.provisioner.type` |
 | Secret encryption | Environment key for development or AWS KMS key ID for production envelope encryption |
 | `HARNESS_PROXY_OAUTH_CLIENT_SECRET` | Client-credentials secret the inference proxy uses to obtain a Control API token (shared with the dashboard seed) |
-| Gateway JWT key ring | Active RS256 private key plus a JWKS containing its public key and retained rotation keys |
+| Gateway JWT key ring | Active RS256 private key, plus an optional previous key during a rotation. The Control API works out the published JWKS from them |
 | `HARNESS_GATEWAY_JWKS_URL` | M2M-protected internal Control API endpoint used by the proxy to verify inference JWTs |
 | `internal_allowed_client_id` | OAuth client id (`sub`) the Control API accepts on the internal resolver; defaults to `blue-inference-proxy` |
 | `HARNESS_GATEWAY_LOG_URL` | Internal Control API request-log ingestion endpoint; omit to disable egress |

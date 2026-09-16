@@ -46,6 +46,21 @@ on:
         description: Registry mode — release tag (vX.Y.Z) the published image tags are derived from.
         type: string
         default: ""
+      tag-latest:
+        description: >-
+          Registry mode — also tag the manifest `latest`. metadata-action
+          collapses the three semver patterns onto `{{version}}` when `tag` is a
+          prerelease, so those can never produce a rollup tag; this raw one is
+          unconditional, so a candidate build must turn it off explicitly.
+        type: boolean
+        default: true
+      ref:
+        description: >-
+          Commit SHA or ref to build. Defaults to the ref the calling workflow
+          was triggered on, which is wrong for any caller whose event ref is not
+          the code under test (`issue_comment` resolves to the default branch).
+        type: string
+        default: ""
       deployment-version:
         description: BLUE_DEPLOYMENT_VERSION build-arg baked into the image.
         type: string
@@ -58,6 +73,15 @@ on:
       artifact-name:
         description: Artifact mode — name of the uploaded image tarball artifact.
         value: ${{ inputs.artifact-name }}
+      image:
+        description: Registry mode — fully-qualified image repository that was pushed.
+        value: ${{ jobs.setup.outputs.image }}
+      version:
+        description: Registry mode — primary tag applied to the published manifest.
+        value: ${{ jobs.merge.outputs.version }}
+      digest:
+        description: Registry mode — digest of the published multi-arch manifest.
+        value: ${{ jobs.merge.outputs.digest }}
 
 permissions:
   contents: read
@@ -104,6 +128,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # ---- Registry mode: build one arch on its native runner, push by digest ----
@@ -197,6 +223,9 @@ jobs:
     if: inputs.mode == 'registry' && inputs.push
     needs: [setup, build]
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      digest: ${{ steps.digest.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -222,7 +251,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ inputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
             type=semver,pattern={{major}},value=${{ inputs.tag }}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ inputs.tag-latest }}
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
         env:

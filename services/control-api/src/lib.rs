@@ -2,6 +2,7 @@ mod blob;
 mod db;
 mod executable_provisioner;
 mod gateway_auth;
+mod gateway_jwks;
 mod scim;
 mod secrets;
 
@@ -201,11 +202,12 @@ pub struct AppConfig {
     /// baked into the agent's process environment at spawn and there is no
     /// in-flight rotation, so shortening it shortens the usable agent run.
     pub gateway_inference_token_ttl_seconds: u64,
-    pub gateway_jwt_active_kid: Option<String>,
     pub gateway_jwt_private_key_file: Option<PathBuf>,
-    pub gateway_jwt_jwks_file: Option<PathBuf>,
     pub gateway_jwt_private_key_pem: Option<String>,
-    pub gateway_jwt_jwks_json: Option<String>,
+    /// Retired signing key. Its public key stays published so tokens it signed
+    /// keep verifying until they expire; it never signs.
+    pub gateway_jwt_previous_private_key_file: Option<PathBuf>,
+    pub gateway_jwt_previous_private_key_pem: Option<String>,
     pub internal_allowed_client_id: String,
     pub gateway_provisioner: Option<GatewayProvisionerConfig>,
     pub gateway_encryption: Option<GatewayEncryptionConfig>,
@@ -450,12 +452,6 @@ impl AppConfig {
                 &["gateway", "inference_jwt", "token_ttl_seconds"],
                 43_200,
             )? as u64,
-            gateway_jwt_active_kid: env_or_setting(
-                "HARNESS_GATEWAY_JWT_ACTIVE_KID",
-                &settings,
-                &["gateway", "inference_jwt", "active_kid"],
-            )?
-            .filter(|value| !value.trim().is_empty()),
             gateway_jwt_private_key_file: env_or_setting(
                 "HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE",
                 &settings,
@@ -463,19 +459,21 @@ impl AppConfig {
             )?
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from),
-            gateway_jwt_jwks_file: env_or_setting(
-                "HARNESS_GATEWAY_JWT_JWKS_FILE",
-                &settings,
-                &["gateway", "inference_jwt", "jwks_file"],
-            )?
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from),
             gateway_jwt_private_key_pem: std::env::var("HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            gateway_jwt_jwks_json: std::env::var("HARNESS_GATEWAY_JWT_JWKS_JSON")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
+            gateway_jwt_previous_private_key_file: env_or_setting(
+                "HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_FILE",
+                &settings,
+                &["gateway", "inference_jwt", "previous_private_key_file"],
+            )?
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from),
+            gateway_jwt_previous_private_key_pem: std::env::var(
+                "HARNESS_GATEWAY_JWT_PREVIOUS_PRIVATE_KEY_PEM",
+            )
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
             internal_allowed_client_id: setting_or(
                 "HARNESS_INTERNAL_ALLOWED_CLIENT_ID",
                 &settings,
@@ -498,11 +496,10 @@ impl AppConfig {
             let had_runtime = self.gateway_upstream_url.is_some()
                 || self.gateway_inference_proxy_url.is_some()
                 || self.gateway_inference_proxy_health_url.is_some()
-                || self.gateway_jwt_active_kid.is_some()
                 || self.gateway_jwt_private_key_file.is_some()
-                || self.gateway_jwt_jwks_file.is_some()
                 || self.gateway_jwt_private_key_pem.is_some()
-                || self.gateway_jwt_jwks_json.is_some()
+                || self.gateway_jwt_previous_private_key_file.is_some()
+                || self.gateway_jwt_previous_private_key_pem.is_some()
                 || self.gateway_provisioner.is_some()
                 || self.gateway_encryption.is_some();
             if had_runtime {
@@ -515,11 +512,10 @@ impl AppConfig {
             self.gateway_upstream_url = None;
             self.gateway_inference_proxy_url = None;
             self.gateway_inference_proxy_health_url = None;
-            self.gateway_jwt_active_kid = None;
             self.gateway_jwt_private_key_file = None;
-            self.gateway_jwt_jwks_file = None;
             self.gateway_jwt_private_key_pem = None;
-            self.gateway_jwt_jwks_json = None;
+            self.gateway_jwt_previous_private_key_file = None;
+            self.gateway_jwt_previous_private_key_pem = None;
             self.gateway_provisioner = None;
             self.gateway_encryption = None;
         }
@@ -551,17 +547,11 @@ impl AppConfig {
         if self.gateway_jwt_audience.trim().is_empty() {
             missing.push("gateway.inference_jwt.audience");
         }
-        if self.gateway_jwt_active_kid.is_none() {
-            missing.push("gateway.inference_jwt.active_kid (or HARNESS_GATEWAY_JWT_ACTIVE_KID)");
-        }
         if self.gateway_jwt_private_key_file.is_none() && self.gateway_jwt_private_key_pem.is_none()
         {
             missing.push(
                 "gateway.inference_jwt.private_key_file (or HARNESS_GATEWAY_JWT_PRIVATE_KEY_PEM)",
             );
-        }
-        if self.gateway_jwt_jwks_file.is_none() && self.gateway_jwt_jwks_json.is_none() {
-            missing.push("gateway.inference_jwt.jwks_file (or HARNESS_GATEWAY_JWT_JWKS_JSON)");
         }
         if self.gateway_provisioner.is_none() {
             missing.push("gateway.provisioner");
@@ -1107,67 +1097,48 @@ fn load_gateway_jwt_key_ring(config: &AppConfig) -> Result<Option<GatewayJwtKeyR
     if config.gateway_kind.is_none() {
         return Ok(None);
     }
-    let active_kid = config
-        .gateway_jwt_active_kid
-        .clone()
-        .ok_or_else(|| ApiError::internal("HARNESS_GATEWAY_JWT_ACTIVE_KID is required"))?;
-    let private_pem =
-        match config.gateway_jwt_private_key_pem.as_ref() {
-            Some(value) => value.as_bytes().to_vec(),
-            None => std::fs::read(config.gateway_jwt_private_key_file.as_ref().ok_or_else(
-                || ApiError::internal("gateway JWT private key material is required"),
-            )?)
-            .map_err(|error| {
-                ApiError::internal(format!("reading gateway JWT private key: {error}"))
-            })?,
-        };
-    let signing_key = EncodingKey::from_rsa_pem(&private_pem).map_err(|error| {
-        ApiError::internal(format!("decoding gateway JWT private key: {error}"))
-    })?;
-    let jwks_json = match config.gateway_jwt_jwks_json.as_ref() {
-        Some(value) => value.as_bytes().to_vec(),
-        None => std::fs::read(
-            config
-                .gateway_jwt_jwks_file
-                .as_ref()
-                .ok_or_else(|| ApiError::internal("gateway JWT JWKS material is required"))?,
-        )
-        .map_err(|error| ApiError::internal(format!("reading gateway JWT JWKS: {error}")))?,
-    };
-    let public_jwks: JwkSet = serde_json::from_slice(&jwks_json)
-        .map_err(|error| ApiError::internal(format!("decoding gateway JWT JWKS: {error}")))?;
-    let active_public_key = public_jwks
-        .keys
-        .iter()
-        .find(|key| key.common.key_id.as_deref() == Some(active_kid.as_str()))
-        .ok_or_else(|| ApiError::internal("gateway JWT JWKS does not contain active_kid"))?;
-    let mut probe_header = Header::new(Algorithm::RS256);
-    probe_header.kid = Some(active_kid.clone());
-    let probe = encode(
-        &probe_header,
-        &json!({"sub":"gateway-key-probe"}),
-        &signing_key,
-    )
-    .map_err(|error| ApiError::internal(format!("testing gateway JWT signing key: {error}")))?;
-    let verification_key = DecodingKey::from_jwk(active_public_key).map_err(|error| {
-        ApiError::internal(format!(
-            "decoding active gateway JWT verification key: {error}"
-        ))
-    })?;
-    let mut probe_validation = Validation::new(Algorithm::RS256);
-    probe_validation.required_spec_claims.clear();
-    probe_validation.validate_exp = false;
-    decode::<serde_json::Value>(&probe, &verification_key, &probe_validation).map_err(|_| {
-        ApiError::internal("gateway JWT private key does not match active JWKS key")
-    })?;
+    let active_pem = read_gateway_jwt_pem(
+        config.gateway_jwt_private_key_pem.as_deref(),
+        config.gateway_jwt_private_key_file.as_deref(),
+        "private key",
+    )?
+    .ok_or_else(|| ApiError::internal("gateway JWT private key material is required"))?;
+    let previous_pem = read_gateway_jwt_pem(
+        config.gateway_jwt_previous_private_key_pem.as_deref(),
+        config.gateway_jwt_previous_private_key_file.as_deref(),
+        "previous private key",
+    )?;
+    let keys = gateway_jwks::GatewaySigningKeys::derive(&active_pem, previous_pem.as_deref())
+        .map_err(ApiError::internal)?;
+    tracing::info!(
+        active_kid = %keys.active_kid,
+        previous_key = keys.public_jwks.keys.len() > 1,
+        "loaded gateway JWT signing keys; verification keys derived from them"
+    );
     Ok(Some(GatewayJwtKeyRing {
         issuer: config.gateway_jwt_issuer.clone(),
         audience: config.gateway_jwt_audience.clone(),
         token_ttl: Duration::seconds(config.gateway_inference_token_ttl_seconds as i64),
-        active_kid,
-        signing_key,
-        public_jwks,
+        active_kid: keys.active_kid,
+        signing_key: keys.signing_key,
+        public_jwks: keys.public_jwks,
     }))
+}
+
+/// Inline PEM wins over the file, matching every other secret setting.
+fn read_gateway_jwt_pem(
+    inline: Option<&str>,
+    file: Option<&std::path::Path>,
+    what: &str,
+) -> Result<Option<String>, ApiError> {
+    if let Some(pem) = inline {
+        return Ok(Some(pem.to_owned()));
+    }
+    file.map(|path| {
+        std::fs::read_to_string(path)
+            .map_err(|error| ApiError::internal(format!("reading gateway JWT {what}: {error}")))
+    })
+    .transpose()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -10311,11 +10282,10 @@ mod tests {
             gateway_jwt_issuer: "https://api.example.com".into(),
             gateway_jwt_audience: "blue-inference-proxy".into(),
             gateway_inference_token_ttl_seconds: 43_200,
-            gateway_jwt_active_kid: Some("test-key".into()),
             gateway_jwt_private_key_file: Some(PathBuf::from("/run/secrets/gateway-jwt.pem")),
-            gateway_jwt_jwks_file: Some(PathBuf::from("/run/config/gateway-jwks.json")),
             gateway_jwt_private_key_pem: None,
-            gateway_jwt_jwks_json: None,
+            gateway_jwt_previous_private_key_file: None,
+            gateway_jwt_previous_private_key_pem: None,
             internal_allowed_client_id: "blue-inference-proxy".into(),
             gateway_provisioner: gateway_provisioner(&Some(
                 serde_yaml::from_str(

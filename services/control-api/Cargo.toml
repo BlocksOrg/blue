@@ -48,5 +48,7 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 jsonwebtoken = { workspace = true }
+pkcs1 = { workspace = true }
+pkcs8 = { workspace = true }
 flate2 = "1"
 tar = "0.4"
