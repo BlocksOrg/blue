@@ -4279,7 +4279,9 @@ fn restore_verified_bundle(
         let import_path =
             session_spool_dir()?.join(format!("opencode-import-{}.json", std::process::id()));
         gh_common::write_atomic(&import_path, export)?;
-        let mut command = std::process::Command::new("opencode");
+        let mut command = std::process::Command::new(
+            gh_common::which("opencode").unwrap_or_else(|| PathBuf::from("opencode")),
+        );
         command.arg("import").arg(&import_path);
         if let Some(destination) = destination {
             command.current_dir(destination);
@@ -4320,7 +4322,9 @@ fn restore_verified_bundle(
 }
 
 fn opencode_session_exists(destination: Option<&Path>, session_id: &str) -> Result<bool> {
-    let mut command = std::process::Command::new("opencode");
+    let mut command = std::process::Command::new(
+        gh_common::which("opencode").unwrap_or_else(|| PathBuf::from("opencode")),
+    );
     command.args([
         "session",
         "list",

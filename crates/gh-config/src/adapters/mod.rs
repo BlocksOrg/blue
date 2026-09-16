@@ -565,16 +565,15 @@ pub fn detected_context(
 }
 
 fn detected_version(harness: Harness) -> Result<DetectedVersion, GhError> {
+    // Resolve exactly the way detection does. A second, simpler scan here used
+    // to pick the extensionless file that shares the directory with the real
+    // executable: npm's POSIX script on Windows, which `CreateProcess` rejects
+    // with `%1 is not a valid Win32 application`, and a Blue shim on Unix,
+    // which turns this version probe into a recursive `blue run`.
     let binary = harness
         .binary_names()
         .iter()
-        .find_map(|name| {
-            std::env::var_os("PATH").and_then(|path| {
-                std::env::split_paths(&path)
-                    .map(|dir| dir.join(name))
-                    .find(|candidate| candidate.is_file())
-            })
-        })
+        .find_map(|name| gh_common::path_search::which(name))
         .ok_or_else(|| {
             GhError::config(format!(
                 "{harness} binary is missing; cannot select compatibility implementation"

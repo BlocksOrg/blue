@@ -24,10 +24,7 @@ mkdir -p "$artifact_dir"
 # and `blue apply` fetches the managed skill package, both on the host, so stage
 # them at fixed host paths the governance config points at.
 state_dir="/tmp/blue-e2e"
-mkdir -p "$state_dir/component-markers"
-cp "$slim_dir/fixtures/mcp-server.mjs" "$state_dir/mcp-server.mjs"
-base64 -d < "$repo_root/tests/e2e/fixtures/package/e2e-package.tar.gz.b64" \
-  > "$state_dir/e2e-package.tar.gz"
+node "$repo_root/tests/e2e-native/prepare-fixtures.mjs" "$state_dir" --legacy
 
 gateway=0
 if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
@@ -35,7 +32,7 @@ if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
   echo "==> OPENROUTER_API_KEY present: enabling the gateway path"
   # control-api verifies the mounted executable provisioner against this pin
   # and refuses to start on a mismatch (same guard as the full e2e suite).
-  provisioner_sha256="$(sha256sum "$slim_dir/fixtures/litellm-provisioner.mjs" | awk '{print $1}')"
+  provisioner_sha256="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto");console.log(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"))' "$slim_dir/fixtures/litellm-provisioner.mjs")"
   if [[ ! "$provisioner_sha256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "invalid e2e-slim provisioner SHA-256: $provisioner_sha256" >&2
     exit 1
@@ -103,7 +100,7 @@ docker compose "${compose_args[@]}" up -d --wait --no-build
 # Without them those tests self-skip; the session-upload and login tests still
 # run. Gated because a fresh npm-global install is slow.
 if [[ "${E2E_SLIM_INSTALL_AGENTS:-}" == "1" ]]; then
-  lock="$slim_dir/agents.lock.json"
+  lock="$repo_root/tests/e2e/agents.lock.json"
   npm_prefix="${E2E_SLIM_NPM_PREFIX:-$slim_dir/artifacts/npm-global}"
   mkdir -p "$npm_prefix"
   export NPM_CONFIG_PREFIX="$npm_prefix"
