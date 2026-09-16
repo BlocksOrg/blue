@@ -8,6 +8,14 @@ on:
 permissions:
   contents: read
 
+# One run per PR. Mirrors e2e-slim.yml:29. `always-update` on the release-please
+# branch roughly doubles this workflow's trigger rate, and superseded runs of a
+# PR are never worth finishing. Pushes to main are never cancelled — every
+# commit on main needs its own verdict.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Does this change touch anything outside docs/website? Gates `image` below.
   changes:
@@ -95,9 +103,11 @@ jobs:
       - run: scripts/check-sqlx-queries.sh
       - run: scripts/check-migration-classifications.sh
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace
-      - run: cargo test -p control-api --features postgres-tests
+      # --locked: a Cargo.lock that does not match the manifests is silently
+      # repaired in-job otherwise, and no required check ever sees the drift.
+      - run: cargo clippy --locked --workspace --all-targets
+      - run: cargo test --locked --workspace
+      - run: cargo test --locked -p control-api --features postgres-tests
 
   dashboard:
     runs-on: ubuntu-latest
