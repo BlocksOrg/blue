@@ -3,9 +3,10 @@ export type MembersTab = "members" | "invited" | "identity";
 export function resolveMembersTab(
   requestedTab: string,
   managed: boolean,
+  invitationsEnabled: boolean,
 ): MembersTab {
   if (managed && requestedTab === "identity") return "identity";
-  if (!managed && requestedTab === "invited") return "invited";
+  if (invitationsEnabled && requestedTab === "invited") return "invited";
   return "members";
 }
 

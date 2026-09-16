@@ -312,15 +312,47 @@ export async function inspectPackageSource(
   }
 }
 
-export async function createUser(form: FormData) {
-  await api("/admin/invitations", {
-    method: "POST",
-    body: JSON.stringify({
-      email: String(form.get("email")),
-      role: String(form.get("role")) as "admin" | "member",
-    }),
-  });
-  revalidatePath("/members");
+export type InvitationLinkState = {
+  invitationId?: string;
+  email?: string;
+  invitationUrl?: string;
+  error?: string;
+};
+
+type AdminInvitationIssued = {
+  id: string;
+  email: string;
+  invitation_url: string;
+};
+
+function invitationError(error: unknown) {
+  if (!(error instanceof Error)) return "Unable to issue the invitation link.";
+  const detail = error.message.replace(/^\d{3}:\s*/, "");
+  try {
+    const parsed = JSON.parse(detail) as { error?: string; message?: string };
+    return parsed.message ?? parsed.error ?? "Unable to issue the invitation link.";
+  } catch {
+    return detail || "Unable to issue the invitation link.";
+  }
+}
+
+export async function createUser(
+  _: InvitationLinkState,
+  form: FormData,
+): Promise<InvitationLinkState> {
+  try {
+    const invitation = await api<AdminInvitationIssued>("/admin/invitations", {
+      method: "POST",
+      body: JSON.stringify({
+        email: String(form.get("email")),
+        role: String(form.get("role")) as "admin" | "member",
+      }),
+    });
+    revalidatePath("/members");
+    return { invitationId: invitation.id, email: invitation.email, invitationUrl: invitation.invitation_url };
+  } catch (error) {
+    return { error: invitationError(error) };
+  }
 }
 
 export async function updateUser(form: FormData) {
@@ -351,11 +383,20 @@ export async function removeClientStatus(form: FormData) {
   revalidatePath("/clients");
 }
 
-export async function resendInvitation(form: FormData) {
-  await api(`/admin/invitations/${form.get("invitation_id")}/resend`, {
-    method: "POST",
-  });
-  revalidatePath("/members");
+export async function regenerateInvitation(
+  _: InvitationLinkState,
+  form: FormData,
+): Promise<InvitationLinkState> {
+  try {
+    const invitation = await api<AdminInvitationIssued>(
+      `/admin/invitations/${form.get("invitation_id")}/regenerate`,
+      { method: "POST" },
+    );
+    revalidatePath("/members");
+    return { invitationId: invitation.id, email: invitation.email, invitationUrl: invitation.invitation_url };
+  } catch (error) {
+    return { error: invitationError(error) };
+  }
 }
 
 export async function cancelInvitation(form: FormData) {

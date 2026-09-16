@@ -907,7 +907,7 @@ paths:
           description: Invitation created
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AdminInvitation" }
+              schema: { $ref: "#/components/schemas/AdminInvitationIssued" }
         "409": { description: Email is already a member or has a pending invitation }
 
   /admin/invitations/{id}:
@@ -948,6 +948,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AdminInvitation" }
         "409": { description: Invitation has already been accepted or canceled }
+
+  /admin/invitations/{id}/regenerate:
+    post:
+      operationId: regenerateAdminInvitation
+      tags: [User management]
+      summary: Replace an outstanding invitation with a new invitation link
+      description: Invalidates the prior link immediately, retains its pinned email and role, and renews expiry for 24 hours.
+      security: [{ oauthDevice: [] }, { dashboardSession: [] }]
+      parameters: [{ $ref: "#/components/parameters/InvitationId" }]
+      responses:
+        "200":
+          description: Replacement invitation issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminInvitationIssued" }
+        "404": { description: Invitation does not exist in the administrator's organization }
+        "409": { description: Invitation is accepted or canceled, or invitations are disabled }
 
   /admin/client-status:
     get:
@@ -1372,6 +1389,14 @@ components:
         inviter_email: { type: [string, "null"], format: email }
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
+
+    AdminInvitationIssued:
+      allOf:
+        - { $ref: "#/components/schemas/AdminInvitation" }
+        - type: object
+          required: [invitation_url]
+          properties:
+            invitation_url: { type: string, format: uri }
 
     AdminInvitationPage:
       type: object

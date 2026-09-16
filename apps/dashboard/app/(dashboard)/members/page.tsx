@@ -1,7 +1,6 @@
 import { api, requireAdminIdentity } from "../../../lib/api";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { createUser } from "../../actions";
 import { identityConfig } from "../../../lib/identity-config";
 import { buildManagedIdentityOverview } from "../../../lib/identity-overview";
 import {
@@ -12,7 +11,7 @@ import {
 } from "../../../lib/members-view";
 import { InvitationActions, MemberActions } from "./member-actions";
 import { MembersTabs } from "./members-tabs";
-import { Info, Plus, Search, SlidersHorizontal, X } from "lucide-react";
+import { Info, Search, SlidersHorizontal, X } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,6 +42,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { TablePaginationFooter } from "@/components/table-pagination-footer";
+import { InviteMemberDialog } from "./invite-member-dialog";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 const allowedPageSizes = new Set([25, 50, 75, 100]);
@@ -198,12 +198,14 @@ export default async function Members({
       identityStatus?.auth_mode === "oidc" &&
       identityStatus.scim.configured,
   );
+  const invitationsEnabled = configuredIdentity.mode !== "oidc";
   const requestedSize = positiveInteger(queryValue(raw, "per_page"), 25);
   const perPage = allowedPageSizes.has(requestedSize) ? requestedSize : 25;
   const requestedTab = queryValue(raw, "tab");
   const activeTab: MembersTab = resolveMembersTab(
     requestedTab,
     managedWorkspace,
+    invitationsEnabled,
   );
   const requestedPage = positiveInteger(queryValue(raw, "page"), 1);
   const filters = resolveMemberFilters({
@@ -258,31 +260,9 @@ export default async function Members({
   const invitationActiveFilters = memberActiveFilters.filter((filter) => filter.key === "q" || filter.key === "role");
   return (
     <div className="flex flex-col gap-6">
-        {!managedWorkspace && (
+        {invitationsEnabled && (
           <div className="dashboard-page-header flex flex-wrap items-start justify-between gap-4">
-            <Dialog>
-              <DialogTrigger render={<Button />}><Plus /> Invite member</DialogTrigger>
-              <DialogContent className="sm:max-w-md">
-                <DialogHeader>
-                  <DialogTitle>Invite a member</DialogTitle>
-                  <DialogDescription>Send an invitation to join this organization.</DialogDescription>
-                </DialogHeader>
-                <form action={createUser} className="grid gap-5">
-                  <div className="grid gap-2">
-                    <Label htmlFor="invite-email">Email</Label>
-                    <Input id="invite-email" name="email" type="email" required autoFocus />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label>Role</Label>
-                    <Select name="role" defaultValue="member">
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent>
-                    </Select>
-                  </div>
-                  <DialogFooter><Button type="submit">Send invitation</Button></DialogFooter>
-                </form>
-              </DialogContent>
-            </Dialog>
+            <InviteMemberDialog />
           </div>
         )}
       {managedWorkspace && identityOverview && (
@@ -297,6 +277,7 @@ export default async function Members({
       )}
       <MembersTabs
         managed={managedWorkspace}
+        invitationsEnabled={invitationsEnabled}
         memberCount={users.total}
         invitationCount={invited.total}
         members={(
