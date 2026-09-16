@@ -419,7 +419,28 @@ pub(crate) fn ensure_available(
         return ensure_compatible_version(harness, detected, policy, interactive, runtime);
     }
     if !interactive || !cfg!(unix) {
-        bail!("{harness} is not installed on PATH. Automatic fresh installation requires an interactive Unix terminal and is unavailable on Windows. Manually install a policy-supported version, ensure its executable directory is on PATH, then retry `blue agent {harness}`.");
+        let automatic_installation = if cfg!(windows) {
+            "Automatic fresh installation is unavailable on Windows."
+        } else {
+            "Automatic fresh installation requires an interactive terminal."
+        };
+        let shell = if cfg!(windows) {
+            "PowerShell or Git Bash"
+        } else {
+            "a POSIX shell"
+        };
+        let manual_installation = match supported_install(harness, policy) {
+            Ok(invocation) => format!(
+                "Install a policy-supported version by running this in {shell}:\n  {}\nEnsure npm's executable directory is on PATH, then retry `blue agent {harness}`.",
+                invocation.display
+            ),
+            Err(error) => format!(
+                "Blue could not determine a policy-supported installation command: {error}. Ask your administrator to update the {harness} policy, then retry `blue agent {harness}`."
+            ),
+        };
+        bail!(
+            "{harness} is not installed on PATH. {automatic_installation}\n\n{manual_installation}"
+        );
     }
     // Inventory can become stale while a user is choosing an agent.
     if let Some(detected) = runtime.detect(harness) {
@@ -650,14 +671,18 @@ mod tests {
     #[test]
     fn absent_noninteractive_refuses_without_runtime_calls() {
         let mut fake = Fake::default();
-        assert!(ensure_available(
+        let error = ensure_available(
             Harness::Claude,
             None,
             &HarnessPolicy::default(),
             false,
-            &mut fake
+            &mut fake,
         )
-        .is_err());
+        .unwrap_err()
+        .to_string();
+        let invocation = supported_install(Harness::Claude, &HarnessPolicy::default()).unwrap();
+        assert!(error.contains(&invocation.display), "{error}");
+        assert!(error.contains("Ensure npm's executable directory is on PATH"));
         assert!(fake.calls.is_empty());
     }
 
@@ -665,14 +690,35 @@ mod tests {
     #[test]
     fn absent_windows_refuses_without_runtime_calls() {
         let mut fake = Fake::default();
-        assert!(ensure_available(
+        let error = ensure_available(
             Harness::Claude,
             None,
             &HarnessPolicy::default(),
             true,
-            &mut fake
+            &mut fake,
         )
-        .is_err());
+        .unwrap_err()
+        .to_string();
+        let invocation = supported_install(Harness::Claude, &HarnessPolicy::default()).unwrap();
+        assert!(error.contains("Automatic fresh installation is unavailable on Windows."));
+        assert!(error.contains("PowerShell or Git Bash"));
+        assert!(error.contains(&invocation.display), "{error}");
+        assert!(fake.calls.is_empty());
+    }
+
+    #[test]
+    fn absent_harness_with_unsupported_policy_does_not_suggest_an_invalid_command() {
+        let mut fake = Fake::default();
+        let policy = HarnessPolicy {
+            version_requirement: Some(">=999.0.0".into()),
+            ..HarnessPolicy::default()
+        };
+        let error = ensure_available(Harness::Claude, None, &policy, false, &mut fake)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("could not determine a policy-supported installation command"));
+        assert!(error.contains("Ask your administrator"));
+        assert!(!error.contains("npm install"));
         assert!(fake.calls.is_empty());
     }
 

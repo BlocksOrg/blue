@@ -422,6 +422,19 @@ static TERMINAL_MODES_ACTIVE: std::sync::atomic::AtomicBool =
 /// can otherwise leave mouse movement and focus changes arriving as input.
 pub const TERMINAL_MODE_RESET: &[u8] = b"\x1b[r\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[<u\x1b[=0u\x1b[>4;0m\x1b[?1l\x1b>\x1b[?1049l\x1b[r\x1b[?25h";
 
+/// ConPTY can leave a Git Bash terminal displaying the child's last frame
+/// after the alternate screen is restored. Clear the restored primary screen
+/// so the next shell prompt cannot be painted over that stale frame.
+#[cfg(windows)]
+const WINDOWS_TERMINAL_SURFACE_RESET: &[u8] = b"\x1b[r\x1b[2J\x1b[H\x1b[?25h";
+
+fn reset_terminal_modes(stdout: &mut impl Write) -> std::io::Result<()> {
+    stdout.write_all(TERMINAL_MODE_RESET)?;
+    #[cfg(windows)]
+    stdout.write_all(WINDOWS_TERMINAL_SURFACE_RESET)?;
+    stdout.flush()
+}
+
 #[cfg(unix)]
 static mut SAVED_TERMIOS: std::mem::MaybeUninit<libc::termios> = std::mem::MaybeUninit::uninit();
 
@@ -472,8 +485,7 @@ impl Drop for TerminalModeGuard {
         #[cfg(unix)]
         TERMINAL_MODES_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         let mut stdout = std::io::stdout();
-        let _ = stdout.write_all(TERMINAL_MODE_RESET);
-        let _ = stdout.flush();
+        let _ = reset_terminal_modes(&mut stdout);
         self.active = false;
     }
 }
@@ -690,6 +702,13 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+
+    #[test]
+    fn terminal_reset_clears_the_restored_primary_screen() {
+        let mut output = Vec::new();
+        reset_terminal_modes(&mut output).unwrap();
+        assert!(output.ends_with(b"\x1b[?1049l\x1b[r\x1b[?25h\x1b[r\x1b[2J\x1b[H\x1b[?25h"));
+    }
 
     /// npm installs every agent on Windows as a `.cmd` wrapper, and ConPTY
     /// starts its child through `CreateProcessW`, which rejects one outright.
