@@ -113,8 +113,6 @@ test("@smoke deployment operational endpoints are healthy", async ({ request }) 
   const proxyMetrics = await request.get("http://127.0.0.1:8081/metrics");
   expect(proxyMetrics.status()).toBe(200);
   expect(await proxyMetrics.text()).toContain("gateway_proxy_");
-  const docs = await request.get("http://docs:3000");
-  expect(docs.status()).toBe(200);
 });
 
 test("every OpenAPI operation resolves and enforces its declared authentication boundary", async ({ request }) => {

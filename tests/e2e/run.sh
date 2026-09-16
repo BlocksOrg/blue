@@ -63,5 +63,5 @@ if [[ ! "$provisioner_sha256" =~ ^[0-9a-f]{64}$ ]]; then
   exit 1
 fi
 export HARNESS_PROVISIONER_EXECUTABLE_SHA256="$provisioner_sha256"
-docker compose "${compose_args[@]}" up -d --wait --no-build blue blue-governance-only docs
+docker compose "${compose_args[@]}" up -d --wait --no-build blue blue-governance-only
 docker compose "${compose_args[@]}" --profile test run --no-deps --rm runner ./run-in-container.sh "$mode"

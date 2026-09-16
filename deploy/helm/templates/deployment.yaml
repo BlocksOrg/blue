@@ -107,8 +107,6 @@ spec:
             {{- end }}
             - name: CONTROL_API_URL
               value: http://{{ include "blue.fullname" . }}-control-api:{{ .Values.service.ports.controlApi }}
-            - name: DOCS_URL
-              value: {{ .Values.blue.publicUrls.docs | quote }}
             - name: HARNESS_DATABASE_URL
               valueFrom:
                 secretKeyRef: { name: {{ include "blue.databaseSecretName" . | quote }}, key: HARNESS_DATABASE_URL, optional: false }

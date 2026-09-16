@@ -13,8 +13,10 @@ pub mod error;
 pub mod fs_identity;
 pub mod harness;
 pub mod network;
+pub mod path_search;
 pub mod paths;
 pub mod shim;
+pub mod version;
 
 pub use atomic::{
     create_owner_only_dir, create_owner_only_dir_all, prepare_atomic, prepare_atomic_in,
@@ -23,7 +25,9 @@ pub use atomic::{
 pub use client_config::{BlueToml, IdentityConfig, ModeConfig, ServiceConfig};
 pub use error::{GhError, Result};
 pub use harness::{harness_registry, ComponentRules, Harness, HarnessMetadata, InstallInvocation};
+pub use path_search::{is_blue_or_shim, which, which_all};
 pub use shim::{
     legacy_managed_shim, managed_shim, render_shim, shim_path, valid_managed_shim, MAX_SHIM_BYTES,
     SHIM_MARKER,
 };
+pub use version::blue_version;

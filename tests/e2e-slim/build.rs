@@ -34,7 +34,7 @@ fn sanitize(version: &str) -> String {
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    let lock_path = Path::new(&manifest_dir).join("agents.lock.json");
+    let lock_path = Path::new(&manifest_dir).join("../e2e/agents.lock.json");
     let matrix_path = Path::new(&manifest_dir).join("agents.matrix.json");
     println!("cargo:rerun-if-changed={}", lock_path.display());
     println!("cargo:rerun-if-changed={}", matrix_path.display());

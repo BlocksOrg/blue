@@ -17,6 +17,12 @@ An explicit `XDG_CONFIG_HOME` replaces the `%APPDATA%` parent for Blue configura
 
 The PowerShell installer does not change your persistent `PATH`. Add `%LOCALAPPDATA%\Blue\bin` to your user `PATH`, then open a new terminal. Run `blue doctor` to see the resolved shim directory, its `PATH` position, and the upstream harness executables Blue detects.
 
+## How Blue finds and starts an agent
+
+Blue resolves each agent the way `cmd.exe` does: it tries the bare name against every `PATHEXT` extension in turn. An npm global install writes three files — `codex`, `codex.cmd`, and `codex.ps1` — and only the `.cmd` is something Windows can execute, so that is the one Blue detects and runs. Blue starts a `.cmd` wrapper through the command interpreter, the same way `npm` and `node` do.
+
+One consequence: an argument the interpreter would act on rather than forward — one containing `%`, `&`, `|`, `<`, `>`, `^`, `(`, or `)` — is refused instead of being passed through altered. Spaces, quotes, and backslashes are unaffected. Give such an argument inside the agent, or install a native build of it.
+
 ## Relocate legacy state
 
 Windows releases using the native layout do not read or automatically migrate `%USERPROFILE%\.config\blue`. If `blue setup` or `blue doctor` reports legacy state, close every Blue and coding-agent process before relocating files.

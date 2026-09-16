@@ -4,7 +4,7 @@ description: "Run Blue's reference services locally for development and end-to-e
 icon: "docker"
 ---
 
-This workflow is for repository maintainers and contributors. Follow the [Quickstart workstation steps](/next/quickstart#install-the-workstation-cli) if your organization already operates Blue. Operators designing a deployment should start with the platform-neutral [Deployment contract](/next/deployment/runtime-contract); the Compose defaults are not a production baseline.
+This workflow is for repository maintainers and contributors. Follow the [CLI install steps](/next/cli/commands#install) if your organization already operates Blue. Operators designing a deployment should start with the platform-neutral [Deployment contract](/next/deployment/runtime-contract); the Compose defaults are not a production baseline.
 
 ## Prerequisites
 
@@ -41,11 +41,9 @@ MINIO_ROOT_USER=replace-local-storage-user
 MINIO_ROOT_PASSWORD=replace-local-storage-password
 # Version label displayed beside the dashboard logo; release builds inject this into the image.
 BLUE_DEPLOYMENT_VERSION=0.1.0
-# Optional: override the dashboard sidebar documentation destination.
-HARNESS_DOCS_URL=https://docs.bluee.sh
 ```
 
-The dashboard's **Documentation** sidebar link opens the centrally hosted documentation by default.
+The dashboard's **Documentation** sidebar link opens the centrally hosted documentation.
 
 The version beside the dashboard logo identifies the self-hosted deployment image. It is intentionally independent from the centrally distributed `blue` metaharness version shown by `blue version`.
 

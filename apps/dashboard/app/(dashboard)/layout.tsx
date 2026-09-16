@@ -23,7 +23,6 @@ export default async function DashboardLayout({
       : Promise.resolve(null),
     getBranding(),
   ]);
-  const docsUrl = process.env.DOCS_URL ?? "http://127.0.0.1:3001";
   const deploymentVersion = process.env.BLUE_DEPLOYMENT_VERSION ?? "development";
   return (
     <SidebarProvider
@@ -33,7 +32,6 @@ export default async function DashboardLayout({
       <DashboardSidebar
         email={me.email}
         role={me.role}
-        docsUrl={docsUrl}
         gatewayEnabled={gateway.enabled}
         currentRevision={me.current_revision}
         blueConfig={blueConfig}

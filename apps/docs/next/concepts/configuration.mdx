@@ -1,6 +1,6 @@
 ---
 title: "Configuration lifecycle"
-description: "Understand policy revisions, caching, personalization, additive merges, and launch-scoped overlays."
+description: "Understand how an organization policy becomes a versioned revision, reaches a client, and is reconciled onto a machine."
 icon: "sliders"
 ---
 
@@ -46,12 +46,6 @@ Every successful dashboard save creates a new immutable revision. Clients cache 
 
 ## Merge behavior
 
-- Existing native user configuration remains authoritative outside governed launches.
-- Remote MCP entries are additive. A local MCP with the same name wins and is never overwritten or removed.
-- Existing configuration changes prompt for review unless `--yes` or the explicit noninteractive policy allows them.
-- Identical reconciliations do not prompt again.
-- Writes are atomic, and changed files receive recoverable backups.
-- Package archives are SHA-256 verified and activate independently. An affected governed launch fails closed when one of its required packages cannot activate.
-- Removed managed packages are unregistered; modified owned content is quarantined instead of deleted.
+Reconciliation never rewrites the configuration files you own, and it rebuilds the files Blue owns from scratch each time. See [Managed configuration](/next/concepts/managed-configuration) for which files fall on each side, what a governed launch inherits from yours, and the full list of merge rules.
 
 Version-aware reconciliation resolves the installed native CLI to a maintained renderer before any files are changed. See [Harness version compatibility](/next/concepts/harness-version-compatibility) for pinning, breaking boundaries, and package variants, or [Governance configuration](/next/reference/governance-config) for the complete shape.

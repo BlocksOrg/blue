@@ -322,13 +322,22 @@ test.describe.serial("Blue deployment journey", () => {
       path.join(home, ".config", "blue", "session.json"),
       path.join(repairHome, ".config", "blue", "session.json"),
     );
-    const repairBin = path.join(repairHome, "repair-bin");
+    const repairPrefix = path.join(repairHome, "repair npm prefix");
+    const repairBin = path.join(repairPrefix, "bin");
+    const packageRoot = path.join(repairPrefix, "lib", "node_modules", "@openai", "codex");
+    const codexExecutable = path.join(packageRoot, "bin", "codex");
     const versionFile = path.join(repairHome, "codex-version");
     const installLog = path.join(repairHome, "npm-install.log");
     await mkdir(repairBin, { recursive: true });
+    await mkdir(path.dirname(codexExecutable), { recursive: true });
+    await writeFile(
+      path.join(packageRoot, "package.json"),
+      JSON.stringify({ name: "@openai/codex", bin: { codex: "bin/codex" } }),
+    );
+    await symlink(codexExecutable, path.join(repairBin, "codex"));
     await writeFile(versionFile, "999.0.0\n");
     await writeFile(
-      path.join(repairBin, "codex"),
+      codexExecutable,
       `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "\${1:-}" == "--version" ]] || [[ "\${1:-}" == "version" ]]; then
@@ -342,12 +351,22 @@ printf 'fake-codex-ok\\n'
       path.join(repairBin, "npm"),
       `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\\n' "$*" > "$E2E_INSTALL_LOG"
-printf '0.145.0\\n' > "$E2E_CODEX_VERSION_FILE"
+case "\${1:-}" in
+  view)
+    [[ "$#" == 4 && "$2" == '@openai/codex@>=0.145.0 <0.151.1-0' && "$3" == version && "$4" == --json ]]
+    printf '"0.145.0"\\n'
+    ;;
+  install)
+    [[ "$#" == 5 && "$2" == -g && "$3" == --prefix && "$4" == "$E2E_NPM_PREFIX" && "$5" == @openai/codex@0.145.0 ]]
+    printf '%s\\n' "$@" > "$E2E_INSTALL_LOG"
+    printf '0.145.0\\n' > "$E2E_CODEX_VERSION_FILE"
+    ;;
+  *) exit 64 ;;
+esac
 `,
     );
     await Promise.all([
-      chmod(path.join(repairBin, "codex"), 0o755),
+      chmod(codexExecutable, 0o755),
       chmod(path.join(repairBin, "npm"), 0o755),
     ]);
     const incompatibleVersions = {
@@ -357,6 +376,7 @@ printf '0.145.0\\n' > "$E2E_CODEX_VERSION_FILE"
       E2E_OPENCODE_VERSION: "999.0.0",
       E2E_CODEX_VERSION_FILE: versionFile,
       E2E_INSTALL_LOG: installLog,
+      E2E_NPM_PREFIX: repairPrefix,
       PATH: `${repairBin}:/usr/local/bin:${process.env.PATH ?? ""}`,
     };
 
@@ -365,11 +385,11 @@ printf '0.145.0\\n' > "$E2E_CODEX_VERSION_FILE"
     try {
       await waitForOutput(declined, /Choose your coding agent/);
       declined.stdin.write("\r");
-      await waitForOutput(declined, /Install a policy-supported Codex version now\?/);
+      await waitForOutput(declined, /Install codex 0\.145\.0 with/);
       declined.stdin.write("\r");
       const result = await declinedCompletion;
       expect(result.code, `${result.stdout}\n${result.stderr}`).not.toBe(0);
-      expect(`${result.stdout}\n${result.stderr}`).toContain("Codex installation declined");
+      expect(`${result.stdout}\n${result.stderr}`).toContain("codex installation declined");
     } finally {
       if (declined.exitCode === null) declined.kill("SIGTERM");
     }
@@ -378,12 +398,15 @@ printf '0.145.0\\n' > "$E2E_CODEX_VERSION_FILE"
       "preferred_harness",
     );
 
+    expect(await readFile(versionFile, "utf8")).toBe("999.0.0\n");
+    await expect(stat(installLog)).rejects.toThrow();
+
     const retried = spawnCliInPty(repairHome, "blue", incompatibleVersions);
     const retriedCompletion = collect(retried);
     try {
       await waitForOutput(retried, /Choose your coding agent/);
       retried.stdin.write("\r");
-      await waitForOutput(retried, /Install a policy-supported Codex version now\?/);
+      await waitForOutput(retried, /Install codex 0\.145\.0 with/);
       retried.stdin.write("y\r");
       const result = await retriedCompletion;
       expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -393,10 +416,122 @@ printf '0.145.0\\n' > "$E2E_CODEX_VERSION_FILE"
     }
 
     expect(await readFile(versionFile, "utf8")).toBe("0.145.0\n");
-    expect(await readFile(installLog, "utf8")).toContain("@openai/codex");
+    expect(await readFile(installLog, "utf8")).toBe(
+      ["install", "-g", "--prefix", repairPrefix, "@openai/codex@0.145.0", ""].join("\n"),
+    );
     expect(await readClientFile(repairHome, ".config/blue/blue.toml")).toContain(
       'preferred_harness = "codex"',
     );
+
+    await writeFile(versionFile, "999.0.0\n");
+    await writeFile(codexExecutable, (await readFile(codexExecutable, "utf8")) + "\n");
+    await rm(installLog);
+    for (const command of ["blue apply --yes", "blue daemon"]) {
+      const child = spawnCliInPty(repairHome, command, incompatibleVersions);
+      const result = await collect(child);
+      expect(result.code, result.stdout + result.stderr).not.toBe(0);
+      await expect(stat(installLog)).rejects.toThrow();
+    }
+    const pipedApply = await runCli(repairHome, ["apply"], incompatibleVersions);
+    expect(pipedApply.code).not.toBe(0);
+    await expect(stat(installLog)).rejects.toThrow();
+    const apply = spawnCliInPty(repairHome, "blue apply", incompatibleVersions);
+    const applied = collect(apply);
+    try {
+      await waitForOutput(apply, /Install codex 0\.145\.0 with/);
+      apply.stdin.write("y\r");
+      const result = await applied;
+      expect(result.code, result.stdout + result.stderr).toBe(0);
+      expect(await readFile(versionFile, "utf8")).toBe("0.145.0\n");
+    } finally {
+      if (apply.exitCode === null) apply.kill("SIGTERM");
+    }
+
+  });
+
+  test("@smoke absent agents install only after terminal confirmation", async () => {
+    const installHome = await prepareClient("absent-agent-install");
+    await copyFile(path.join(home, ".config/blue/session.json"), path.join(installHome, ".config/blue/session.json"));
+    const configPath = path.join(installHome, ".config/blue/blue.toml");
+    const originalConfig = await readFile(configPath, "utf8");
+    const bin = path.join(installHome, "isolated-bin");
+    const log = path.join(installHome, "installer.log");
+    await mkdir(bin);
+    // An explicit allowlist excludes all preinstalled harnesses and the real npm.
+    for (const [name, target] of Object.entries({ blue: "/usr/local/bin/blue", script: "/usr/bin/script", sh: "/bin/sh", bash: "/bin/bash", cat: "/bin/cat", chmod: "/bin/chmod" })) {
+      await symlink(target, path.join(bin, name));
+    }
+    const agent = path.join(bin, "codex");
+    await writeFile(path.join(bin, "npm"), `#!/bin/bash
+set -euo pipefail
+case "\${1:-}" in
+  view)
+    [[ "$#" == 4 && "$2" == '@openai/codex@>=0.145.0 <0.151.1-0' && "$3" == version && "$4" == --json ]]
+    printf '"0.145.0"\\n'
+    ;;
+  install)
+    [[ "$#" == 3 && "$2" == -g && "$3" == @openai/codex@0.145.0 ]]
+    printf '%s\\n' "$@" > "$E2E_INSTALL_LOG"
+    cat > "$E2E_INSTALLED_AGENT" <<'AGENT'
+#!/bin/sh
+case "$1" in
+  --version|version) echo 'codex 0.145.0';;
+  *) echo 'fresh-codex-ok';;
+esac
+AGENT
+    chmod +x "$E2E_INSTALLED_AGENT"
+    ;;
+  *) exit 64 ;;
+esac
+`);
+    await chmod(path.join(bin, "npm"), 0o755);
+    const env = { PATH: bin, SHELL: "/bin/sh", E2E_INSTALL_LOG: log, E2E_INSTALLED_AGENT: agent };
+    for (const args of [["codex"], ["agent", "codex"]]) {
+      const result = await runCli(installHome, args, env);
+      expect(result.code, result.stdout + result.stderr).not.toBe(0);
+    }
+    await expect(stat(log)).rejects.toThrow();
+    await expect(stat(agent)).rejects.toThrow();
+
+    const choose = async (command: string, accept: boolean, picker: boolean) => {
+      const child = spawnCliInPty(installHome, command, env);
+      const completion = collect(child);
+      try {
+        if (picker) {
+          await waitForOutput(child, /Choose your (?:default )?coding agent/);
+          child.stdin.write("\r");
+        }
+        await waitForOutput(child, /Install codex 0\.145\.0 with/);
+        expect(await readFile(configPath, "utf8")).toBe(originalConfig);
+        await expect(stat(path.join(installHome, ".codex/blue.config.toml"))).rejects.toThrow();
+        child.stdin.write(accept ? "y\r" : "\r");
+        return await completion;
+      } finally {
+        if (child.exitCode === null) child.kill("SIGTERM");
+      }
+    };
+    const declined = await choose("blue", false, true);
+    expect(declined.code).not.toBe(0);
+    expect(declined.stdout + declined.stderr).toContain("installation declined");
+    expect(await readFile(configPath, "utf8")).toBe(originalConfig);
+    await expect(stat(log)).rejects.toThrow();
+
+    const direct = await choose("blue codex", true, false);
+    expect(direct.code, direct.stdout + direct.stderr).toBe(0);
+    expect(direct.stdout).toContain("fresh-codex-ok");
+    expect(await readFile(log, "utf8")).toBe("install\n-g\n@openai/codex@0.145.0\n");
+    expect(await readFile(configPath, "utf8")).toBe(originalConfig);
+
+    // Reset only this fixture's artifacts for both all-absent selection surfaces.
+    for (const command of ["blue agent", "blue"]) {
+      await rm(agent);
+      await rm(path.join(installHome, ".codex"), { recursive: true, force: true });
+      await writeFile(configPath, originalConfig);
+      const result = await choose(command, true, true);
+      expect(result.code, result.stdout + result.stderr).toBe(0);
+      expect(await readFile(configPath, "utf8")).toContain('preferred_harness = "codex"');
+      if (command === "blue") expect(result.stdout).toContain("fresh-codex-ok");
+    }
   });
 
   test("@smoke CLI applies policy, reports health, and launches Codex transparently", async () => {

@@ -11,6 +11,7 @@ output "kms_key_arn" { value = aws_kms_key.blue.arn }
 output "certificate_arn" { value = var.include_domain ? aws_acm_certificate_validation.blue[0].certificate_arn : null }
 output "dashboard_hostname" { value = local.dashboard_hostname }
 output "api_hostname" { value = local.api_hostname }
+output "inference_proxy_hostname" { value = local.inference_proxy_hostname }
 output "cluster_name" { value = local.cluster_name }
 output "cluster_endpoint" { value = local.create_cluster ? aws_eks_cluster.blue[0].endpoint : null }
 output "vpc_id" { value = local.vpc_id }

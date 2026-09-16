@@ -6,6 +6,38 @@ icon: "terminal"
 
 The binary is named `blue`. Run `blue --help` for the arguments supported by your installed version.
 
+## Install
+
+On a workstation with Codex, Claude, Kimi, or OpenCode already on `PATH`, install Blue:
+
+<CodeGroup>
+```bash macOS and Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BlocksOrg/blue/releases/latest/download/install.sh | sh
+```
+
+```powershell Windows PowerShell
+irm https://github.com/BlocksOrg/blue/releases/latest/download/install.ps1 | iex
+```
+</CodeGroup>
+
+The installer detects your platform, downloads the matching release asset, verifies it against the release's `SHA256SUMS`, and installs `blue` in your user path. You can [inspect the release assets and installers](https://github.com/BlocksOrg/blue/releases) before running them.
+
+| Variable | Effect |
+| --- | --- |
+| `BLUE_VERSION=0.1.0` | Install a specific release instead of the latest. |
+| `BLUE_INSTALL_DIR=/path` | Install somewhere other than `~/.local/bin`. |
+| `BLUE_UPDATE_PATH=0` | Do not add the default install directory to your shell profile. |
+
+Then connect to your organization's deployment:
+
+```bash
+blue setup      # enter the Control API URL from your administrator, then sign in
+blue doctor     # check installed agents and organization policy
+blue codex      # launch Codex through Blue; or claude, kimi, opencode
+```
+
+## Commands
+
 | Command | Behavior |
 | --- | --- |
 | `blue` | Set up or renew login when needed, reconcile policy, and launch the preferred agent. Hold Ctrl and press `]` for controls. On first run it asks which agent to use; an installed agent whose version the policy blocks is offered with a repair prompt rather than hidden. |
