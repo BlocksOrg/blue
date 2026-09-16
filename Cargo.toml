@@ -70,9 +70,9 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
 windows-sys = "0.59"
-aws-config = { version = "=1.11.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
-aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
-aws-sdk-kms = { version = "=1.117.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-config = { version = "=1.12.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "=1.146.1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "=1.118.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 base64 = "0.22"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
