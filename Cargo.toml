@@ -49,7 +49,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 cliclack = "=0.3.6"
-console = "=0.15.11"
+console = "=0.16.6"
 similar = "=2.7.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 portable-pty = "0.8"
