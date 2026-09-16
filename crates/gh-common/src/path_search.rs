@@ -88,8 +88,8 @@ pub fn is_blue_or_shim(path: &Path) -> bool {
     }
     // Every candidate in every PATH entry reaches this point, and most of them
     // are real binaries — `codex` among them. A shim is a short text file, so
-    // rule the rest out on size instead of reading them into memory.
-    match std::fs::symlink_metadata(path) {
+    // reject the resolved candidate by size before reading it into memory.
+    match std::fs::metadata(path) {
         Ok(metadata) if metadata.len() <= crate::shim::MAX_SHIM_BYTES => {}
         _ => return false,
     }
@@ -193,6 +193,31 @@ mod tests {
         )
         .unwrap();
         assert!(!is_blue_or_shim(&binary));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn oversized_symlink_target_is_rejected_before_reading() {
+        use std::os::unix::fs::symlink;
+
+        let dir = fixture_dir("oversized-symlink");
+        let executable = PathBuf::from(format!(
+            "/{}",
+            "a".repeat(crate::shim::MAX_SHIM_BYTES as usize)
+        ));
+        let contents = crate::shim::render_shim(&executable, Harness::Codex).unwrap();
+        assert!(contents.len() as u64 > crate::shim::MAX_SHIM_BYTES);
+
+        let target = dir.join("target");
+        std::fs::write(&target, contents).unwrap();
+        let link = dir.join("codex");
+        symlink(&target, &link).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().len() <= crate::shim::MAX_SHIM_BYTES);
+        assert!(std::fs::metadata(&link).unwrap().len() > crate::shim::MAX_SHIM_BYTES);
+        assert!(!is_blue_or_shim(&link));
 
         std::fs::remove_dir_all(dir).unwrap();
     }
