@@ -1,0 +1,105 @@
+{{- include "blue.validate" . -}}
+{{/*
+Chart-issued certificates for the internal proxy <-> Control API mTLS hop.
+Requires the cert-manager.io/v1 CRDs in the cluster; the chart declares intent
+and cert-manager generates and renews the key material.
+
+Gated on a plain values flag rather than .Capabilities.APIVersions, which is
+false under `helm template` with no cluster and would silently drop every
+Certificate from rendered output.
+*/}}
+{{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") .Values.blue.internalTransport.certManager.enabled }}
+{{- $cm := .Values.blue.internalTransport.certManager }}
+{{- $issuerRef := default dict $cm.issuerRef }}
+{{- $fullname := include "blue.fullname" . }}
+{{- if not $issuerRef.name }}
+{{- $issuerRef = dict "name" (printf "%s-internal-ca" $fullname) "kind" "Issuer" }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-internal-selfsigned
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: internal-tls
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-internal-ca
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: internal-tls
+spec:
+  isCA: true
+  commonName: {{ $fullname }}-internal-ca
+  secretName: {{ $fullname }}-internal-ca
+  duration: {{ $cm.caDuration | quote }}
+  privateKey:
+    algorithm: {{ $cm.privateKey.algorithm }}
+    size: {{ $cm.privateKey.size }}
+  issuerRef:
+    name: {{ $fullname }}-internal-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-internal-ca
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: internal-tls
+spec:
+  ca:
+    secretName: {{ $fullname }}-internal-ca
+---
+{{- end }}
+{{/*
+The server SAN is not cosmetic: it must cover the internal Service name the
+proxy dials (templates/service.yaml). The client CN is cosmetic — the Control
+API only validates the chain and pins workload identity at the OAuth layer.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "blue.internalTransport.serverSecretName" . }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: internal-tls
+spec:
+  secretName: {{ include "blue.internalTransport.serverSecretName" . }}
+  commonName: {{ $fullname }}-control-api-internal
+  dnsNames:
+    - {{ $fullname }}-control-api-internal
+    - {{ printf "%s-control-api-internal.%s.svc" $fullname .Release.Namespace }}
+  usages: [digital signature, key encipherment, server auth]
+  duration: {{ $cm.duration | quote }}
+  renewBefore: {{ $cm.renewBefore | quote }}
+  privateKey:
+    algorithm: {{ $cm.privateKey.algorithm }}
+    size: {{ $cm.privateKey.size }}
+  issuerRef:
+    name: {{ $issuerRef.name }}
+    kind: {{ $issuerRef.kind }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "blue.internalTransport.clientSecretName" . }}
+  labels:
+    {{- include "blue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: internal-tls
+spec:
+  secretName: {{ include "blue.internalTransport.clientSecretName" . }}
+  commonName: {{ .Values.blue.inferenceProxyClientId }}
+  usages: [digital signature, key encipherment, client auth]
+  duration: {{ $cm.duration | quote }}
+  renewBefore: {{ $cm.renewBefore | quote }}
+  privateKey:
+    algorithm: {{ $cm.privateKey.algorithm }}
+    size: {{ $cm.privateKey.size }}
+  issuerRef:
+    name: {{ $issuerRef.name }}
+    kind: {{ $issuerRef.kind }}
+{{- end }}

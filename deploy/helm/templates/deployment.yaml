@@ -163,7 +163,7 @@ spec:
         {{- end }}
         {{- if and .Values.blue.enableInferenceProxy (eq .Values.blue.internalTransport.mode "mtls") }}
         - name: internal-tls
-          secret: { secretName: {{ .Values.blue.internalTransport.serverSecret | quote }} }
+          secret: { secretName: {{ include "blue.internalTransport.serverSecretName" . | quote }} }
         {{- end }}
         {{- with .Values.blue.config.existingConfigMap }}
         - name: blue-config

@@ -9,6 +9,7 @@ repository.workspace = true
 gh-common = { workspace = true }
 gh-config = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 portable-pty = { workspace = true }
 tracing = { workspace = true }
 semver = { workspace = true }
@@ -24,6 +25,3 @@ windows-sys = { workspace = true, features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
-
-[dev-dependencies]
-serde_json = { workspace = true }

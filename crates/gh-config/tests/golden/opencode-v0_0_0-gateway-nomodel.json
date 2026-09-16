@@ -1,0 +1,62 @@
+{
+  "args": [],
+  "env": {
+    "BLUE_OPENCODE_GATEWAY_TOKEN": "fixture-token",
+    "HARNESS_PACKAGE_COMPONENTS_SETTINGS": "{\"color\":\"blue\"}",
+    "OPENCODE_CONFIG_CONTENT": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"autoupdate\": false,\n  \"enabled_providers\": [\n    \"governed\"\n  ],\n  \"mcp\": {\n    \"fixture\": {\n      \"command\": [\n        \"fixture-mcp\",\n        \"--stdio\"\n      ],\n      \"enabled\": true,\n      \"type\": \"local\"\n    }\n  },\n  \"model\": \"governed/openai/gpt-5.6-sol\",\n  \"permission\": {\n    \"bash\": \"ask\",\n    \"edit\": \"ask\",\n    \"external_directory\": \"ask\",\n    \"fetch\": \"allow\",\n    \"glob\": \"allow\",\n    \"grep\": \"allow\",\n    \"list\": \"allow\",\n    \"mcp\": \"allow\",\n    \"question\": \"deny\",\n    \"read\": \"allow\",\n    \"skill\": \"allow\",\n    \"task\": \"allow\",\n    \"todoread\": \"allow\",\n    \"todowrite\": \"allow\",\n    \"write\": \"ask\"\n  },\n  \"provider\": {\n    \"governed\": {\n      \"models\": {\n        \"openai/gpt-5.6-sol\": {\n          \"name\": \"openai/gpt-5.6-sol\"\n        }\n      },\n      \"name\": \"Governed (Blue)\",\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"apiKey\": \"{env:BLUE_OPENCODE_GATEWAY_TOKEN}\",\n        \"baseURL\": \"https://gateway.example\"\n      }\n    }\n  }\n}\n",
+    "OPENCODE_CONFIG_DIR": "$HOME/.config/blue/runtime/opencode",
+    "OPENCODE_DISABLE_AUTOUPDATE": "1",
+    "PATH": "$HOME/package/bin:$PATH"
+  },
+  "files": [
+    "$HOME/.config/blue/runtime/opencode/agents",
+    "$HOME/.config/blue/runtime/opencode/opencode.json",
+    "$HOME/.config/blue/runtime/opencode/plugins",
+    "$HOME/.config/blue/runtime/opencode/plugins/blue-session-upload.js",
+    "$HOME/.config/blue/runtime/opencode/skills"
+  ],
+  "ownership": [
+    "$HOME/.config/blue/runtime/opencode/agents",
+    "$HOME/.config/blue/runtime/opencode/compatibility-state.json",
+    "$HOME/.config/blue/runtime/opencode/hooks",
+    "$HOME/.config/blue/runtime/opencode/opencode.json",
+    "$HOME/.config/blue/runtime/opencode/plugins",
+    "$HOME/.config/blue/runtime/opencode/skills"
+  ],
+  "removals": [
+    "$HOME/.config/blue/runtime/opencode/agents",
+    "$HOME/.config/blue/runtime/opencode/hooks",
+    "$HOME/.config/blue/runtime/opencode/plugins",
+    "$HOME/.config/blue/runtime/opencode/skills"
+  ],
+  "warnings": [
+    "`harnesses.opencode.managed_config.model` is unset; defaulting to `openai/gpt-5.6-sol`. Set it in your governance config to pin the model your gateway serves."
+  ],
+  "writes": [
+    {
+      "body": "---\nname: reviewer\ndescription: Review changes\n---\nReview carefully.\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/opencode/agents/reviewer.md"
+    },
+    {
+      "body": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"enabled_providers\": [\n    \"governed\"\n  ],\n  \"mcp\": {\n    \"fixture\": {\n      \"command\": [\n        \"fixture-mcp\",\n        \"--stdio\"\n      ],\n      \"enabled\": true,\n      \"type\": \"local\"\n    }\n  },\n  \"model\": \"governed/openai/gpt-5.6-sol\",\n  \"permission\": {\n    \"bash\": \"ask\",\n    \"edit\": \"ask\",\n    \"external_directory\": \"ask\",\n    \"fetch\": \"allow\",\n    \"glob\": \"allow\",\n    \"grep\": \"allow\",\n    \"list\": \"allow\",\n    \"mcp\": \"allow\",\n    \"question\": \"deny\",\n    \"read\": \"allow\",\n    \"skill\": \"allow\",\n    \"task\": \"allow\",\n    \"todoread\": \"allow\",\n    \"todowrite\": \"allow\",\n    \"write\": \"ask\"\n  },\n  \"provider\": {\n    \"governed\": {\n      \"models\": {\n        \"openai/gpt-5.6-sol\": {\n          \"name\": \"openai/gpt-5.6-sol\"\n        }\n      },\n      \"name\": \"Governed (Blue)\",\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"apiKey\": \"{env:BLUE_OPENCODE_GATEWAY_TOKEN}\",\n        \"baseURL\": \"https://gateway.example\"\n      }\n    }\n  }\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/opencode/opencode.json"
+    },
+    {
+      "body": "// Managed by Blue. Changes will be overwritten.\nconst BLUE_SESSION_ID = process.env.BLUE_SESSION_ID\nconst BLUE_DATA_DIR = process.env.BLUE_DATA_DIR\nconst blueTranscriptPath = (sessionID) =>\n  BLUE_SESSION_ID && BLUE_DATA_DIR\n    ? `${BLUE_DATA_DIR}/sessions/${BLUE_SESSION_ID}/opencode-transcript-${sessionID}.json`\n    : `${process.env.TMPDIR || \"/tmp\"}/blue-opencode-${sessionID}.json`\n\nexport const BlueSessionUpload = async ({ client, directory }) => {\n  const uploaded = new Set()\n  const started = new Set()\n  const ensureStarted = async (sessionID) => {\n    if (!sessionID || started.has(sessionID)) return\n    started.add(sessionID)\n    try {\n      const session = await client.session.get({ path: { id: sessionID } })\n      if (session.data?.parentID) return\n      const child = Bun.spawn([\"$BLUE\", \"session-start\", \"opencode\", \"--profile\", \"opencode-v0_0_0\"], {\n        stdin: \"pipe\", stdout: \"ignore\", stderr: \"inherit\",\n      })\n      child.stdin.write(JSON.stringify({\n        session_id: sessionID, source: \"startup\", cwd: directory,\n        hook_event_name: \"SessionStart\", transcript_path: blueTranscriptPath(sessionID),\n      }))\n      child.stdin.end()\n      await child.exited\n    } catch (error) {\n      started.delete(sessionID)\n      console.error(\"Blue session start failed\", error)\n    }\n  }\n  return { event: async ({ event }) => {\n    const sessionID = event.properties?.sessionID ?? event.properties?.info?.id\n    await ensureStarted(sessionID)\n    const idle = event.type === \"session.idle\" ||\n      (event.type === \"session.status\" && event.properties?.status?.type === \"idle\")\n    if (!idle) return\n    if (!sessionID || uploaded.has(sessionID)) return\n    uploaded.add(sessionID)\n    let transcriptPath\n    try {\n      const [session, messages] = await Promise.all([\n        client.session.get({ path: { id: sessionID } }),\n        client.session.messages({ path: { id: sessionID } }),\n      ])\n      if (session.data?.parentID) return\n      transcriptPath = blueTranscriptPath(sessionID)\n      // Match `opencode export` exactly so restoration can use the native\n      // `opencode import` contract without translating private database state.\n      await Bun.write(transcriptPath, JSON.stringify({ info: session.data, messages: messages.data }))\n      const child = Bun.spawn([\"$BLUE\", \"session-upload\", \"opencode\", \"--profile\", \"opencode-v0_0_0\"], {\n        stdin: \"pipe\", stdout: \"ignore\", stderr: \"inherit\",\n      })\n      child.stdin.write(JSON.stringify({\n        session_id: sessionID, transcript_path: transcriptPath, cwd: directory,\n        hook_event_name: \"SessionEnd\", reason: \"idle\",\n      }))\n      child.stdin.end()\n      await child.exited\n    } catch (error) {\n      uploaded.delete(sessionID)\n      console.error(\"Blue session upload failed\", error)\n    } finally {\n      if (transcriptPath && !BLUE_SESSION_ID) await Bun.file(transcriptPath).delete().catch(() => {})\n    }\n  } }\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/opencode/plugins/blue-session-upload.js"
+    },
+    {
+      "body": "export const Fixture = async () => ({})\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/opencode/plugins/fixture.js"
+    },
+    {
+      "body": "# Example\n\nA managed skill.\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/opencode/skills/example/SKILL.md"
+    }
+  ]
+}
