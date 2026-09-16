@@ -102,9 +102,11 @@ jobs:
       - run: scripts/check-sqlx-queries.sh
       - run: scripts/check-migration-classifications.sh
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets
-      - run: cargo test --workspace
-      - run: cargo test -p control-api --features postgres-tests
+      # --locked: a Cargo.lock that does not match the manifests is silently
+      # repaired in-job otherwise, and no required check ever sees the drift.
+      - run: cargo clippy --locked --workspace --all-targets
+      - run: cargo test --locked --workspace
+      - run: cargo test --locked -p control-api --features postgres-tests
 
   dashboard:
     runs-on: ubuntu-latest
