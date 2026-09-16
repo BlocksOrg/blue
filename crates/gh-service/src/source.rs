@@ -85,7 +85,10 @@ pub struct HttpConfigSource {
 impl HttpConfigSource {
     pub fn new(base_url: impl Into<String>) -> Result<Self, GhError> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent(concat!("blue/", env!("CARGO_PKG_VERSION")))
+            // `format!`, not `concat!`: `concat!` needs a literal, and the
+            // version is only a literal for a release build. A candidate has
+            // to identify itself as one here too.
+            .user_agent(format!("blue/{}", gh_common::blue_version()))
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(|e| GhError::service(format!("building http client: {e}")))?;

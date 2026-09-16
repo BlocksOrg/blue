@@ -2,11 +2,18 @@
 set -eu
 
 tag="${1:-}"
-if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-  echo "release tag must be vMAJOR.MINOR.PATCH" >&2
+# The optional `-rc.g<sha7>` suffix is a release candidate, cut from an
+# arbitrary ref by `.github/workflows/release.yml` with `candidate=true`. Its
+# tree still carries the plain version the seven literals below agree on — the
+# candidate string is baked into the artifacts, never written into the tree — so
+# only the MAJOR.MINOR.PATCH core is compared. Anything else (`-beta`,
+# `-rc.zzz`, a bare `-rc`) is still rejected: a tag shape nothing produces.
+if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.g[0-9a-f]{7})?$'; then
+  echo "release tag must be vMAJOR.MINOR.PATCH, optionally -rc.g<sha7>" >&2
   exit 64
 fi
 version="${tag#v}"
+version="${version%%-*}"
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 workspace="$(sed -n '/\[workspace.package\]/,/^$/s/^version = "\([^"]*\)"/\1/p' "$root/Cargo.toml")"
@@ -38,4 +45,4 @@ test -x "$root/deploy/consumer/provisioner.sh" || {
   echo "consumer provisioner executable is missing or not executable" >&2
   exit 1
 }
-echo "Release versions match $tag"
+echo "Release versions match $version (tag $tag)"
