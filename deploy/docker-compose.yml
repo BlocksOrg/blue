@@ -87,7 +87,7 @@ services:
       BETTER_AUTH_URL: http://127.0.0.1:3000
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-local-development-secret-change-before-production}
       HARNESS_BOOTSTRAP_ADMIN_EMAIL: ${HARNESS_BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
-      HARNESS_BOOTSTRAP_ADMIN_PASSWORD: ${HARNESS_BOOTSTRAP_ADMIN_PASSWORD:-change-me-before-testing}
+      HARNESS_BOOTSTRAP_ADMIN_PASSWORD: ${HARNESS_BOOTSTRAP_ADMIN_PASSWORD:-change-me-in-production}
       HARNESS_OAUTH_CLIENT_ID: blue-cli
       # Confidential OAuth client the inference proxy uses for M2M auth. The
       # secret must match the proxy's HARNESS_PROXY_OAUTH_CLIENT_SECRET.
