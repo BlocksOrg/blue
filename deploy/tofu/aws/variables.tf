@@ -58,6 +58,11 @@ variable "api_subdomain" {
   default     = "api"
   description = "Control API label relative to the zone. Empty means the zone apex; it must differ from dashboard_subdomain."
 }
+variable "inference_proxy_subdomain" {
+  type        = string
+  default     = ""
+  description = "Inference proxy label relative to the zone, used in gateway mode. Empty means no proxy hostname: it is left off the certificate and gets no record."
+}
 variable "alb_hostname" {
   type        = string
   default     = ""

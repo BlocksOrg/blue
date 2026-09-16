@@ -6,6 +6,10 @@ use std::path::PathBuf;
 use gh_common::Harness;
 use semver::Version;
 
+/// PATH resolution is shared with `gh-config`, which resolves the same
+/// binaries when it selects a compatibility implementation.
+pub use gh_common::path_search::{is_blue_or_shim, which, which_all};
+
 /// A harness found on `PATH`.
 #[derive(Debug, Clone)]
 pub struct Detected {
@@ -72,133 +76,9 @@ pub fn detect_all() -> Vec<(Harness, Option<Detected>)> {
     Harness::ALL.iter().map(|&h| (h, detect(h))).collect()
 }
 
-/// Minimal `which`: scan `$PATH` for an executable file named `name`.
-pub fn which(name: &str) -> Option<PathBuf> {
-    which_all(name)
-        .into_iter()
-        .find(|path| !is_blue_or_shim(path))
-}
-
-/// Locate every matching executable in PATH order.
-pub fn which_all(name: &str) -> Vec<PathBuf> {
-    let mut matches = Vec::new();
-    let Some(path) = std::env::var_os("PATH") else {
-        return matches;
-    };
-    for dir in std::env::split_paths(&path) {
-        for candidate in executable_candidates(&dir, name) {
-            if is_executable(&candidate) {
-                matches.push(candidate);
-            }
-        }
-    }
-    matches
-}
-
-#[cfg(not(windows))]
-fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
-    vec![dir.join(name)]
-}
-
-#[cfg(windows)]
-fn executable_candidates(dir: &std::path::Path, name: &str) -> Vec<PathBuf> {
-    let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-    windows_executable_candidates(dir, name, &pathext.to_string_lossy())
-}
-
-#[cfg(any(windows, test))]
-fn windows_executable_candidates(dir: &std::path::Path, name: &str, pathext: &str) -> Vec<PathBuf> {
-    let path = std::path::Path::new(name);
-    if path.extension().is_some() {
-        return vec![dir.join(path)];
-    }
-    pathext
-        .split(';')
-        .filter(|extension| !extension.is_empty())
-        .map(|extension| dir.join(format!("{name}{extension}")))
-        .collect()
-}
-
-fn is_blue_or_shim(path: &std::path::Path) -> bool {
-    if blue_executable().is_some_and(|current| {
-        std::fs::canonicalize(path).is_ok_and(|candidate| paths_equal(current, &candidate))
-    }) {
-        return true;
-    }
-    // Every candidate in every PATH entry reaches this point, and most of them
-    // are real binaries — `codex` among them. A shim is a short text file, so
-    // rule the rest out on size instead of reading them into memory.
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.len() <= gh_common::shim::MAX_SHIM_BYTES => {}
-        _ => return false,
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    Harness::ALL
-        .iter()
-        .copied()
-        .any(|harness| gh_common::shim::managed_shim(&contents, harness))
-}
-
-/// The canonical path of the running `blue` binary, resolved once. Detection
-/// consults it for every candidate in every PATH entry.
-fn blue_executable() -> Option<&'static std::path::Path> {
-    static EXECUTABLE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    EXECUTABLE
-        .get_or_init(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|current| std::fs::canonicalize(current).ok())
-        })
-        .as_deref()
-}
-
-#[cfg(windows)]
-fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
-    left.as_os_str()
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
-}
-
-#[cfg(not(windows))]
-fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
-    left == right
-}
-
-#[cfg(unix)]
-fn is_executable(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &std::path::Path) -> bool {
-    path.is_file()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn windows_candidates_preserve_pathext_order_and_explicit_extension() {
-        let dir = PathBuf::from("prefix");
-        assert_eq!(
-            windows_executable_candidates(&dir, "codex", ".CMD;;.EXE;.BAT"),
-            vec![
-                dir.join("codex.CMD"),
-                dir.join("codex.EXE"),
-                dir.join("codex.BAT")
-            ]
-        );
-        assert_eq!(
-            windows_executable_candidates(&dir, "codex.exe", ".CMD;.EXE"),
-            vec![dir.join("codex.exe")]
-        );
-    }
 
     #[test]
     #[cfg(unix)]

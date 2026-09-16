@@ -1,0 +1,5 @@
+services:
+  inference-proxy:
+    ports: !override ["127.0.0.1:8081:8081"]
+  litellm:
+    ports: !override ["127.0.0.1:4000:4000"]

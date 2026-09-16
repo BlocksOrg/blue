@@ -181,3 +181,45 @@ never drift on agent versions. The extra historical samples for the
 [version matrix](#version-matrix) live in `agents.matrix.json` (slim-only, not
 symlinked); it must list only versions **other** than the lock pin — the
 `matrix_excludes_lock_pin` guard test fails if it re-lists the pin.
+
+## On-demand native Windows clients
+
+[`../e2e-native`](../e2e-native/README.md) runs these **same scenario bodies and
+version matrix** on a manually prepared Windows x64 machine against a separate
+disposable Linux backend per suite/run attempt. No native Windows/AWS workflow
+is scheduled in CI. See the native runner README for setup and commands. Existing
+Linux suites retain Unix coverage; additional macOS native certification is
+discontinued.
+Unix still uses temporary HOME/XDG roots; Windows uses real Known Folders in a
+fresh disposable account, serial tests, an exclusive reservation, and descendant
+cleanup before removing only test-owned application state.
+
+| Additional native evidence | Assertion |
+| --- | --- |
+| Shared config matrix | Exact pinned/historical agent, model, MCP and managed skill |
+| Gateway invocation | Fresh per-profile MCP markers and invocation nonce in uploaded bundle |
+| Native isolation | Windows account preflight, session ACL, sequential cleanup, one active Home and child completion |
+| Client/backend connection | Fresh inert health-object digest and DB query through loopback SSM tunnels |
+| Required coverage | Missing endpoints, agents and matrix cells fail the manual run; expected/executed report |
+
+New knobs: `E2E_SLIM_REQUIRED=1` makes missing prerequisites failures;
+`E2E_SLIM_REPORT_DIR` receives completed cell evidence;
+`E2E_SLIM_DISPOSABLE_ACCOUNT=1` acknowledges the required fresh Windows account.
+`E2E_SLIM_MARKER_DIR` is set per Home for the managed MCP child. Native Blue config,
+data and cache accessors replace Unix path assumptions. Matrix generation reads
+`../e2e/agents.lock.json` directly, including on Windows without Git symlinks.
+The Linux `run.sh` delegates byte-identical legacy fixture decoding to Node.
+
+**Real vs. faked:** native governance still seeds a signed session and synthetic
+transcripts; it does not automate browser login. Gateway runs actual installed
+agents through real inference. The full Linux suite retains browser/device
+approval, SCIM, mTLS and container-topology coverage. Windows ARM64 and full
+upstream TUI certification are not implied by these tests. Native parity requires
+successful native gateway results, not just a passing fixture suite or workflow.
+
+Native package fixtures use a seeded managed artifact and the authenticated download
+API because public package URLs reject HTTP/loopback. Production access rules
+are unchanged; the advertised MinIO URL is signed before the client receives it.
+The native overlay keeps the executable archive private; anonymous reads are
+limited to a fresh `health.txt` object for readiness and tunnel digest checks.
+The config matrix exercises the real signed archive download and SHA-256 check.
