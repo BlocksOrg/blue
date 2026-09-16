@@ -50,7 +50,7 @@ tar = "0.4"
 
 [dev-dependencies]
 predicates = "3"
-toml = "0.8"
+toml = "1.1"
 
 # `build.rs` generates one nextest case per `(agent, version)` matrix cell from
 # the committed JSON. This dep stays out of the deployment image's cargo-chef
