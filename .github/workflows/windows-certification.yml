@@ -2,7 +2,6 @@ name: Windows desktop certification
 
 on:
   push:
-    branches: [main]
     tags: ["v*.*.*"]
 
 permissions:
