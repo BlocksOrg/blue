@@ -14,8 +14,13 @@ cli="$(sed -n '/\[package\]/,/^$/s/^version = "\([^"]*\)"/\1/p' "$root/crates/gh
 contract="$(sed -n 's/^  version: "\([^"]*\)"/\1/p' "$root/deploy/contract/governance.openapi.yaml" | head -n 1)"
 chart="$(sed -n 's/^version: \([^ ]*\)/\1/p' "$root/deploy/helm/Chart.yaml" | head -n 1)"
 app="$(sed -n 's/^appVersion: "\([^"]*\)"/\1/p' "$root/deploy/helm/Chart.yaml")"
+compose="$(sed -n 's/^.*BLUE_DEPLOYMENT_VERSION:-\([^}]*\)}.*$/\1/p' "$root/deploy/docker-compose.yml" | head -n 1)"
+# Copied verbatim into blue-deployment-v<tag>.tar.gz by package-deployment.sh,
+# so a stale literal here ships the wrong version inside the release bundle.
+consumer="$(sed -n 's/^.*--build-arg BLUE_VERSION=\([^ ]*\).*$/\1/p' "$root/deploy/consumer/.github/workflows/deploy.yml" | head -n 1)"
 
-for pair in "workspace:$workspace" "cli:$cli" "contract:$contract" "chart:$chart" "chart appVersion:$app"; do
+for pair in "workspace:$workspace" "cli:$cli" "contract:$contract" "chart:$chart" \
+  "chart appVersion:$app" "compose default:$compose" "consumer build arg:$consumer"; do
   name="${pair%%:*}"
   actual="${pair#*:}"
   if [ "$actual" != "$version" ]; then
