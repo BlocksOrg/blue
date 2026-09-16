@@ -1,0 +1,147 @@
+name: Release Please
+
+# Keeps exactly one release PR open against `main`, computing the next version
+# from the conventional commits since the last release and writing CHANGELOG.md.
+# Merging that PR creates the `v<version>` tag and a draft GitHub Release, which
+# fires release.yml to build every artifact and flip the draft live.
+#
+# Two jobs, deliberately in one workflow. release-please decides the version;
+# `finalize` writes it into the tree, because none of release-please's three
+# declarative updaters work on this repo (see RELEASING.md).
+#
+# `RELEASE_PLEASE_TOKEN` is a fine-grained PAT, not GITHUB_TOKEN. Two reasons,
+# both hard blocks rather than preferences: `can_approve_pull_request_reviews`
+# is false at the org level, which gates PR *creation*; and events authored by
+# GITHUB_TOKEN start no workflow runs, so the release PR's head would carry none
+# of the required checks and could never be merged.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never cancel in progress: a cancelled run can leave the branch carrying
+# release-please's commit with no finalize commit behind it.
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_BRANCH: release-please--branches--main
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Two config keys look like defaults and are not; neither is safe to drop.
+      #
+      #   include-component-in-tag: false
+      #     The default is true. It only happens to yield `v0.2.0` because a root
+      #     package resolves to an empty component. If that ever stops holding,
+      #     the tag comes out as `blue-v0.2.0`, which does not match release.yml's
+      #     `v*.*.*` trigger, and nothing publishes — silently.
+      #
+      #   pull-request-title-pattern: "chore: release ${version}"
+      #     The default is `chore(main): release X`, and `main` is not in
+      #     AGENTS.md's scope list. Squash-merge writes the PR title into main's
+      #     log. Safe to override — release-please finds its own merged release
+      #     PRs by the `autorelease: pending` label, not by title.
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Writes the decided version across every version-bearing file and freezes the
+  # documentation snapshot, as one extra commit on the release branch.
+  #
+  # Self-discovering and idempotent: it finds the open PR, reads the version from
+  # the manifest, and commits only if the tree actually changed. Re-running it is
+  # always safe, which is why "Re-run failed jobs" is the whole recovery story
+  # and there is no separate entry point.
+  finalize:
+    needs: release-please
+    # NOT gated on the action's `prs_created` output: that is undefined for a PR
+    # that was only updated, and `always-update` means most runs only update.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+    steps:
+      - id: pr
+        name: Find the open release PR
+        run: |
+          set -euo pipefail
+          number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$RELEASE_BRANCH" \
+            --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$number" ]; then
+            echo "No open release PR on $RELEASE_BRANCH; nothing to finalize."
+          else
+            echo "Finalizing release PR #$number."
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      # Checked out with the PAT, not GITHUB_TOKEN: a GITHUB_TOKEN push fires no
+      # `synchronize` event, so the new head would carry no checks at all.
+      - if: steps.pr.outputs.number != ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: release-please--branches--main
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      - if: steps.pr.outputs.number != ''
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # scripts/set-version.sh ends with `cargo update --workspace`.
+      - if: steps.pr.outputs.number != ''
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - if: steps.pr.outputs.number != ''
+        name: Write the release version and freeze the documentation snapshot
+        run: |
+          set -euo pipefail
+          version="$(node -p 'JSON.parse(require("node:fs").readFileSync(".release-please-manifest.json", "utf8"))["."]')"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "manifest version is not MAJOR.MINOR.PATCH (got '$version')" >&2
+            exit 1
+          fi
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+          scripts/set-version.sh "$version"
+
+          # release-version.mjs throws if docs.json already lists the version, so
+          # skip it on a re-run rather than letting an idempotent job fail.
+          if [ -d "apps/docs/$version" ]; then
+            echo "apps/docs/$version already exists; leaving the snapshot as-is"
+          else
+            node apps/docs/scripts/release-version.mjs "$version"
+          fi
+
+          scripts/check-release-version.sh "v$version"
+          node apps/docs/scripts/check-release-snapshot.mjs "$version"
+
+      - if: steps.pr.outputs.number != ''
+        name: Commit onto the release branch
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Tree already matches $RELEASE_VERSION; nothing to commit."
+            exit 0
+          fi
+          # The PAT owner's noreply address, so the commit is attributed to a
+          # real account and the ruleset's
+          # `require_extra_approval_for_unattributed_changes` is satisfied.
+          login="$(gh api user --jq .login)"
+          id="$(gh api user --jq .id)"
+          git config user.name "$login"
+          git config user.email "${id}+${login}@users.noreply.github.com"
+          git add -A
+          # A separate commit, not --amend + force-push: no history rewrite, and
+          # no race against a concurrent release-please rebuild.
+          git commit -m "chore: set the release version to $RELEASE_VERSION"
+          git push origin "HEAD:refs/heads/$RELEASE_BRANCH"

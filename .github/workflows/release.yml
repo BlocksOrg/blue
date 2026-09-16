@@ -20,6 +20,8 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -29,9 +31,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: version
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then tag="$GITHUB_REF_NAME"; publish=true; else tag="${{ inputs.tag }}"; publish=false; fi
           scripts/check-release-version.sh "$tag"
+          # A draft Release for this tag is expected — release-please creates it
+          # when the release PR merges. A *published* one means the tag already
+          # shipped, and rebuilding over it would stomp a live release's assets
+          # (`upload --clobber`, `edit --latest`). Check before ~30 minutes of
+          # builds, not after.
+          if [[ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)" == "false" ]]; then
+            echo "$tag is already published; refusing to rebuild over it" >&2
+            exit 1
+          fi
           {
             echo "tag=$tag"
             echo "version=${tag#v}"
@@ -178,7 +191,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ needs.validate.outputs.tag }}" --draft --verify-tag --generate-notes --title "${{ needs.validate.outputs.tag }}"
+          # release-please already created the draft Release holding the
+          # changelog, so only create one when it is missing — which keeps the
+          # manual `git tag && git push` path working unchanged.
+          if ! gh release view "${{ needs.validate.outputs.tag }}" >/dev/null 2>&1; then
+            gh release create "${{ needs.validate.outputs.tag }}" --draft --verify-tag --generate-notes --title "${{ needs.validate.outputs.tag }}"
+          fi
           gh release upload "${{ needs.validate.outputs.tag }}" release/* --clobber
           gh release edit "${{ needs.validate.outputs.tag }}" --draft=false --latest
       - if: needs.validate.outputs.publish != 'true'
