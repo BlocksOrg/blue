@@ -188,12 +188,21 @@ paths:
       responses:
         "200":
           description: The governance config
+          headers:
+            X-Blue-Required-Client-Version:
+              description: Exact recommended Blue CLI release, identical to required_client_version in the document.
+              schema: { type: string }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/GovernanceConfig" }
         "403": { description: Authenticated email has no provisioned gateway account }
         "409": { description: Gateway key provisioning is required }
-        "426": { description: Client contract version or capabilities are insufficient }
+        "426":
+          description: Client contract version or capabilities are insufficient
+          headers:
+            X-Blue-Required-Client-Version:
+              description: Exact recommended Blue CLI release, provided even when the document cannot be consumed.
+              schema: { type: string }
 
   /harness-metadata:
     get:
@@ -1684,8 +1693,12 @@ components:
         contract_version: { type: integer, default: 1, description: Governance wire contract version }
         required_capabilities:
           type: array
-          items: { type: string, enum: [adapter_intervals, compiled_harness_registry, transactional_reconcile, unverified_harness_versions, versioned_state] }
+          items: { type: string, enum: [adapter_intervals, compiled_harness_registry, tenant_client_version_pin, transactional_reconcile, unverified_harness_versions, versioned_state] }
         minimum_client_version: { type: string, description: Operator-visible rollout floor; required capabilities enforce compatibility }
+        required_client_version:
+          type: string
+          description: Canonical exact SemVer of the recommended Blue CLI release. Defaults to the control API deployment version. Requires tenant_client_version_pin capability.
+          example: "0.1.0"
         ttl_seconds: { type: integer, description: Client cache TTL (default 300), example: 300 }
         required: { type: boolean, description: "If true, client fails closed without fresh config" }
         allowed_harnesses:
