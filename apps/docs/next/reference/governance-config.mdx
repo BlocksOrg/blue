@@ -79,6 +79,7 @@ harnesses:
 | `allowed_harnesses` | Harness names permitted by policy. |
 | `harnesses` | Per-harness policy keyed by supported harness name. |
 | `minimum_client_version` | Operator-visible rollout floor; it does not replace capability enforcement. |
+| `required_client_version` | Optional canonical exact SemVer recommendation for the Blue CLI. Defaults to the control API deployment version and requires `tenant_client_version_pin`. |
 | `packages` | Organization-selected, immutable extension packages and their harness adapters. |
 | `gateway` | Global inference routing policy applied to every allowed coding agent. |
 | `session_upload` | Global portable-session capture policy; compatible profiles upload integrity-checked bundles while older clients remain accepted as non-resumable raw artifacts. |
@@ -138,3 +139,16 @@ Standalone skills can live anywhere in an archive and do not require a native pl
 The dashboard can inspect `github:owner/repository@ref` for a public GitHub repository, a public HTTPS archive, or a deployment-managed GitHub/Bitbucket connection. Public GitHub refs resolve to immutable codeload URLs; clients download public sources directly and verify their exact digest. Managed repositories are resolved to an immutable commit and mirrored into organization-scoped object storage. Governance contains an `artifact_id` and exact digest; clients use their existing harness session to request a fresh short-lived download and never receive repository credentials.
 
 Removing a package disables it for subsequent governed launches. Unmodified owned content is deleted; locally changed content is moved to quarantine and reported as drift.
+
+## Recommended Blue CLI release
+
+The reference control API advertises its deployment version as the exact
+recommended Blue CLI release. Set
+`governance.required_client_version` to a published, compatible release to
+override that default. The value remains an exact canonical SemVer, not a range.
+`minimum_client_version` remains informational.
+
+The `tenant_client_version_pin` capability is required whenever a pin is served.
+The `X-Blue-Required-Client-Version` header exposes the same pin on successful
+config responses and capability/contract rejections (HTTP 426). Older clients
+without this capability cannot consume the document.

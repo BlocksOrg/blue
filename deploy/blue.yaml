@@ -67,6 +67,9 @@ governance:
     - gateway_inference_jwt
   # Required when harness version ranges or versioned package adapters are used.
   minimum_client_version: "0.1.0"
+  # Exact recommended release and major compatibility boundary. Same-major
+  # differences warn and continue; different majors block.
+  # required_client_version: "0.1.0"
   ttl_seconds: 300
   required: true
   allowed_harnesses: [codex, claude, kimi, opencode]

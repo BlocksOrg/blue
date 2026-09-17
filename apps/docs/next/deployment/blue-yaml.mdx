@@ -305,6 +305,7 @@ The `governance` section is the deployment-authored baseline delivered to client
 | `contract_version` | Wire contract version. Current clients support version 3. |
 | `required_capabilities` | Features a client must support before accepting policy. |
 | `minimum_client_version` | Operator-visible rollout floor; required when using harness version ranges or versioned package adapters. |
+| `required_client_version` | Optional canonical exact SemVer recommendation for the Blue CLI. Defaults to the control API deployment version and requires `tenant_client_version_pin`. |
 | `ttl_seconds` | Client cache and polling interval; defaults to 300 seconds. |
 | `required` | When true, clients fail closed instead of launching from stale cached policy. |
 | `allowed_harnesses` | Supported agent keys users may launch through Blue. |
@@ -402,3 +403,19 @@ Every source must be immutable and SHA-256 pinned. Use `platform_sources` when h
 <Check>
   A complete rollout has healthy service probes, no unresolved environment references, the expected governance revision in the dashboard, and matching desired/applied revisions on a test client.
 </Check>
+
+## Recommended Blue CLI release
+
+The reference control API advertises its deployment version as the exact
+recommended Blue CLI release. Set
+`governance.required_client_version` to a published, compatible release to
+override that default, for example during a rolling upgrade. The default is
+applied when serving a document, so old revisions follow new deployments without
+being rewritten. An explicit value stays fixed across rollouts. Use canonical
+SemVer without a `v` prefix or range operators. `minimum_client_version` remains
+informational.
+
+The `tenant_client_version_pin` capability is required whenever a pin is served.
+The `X-Blue-Required-Client-Version` header exposes the same pin on successful
+config responses and capability/contract rejections (HTTP 426). Older clients
+without this capability cannot consume the document.

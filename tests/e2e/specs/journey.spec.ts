@@ -1622,7 +1622,7 @@ esac
         headers: {
           authorization: `Bearer ${memberOauth.token}`,
           "x-blue-contract-version": "3",
-          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,unverified_harness_versions",
+          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,unverified_harness_versions,tenant_client_version_pin",
         },
       });
       expect(memberConfig.status(), await memberConfig.text()).toBe(200);
