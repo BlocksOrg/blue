@@ -4,6 +4,7 @@
 // governance config, and transparently wrap the chosen harness. See the plan
 // and each crate's docs for the design.
 
+mod client_version;
 mod commands;
 mod repair;
 mod supervisor;
@@ -131,6 +132,25 @@ enum ShimAction {
     },
 }
 
+fn foreground_command(command: &Option<Command>) -> bool {
+    matches!(
+        command,
+        None | Some(
+            Command::Setup
+                | Command::Login { .. }
+                | Command::Doctor
+                | Command::Agent { .. }
+                | Command::Status
+                | Command::Verify
+                | Command::Run { .. }
+                | Command::Config
+                | Command::Gateway
+                | Command::Apply { .. }
+                | Command::External(_)
+        )
+    )
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -142,6 +162,7 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
+    let foreground = foreground_command(&cli.command);
     let result = match cli.command {
         None => commands::start(),
         Some(Command::Version) => commands::version(),
@@ -176,7 +197,9 @@ fn main() {
     };
 
     if let Err(e) = result {
-        print_error(&e);
+        if !client_version::handle(&e, foreground) {
+            print_error(&e);
+        }
         std::process::exit(1);
     }
 }

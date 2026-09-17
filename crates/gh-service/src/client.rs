@@ -14,6 +14,7 @@ use crate::source::{ConfigSource, FileConfigSource, HttpConfigSource};
 
 pub struct ServiceClient {
     source: Box<dyn ConfigSource>,
+    client_version: String,
     service_url: Option<String>,
 }
 
@@ -29,24 +30,29 @@ impl ServiceClient {
     /// Build the client from `blue.toml`: `http` if a service URL is set,
     /// otherwise a `file` source (explicit `config_file`, else a conventional
     /// local path). This is the "no vendor URL, zero-config file dev" path.
-    pub fn from_config(cfg: &BlueToml) -> Result<Self, GhError> {
+    pub fn from_config(cfg: &BlueToml, client_version: &str) -> Result<Self, GhError> {
         let source: Box<dyn ConfigSource> = if cfg.has_http_service() {
-            Box::new(HttpConfigSource::new(cfg.service.url.clone())?)
+            Box::new(HttpConfigSource::new(
+                cfg.service.url.clone(),
+                client_version,
+            )?)
         } else if let Some(file) = &cfg.service.config_file {
-            Box::new(FileConfigSource::new(file))
+            Box::new(FileConfigSource::new(file, client_version))
         } else {
             let default = paths::blue_config_dir()?.join("blue.yaml");
-            Box::new(FileConfigSource::new(default))
+            Box::new(FileConfigSource::new(default, client_version))
         };
         Ok(ServiceClient {
             source,
+            client_version: client_version.into(),
             service_url: cfg.has_http_service().then(|| cfg.service.url.clone()),
         })
     }
 
-    pub fn with_source(source: Box<dyn ConfigSource>) -> Self {
+    pub fn with_source(source: Box<dyn ConfigSource>, client_version: &str) -> Self {
         ServiceClient {
             source,
+            client_version: client_version.into(),
             service_url: None,
         }
     }
@@ -186,7 +192,19 @@ impl ServiceClient {
     /// Fetch fresh config and update the cache. `now` is unix seconds (injected
     /// for testability).
     pub fn fetch(&self, session: &Session, now: i64) -> Result<GovernanceConfig, GhError> {
-        let config = self.source.fetch(session)?;
+        let result = self.source.fetch(session).and_then(|config| {
+            config.ensure_client_compatible(&self.client_version)?;
+            Ok(config)
+        });
+        if matches!(
+            &result,
+            Err(GhError::ClientVersionMismatch { .. } | GhError::Config(_) | GhError::Serde(_))
+        ) {
+            if let Err(error) = cache::invalidate() {
+                tracing::error!(%error, "could not invalidate incompatible governance cache");
+            }
+        }
+        let config = result?;
         cache::save(&config, now)?;
         Ok(config)
     }
@@ -205,7 +223,8 @@ impl ServiceClient {
             // describe something only the user or administrator can fix.
             // Falling back to cache here would hide the rejection.
             Err(
-                error @ (GhError::Config(_)
+                error @ (GhError::ClientVersionMismatch { .. }
+                | GhError::Config(_)
                 | GhError::Serde(_)
                 | GhError::Unauthorized(_)
                 | GhError::Forbidden(_)
@@ -219,11 +238,7 @@ impl ServiceClient {
                     // A cache written by a newer client must not bypass the
                     // current binary's contract/capability gate after a
                     // downgrade.
-                    config.ensure_client_compatible().map_err(|reason| {
-                        GhError::config(format!(
-                            "cached governance-config is unsupported by this client: {reason}"
-                        ))
-                    })?;
+                    config.ensure_client_compatible(&self.client_version)?;
                     // The cache deliberately carries no inference JWT, so a
                     // gateway-mode config read from it can never be launched.
                     // Fail closed rather than dropping to direct mode, which
@@ -404,7 +419,22 @@ mod tests {
     }
 
     fn client(error: fn() -> GhError) -> ServiceClient {
-        ServiceClient::with_source(Box::new(FailingSource(error)))
+        ServiceClient::with_source(Box::new(FailingSource(error)), "0.1.0")
+    }
+
+    #[test]
+    fn contract_rejection_invalidates_cache_across_invocations() {
+        let _guard = with_cache_home("client-426");
+        cache::save(&governance_only(), 100).unwrap();
+        assert!(matches!(
+            client(|| GhError::config("HTTP 426: unsupported capabilities"))
+                .fetch_or_cached(&Session::bearer("t"), 101),
+            Err(GhError::Config(_))
+        ));
+        assert!(cache::load().unwrap().is_none());
+        assert!(client(|| GhError::service("offline"))
+            .fetch_or_cached(&Session::bearer("t"), 102)
+            .is_err());
     }
 
     #[test]
@@ -487,5 +517,63 @@ mod tests {
         assert!(error
             .to_string()
             .contains("invalid governance revision event"));
+    }
+}
+
+#[cfg(test)]
+mod client_version_tests {
+    use super::*;
+    struct Source(Option<String>);
+    impl ConfigSource for Source {
+        fn describe(&self) -> String {
+            "fixture".into()
+        }
+        fn fetch(&self, _: &Session) -> Result<GovernanceConfig, GhError> {
+            Ok(serde_json::from_value(
+                serde_json::json!({"revision":"r1", "required_client_version": self.0}),
+            )
+            .unwrap())
+        }
+    }
+    struct Offline;
+    impl ConfigSource for Offline {
+        fn describe(&self) -> String {
+            "offline".into()
+        }
+        fn fetch(&self, _: &Session) -> Result<GovernanceConfig, GhError> {
+            Err(GhError::service("offline"))
+        }
+    }
+    #[test]
+    fn live_custom_source_mismatch_invalidates_previous_cache_for_next_invocation() {
+        let _guard = cache::test_support::with_cache_home("version-live");
+        let session = Session::bearer("fixture");
+        let matching = ServiceClient::with_source(Box::new(Source(Some("7.8.9".into()))), "7.8.9");
+        matching.fetch(&session, 100).unwrap();
+        let changed = ServiceClient::with_source(Box::new(Source(Some("8.0.0".into()))), "7.8.9");
+        assert!(matches!(
+            changed.fetch_or_cached(&session, 101),
+            Err(GhError::ClientVersionMismatch { .. })
+        ));
+        assert!(cache::load().unwrap().is_none());
+        let offline = ServiceClient::with_source(Box::new(Offline), "7.8.9");
+        assert!(offline.fetch_or_cached(&session, 102).is_err());
+    }
+    #[test]
+    fn cached_pin_is_checked_even_when_optional_and_stale() {
+        let _guard = cache::test_support::with_cache_home("version-cached");
+        let session = Session::bearer("fixture");
+        ServiceClient::with_source(Box::new(Source(Some("7.8.9".into()))), "7.8.9")
+            .fetch(&session, 100)
+            .unwrap();
+        let matching = ServiceClient::with_source(Box::new(Offline), "7.8.9");
+        assert!(matching.fetch_or_cached(&session, 9999).is_ok());
+        let same_major = ServiceClient::with_source(Box::new(Offline), "7.8.10");
+        assert!(same_major.fetch_or_cached(&session, 9999).is_ok());
+        let different = ServiceClient::with_source(Box::new(Offline), "8.0.0");
+        assert!(matches!(
+            different.fetch_or_cached(&session, 9999),
+            Err(GhError::ClientVersionMismatch { .. })
+        ));
     }
 }

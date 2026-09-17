@@ -399,9 +399,10 @@ pub fn reconcile_loop(
 /// not be, because nothing the daemon does will fix it.
 fn failure_backoff(error: &GhError) -> (u64, bool) {
     match error {
-        GhError::Unauthorized(_) | GhError::Forbidden(_) | GhError::ActionRequired(_) => {
-            (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true)
-        }
+        GhError::ClientVersionMismatch { .. }
+        | GhError::Unauthorized(_)
+        | GhError::Forbidden(_)
+        | GhError::ActionRequired(_) => (GovernanceConfig::DEFAULT_TTL_SECONDS * 4, true),
         _ => (GovernanceConfig::DEFAULT_TTL_SECONDS, false),
     }
 }
