@@ -25,6 +25,7 @@ const claude: HarnessMetadata = {
   description: "",
   binary_names: ["claude"],
   install_command_template: "",
+  gateway_model_exposure: "selected_only",
   capabilities: [],
   component_rules: openRules,
   generations: [

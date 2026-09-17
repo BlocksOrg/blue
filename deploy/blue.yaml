@@ -55,7 +55,7 @@ control_api:
 # is projected into this policy; runtime settings and secrets never leave the server.
 governance:
   revision: "2026-09-06.1"
-  contract_version: 3
+  contract_version: 4
   required_capabilities:
     - adapter_intervals
     - compiled_harness_registry
@@ -65,6 +65,7 @@ governance:
     - versioned_state
     # Required when the gateway overlay is active.
     - gateway_inference_jwt
+    - gateway_model_catalog
   # Required when harness version ranges or versioned package adapters are used.
   minimum_client_version: "0.1.0"
   ttl_seconds: 300
@@ -79,6 +80,7 @@ governance:
       # config format. Also add unverified_harness_versions to
       # required_capabilities so older clients fail closed.
       # allow_unverified_versions: true
+      gateway_models: [gpt-5.6-sol]
       managed_config:
         model: gpt-5.6-sol
         reasoning_effort: low
@@ -89,13 +91,16 @@ governance:
       # generation onward. Keep the local stack from selecting an older native
       # layout for packages added through the dashboard.
       version_requirement: ">=2.0.12, <2.1.253-0"
+      gateway_models: [claude-opus-4-8]
       managed_config:
         model: claude-opus-4-8
     kimi:
+      gateway_models: [moonshot-ai/kimi-k2.6]
       managed_config:
         model: moonshot-ai/kimi-k2.6
         auto_approve: true
     opencode:
+      gateway_models: [anthropic/claude-opus-4-8]
       managed_config:
         model: anthropic/claude-opus-4-8
 

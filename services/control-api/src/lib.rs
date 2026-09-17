@@ -2711,6 +2711,12 @@ async fn reconcile_deployment_governance(
         .map_err(|error| {
             ApiError::internal(format!("decoding merged governance config: {error}"))
         })?;
+    // The dashboard may have saved its capability list before the deployment
+    // enabled a newer gateway feature. Reassert the server-owned gateway mode
+    // after the three-way merge so its required capability floor cannot be
+    // lost to an older saved revision.
+    apply_deployment_gateway_policy(&mut merged, config.gateway_kind.as_deref());
+    let merged_value = normalized_governance_value(&merged)?;
     validate_complete_governance(&merged).map_err(|error| {
         ApiError::internal(format!("merged governance config is invalid: {error}"))
     })?;
