@@ -25,9 +25,15 @@ compose="$(sed -n 's/^.*BLUE_DEPLOYMENT_VERSION:-\([^}]*\)}.*$/\1/p' "$root/depl
 # Copied verbatim into blue-deployment-v<tag>.tar.gz by package-deployment.sh,
 # so a stale literal here ships the wrong version inside the release bundle.
 consumer="$(sed -n 's/^.*--build-arg BLUE_VERSION=\([^ ]*\).*$/\1/p' "$root/deploy/consumer/.github/workflows/deploy.yml" | head -n 1)"
+docs_production="$(sed -n '/^## Before you start$/,/^## /s/^VERSION=\([0-9][0-9.]*\)$/\1/p' "$root/apps/docs/next/deployment/production.mdx")"
+docs_compose="$(sed -n 's/^BLUE_DEPLOYMENT_VERSION=\([0-9][0-9.]*\)$/\1/p' "$root/apps/docs/next/development/local-compose.mdx")"
+docs_cli="$(sed -n 's/^| `BLUE_VERSION=\([0-9][0-9.]*\)` | Install a specific release instead of the latest\. |$/\1/p' "$root/apps/docs/next/cli/commands.mdx")"
+docs_contributing="$(sed -n 's/^npm run release:docs -- \([0-9][0-9.]*\)$/\1/p' "$root/apps/docs/next/development/contributing.mdx")"
 
 for pair in "workspace:$workspace" "cli:$cli" "contract:$contract" "chart:$chart" \
-  "chart appVersion:$app" "compose default:$compose" "consumer build arg:$consumer"; do
+  "chart appVersion:$app" "compose default:$compose" "consumer build arg:$consumer" \
+  "docs production VERSION:$docs_production" "docs compose version:$docs_compose" \
+  "docs CLI installer version:$docs_cli" "docs release command version:$docs_contributing"; do
   name="${pair%%:*}"
   actual="${pair#*:}"
   if [ "$actual" != "$version" ]; then
@@ -35,6 +41,11 @@ for pair in "workspace:$workspace" "cli:$cli" "contract:$contract" "chart:$chart
     exit 1
   fi
 done
+image_reference_count="$(grep -Fc 'docker buildx imagetools inspect ghcr.io/blocksorg/blue:${VERSION}' "$root/apps/docs/next/deployment/production.mdx" || true)"
+if [ "$image_reference_count" != 1 ]; then
+  echo "docs production image reference must use \${VERSION} exactly once" >&2
+  exit 1
+fi
 test -d "$root/apps/docs/next" || { echo "missing apps/docs/next" >&2; exit 1; }
 test -f "$root/apps/docs/openapi/next.yaml" || { echo "missing apps/docs/openapi/next.yaml" >&2; exit 1; }
 test -f "$root/deploy/consumer/blue/blue.yaml" || {

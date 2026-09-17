@@ -75,7 +75,10 @@ because all three of its declarative mechanisms provably break here:
 So `scripts/set-version.sh <version>` owns the write side, and
 `scripts/check-release-version.sh v<version>` owns the read side. They are exact
 mirrors — every file one writes is a file the other reads — and CI runs the
-check on every PR, so a file that drifts out of the pair fails `packaging`.
+check on every PR, so a file that drifts out of the pair fails `packaging`. The
+writer also updates the small allowlist of release-bearing examples in the live
+`apps/docs/next` tree; other documentation versions, policy examples, and
+dependency versions are deliberately outside its ownership.
 
 `scripts/set-version.sh` needs `node` and `cargo` on PATH. Run it by hand if you
 ever need to prepare a release without the bot:
@@ -105,7 +108,10 @@ version and self-consistently wrong until finalize runs — then re-runs
 So an un-finalized release branch holds the merge button shut, and says why. If
 finalize ever fails, use **Re-run failed jobs** on the Release Please run, or
 dispatch the workflow again: finalize takes no inputs, discovers the PR and the
-version off the branch, and commits only if the tree changed.
+version off the branch, refreshes that current not-yet-released documentation
+snapshot from the synchronized `next` tree, and commits only if the tree
+changed. Replacement is automation-only and refuses to touch any historical
+release that is not the first/default stable navigation entry.
 
 ## Release candidates
 

@@ -10,6 +10,12 @@
 # against the open release PR, but it is an ordinary script: run it by hand when
 # preparing a release without the bot.
 #
+# Live documentation examples written alongside the shipped release metadata:
+#   apps/docs/next/deployment/production.mdx
+#   apps/docs/next/development/local-compose.mdx
+#   apps/docs/next/cli/commands.mdx
+#   apps/docs/next/development/contributing.mdx
+#
 # Deliberately NOT written:
 #   scripts/test-install.sh          self-contained fixture; its literals must
 #                                    match each other, not the release
@@ -18,8 +24,7 @@
 #                                    client to upgrade on every release
 #   tests/e2e-slim/Cargo.toml        separate workspace, never shipped
 #   .github/workflows/release.yml    cosmetic `workflow_dispatch` default
-#   apps/docs/next/**/*.mdx          prose; an automated rewrite here gets
-#                                    frozen immutably into the docs snapshot
+#   other apps/docs/next/**/*.mdx    prose, policy examples, and dependencies
 set -eu
 
 version="${1:-}"
@@ -37,8 +42,12 @@ cd "$root"
 rewrite() {
   file="$1"
   shift
-  "$@" < "$file" > "$file.set-version.tmp"
-  mv "$file.set-version.tmp" "$file"
+  if "$@" < "$file" > "$file.set-version.tmp"; then
+    mv "$file.set-version.tmp" "$file"
+  else
+    rm -f "$file.set-version.tmp"
+    return 1
+  fi
 }
 
 # Cargo manifests: scope to the section. `[workspace.dependencies]` below
@@ -87,6 +96,60 @@ rewrite deploy/docker-compose.yml awk -v version="$version" '
 # so a stale literal here ships a wrong version to every consumer.
 rewrite deploy/consumer/.github/workflows/deploy.yml awk -v version="$version" '
   { sub(/--build-arg BLUE_VERSION=[^ ]*/, "--build-arg BLUE_VERSION=" version); print }
+'
+
+# These are the only release-bearing examples in the live documentation. Each
+# rewrite is deliberately narrow and requires exactly one match so prose,
+# dependency versions, policy floors, and historical snapshots stay untouched.
+rewrite apps/docs/next/deployment/production.mdx awk -v version="$version" '
+  /^## / { section = $0 }
+  section == "## Before you start" && /^VERSION=[0-9]+\.[0-9]+\.[0-9]+$/ {
+    print "VERSION=" version
+    found++
+    next
+  }
+  { print }
+  END { if (found != 1) exit 1 }
+'
+
+rewrite apps/docs/next/deployment/production.mdx awk '
+  /^export BLUE_IMAGE_DIGEST="\$\(docker buildx imagetools inspect ghcr\.io\/blocksorg\/blue:/ {
+    if ($0 !~ / \| awk/) next
+    sub(/ghcr\.io\/blocksorg\/blue:[^ ]+/, "ghcr.io/blocksorg/blue:${VERSION}")
+    found++
+  }
+  { print }
+  END { if (found != 1) exit 1 }
+'
+
+rewrite apps/docs/next/development/local-compose.mdx awk -v version="$version" '
+  /^BLUE_DEPLOYMENT_VERSION=[0-9]+\.[0-9]+\.[0-9]+$/ {
+    print "BLUE_DEPLOYMENT_VERSION=" version
+    found++
+    next
+  }
+  { print }
+  END { if (found != 1) exit 1 }
+'
+
+rewrite apps/docs/next/cli/commands.mdx awk -v version="$version" '
+  /^\| `BLUE_VERSION=[0-9]+\.[0-9]+\.[0-9]+` \| Install a specific release instead of the latest\. \|$/ {
+    print "| `BLUE_VERSION=" version "` | Install a specific release instead of the latest. |"
+    found++
+    next
+  }
+  { print }
+  END { if (found != 1) exit 1 }
+'
+
+rewrite apps/docs/next/development/contributing.mdx awk -v version="$version" '
+  /^npm run release:docs -- [0-9]+\.[0-9]+\.[0-9]+$/ {
+    print "npm run release:docs -- " version
+    found++
+    next
+  }
+  { print }
+  END { if (found != 1) exit 1 }
 '
 
 # Not a rewrite — apps/docs/openapi/next.yaml is a byte-for-byte copy of the
