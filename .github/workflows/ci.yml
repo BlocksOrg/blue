@@ -161,6 +161,7 @@ jobs:
       - run: sh -n scripts/install.sh scripts/test-install.sh scripts/test-release-version.sh scripts/package-deployment.sh scripts/check-release-version.sh scripts/set-version.sh deploy/consumer/provisioner.sh
       - run: scripts/test-install.sh
       - run: scripts/test-release-version.sh
+      - run: node --test apps/docs/scripts/release-version.test.mjs
       - run: bash -n deploy/blue-entrypoint.sh deploy/blue-healthcheck.sh
       - run: |
           docker compose -f deploy/docker-compose.yml config > /tmp/blue-compose-governance.yaml
