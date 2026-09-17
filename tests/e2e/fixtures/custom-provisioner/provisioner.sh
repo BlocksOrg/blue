@@ -22,6 +22,10 @@ case "$mode" in
     printf '%s\n' '{"protocol_version":1,"status":"error","error":{"code":"temporary_unavailable","message":"e2e provisioner unavailable"}}'
     exit 75
     ;;
+  account-missing)
+    printf '%s\n' '{"protocol_version":1,"status":"error","error":{"code":"account_missing","message":"member has no upstream account"}}'
+    exit 4
+    ;;
   protocol-mismatch)
     printf '%s\n' '{"protocol_version":2,"status":"success","result":{"credential":"must-not-persist","external_id":"e2e-mismatch","alias":"e2e","metadata":{},"expires_at":null}}'
     exit 0

@@ -1,7 +1,7 @@
 "use server";
 
 import { headers } from "next/headers";
-import { redirect } from "next/navigation";
+import { redirect, unstable_rethrow } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { api } from "../lib/api";
 import { auth, authPool } from "../lib/auth";
@@ -131,9 +131,24 @@ export async function saveHarnessManagedConfig(
   }
 }
 
-export async function ensureGatewayKey(): Promise<void> {
-  await api("/gateway/key/ensure", { method: "POST", body: '{"manual":true}' });
-  revalidatePath("/gateway");
+export type GatewayKeyState = { error?: string };
+
+export async function ensureGatewayKey(_: GatewayKeyState): Promise<GatewayKeyState> {
+  try {
+    await api("/gateway/key/ensure", { method: "POST", body: '{"manual":true}' });
+    revalidatePath("/gateway");
+    return {};
+  } catch (error) {
+    unstable_rethrow(error);
+    if (!(error instanceof Error)) return { error: "Gateway key could not be provisioned." };
+    const detail = error.message.replace(/^\d{3}:\s*/, "");
+    try {
+      const parsed = JSON.parse(detail) as { error?: string };
+      return { error: parsed.error || "Gateway key could not be provisioned." };
+    } catch {
+      return { error: detail || "Gateway key could not be provisioned." };
+    }
+  }
 }
 
 export type GatewayProxyHealthState = {
@@ -312,15 +327,47 @@ export async function inspectPackageSource(
   }
 }
 
-export async function createUser(form: FormData) {
-  await api("/admin/invitations", {
-    method: "POST",
-    body: JSON.stringify({
-      email: String(form.get("email")),
-      role: String(form.get("role")) as "admin" | "member",
-    }),
-  });
-  revalidatePath("/members");
+export type InvitationLinkState = {
+  invitationId?: string;
+  email?: string;
+  invitationUrl?: string;
+  error?: string;
+};
+
+type AdminInvitationIssued = {
+  id: string;
+  email: string;
+  invitation_url: string;
+};
+
+function invitationError(error: unknown) {
+  if (!(error instanceof Error)) return "Unable to issue the invitation link.";
+  const detail = error.message.replace(/^\d{3}:\s*/, "");
+  try {
+    const parsed = JSON.parse(detail) as { error?: string; message?: string };
+    return parsed.message ?? parsed.error ?? "Unable to issue the invitation link.";
+  } catch {
+    return detail || "Unable to issue the invitation link.";
+  }
+}
+
+export async function createUser(
+  _: InvitationLinkState,
+  form: FormData,
+): Promise<InvitationLinkState> {
+  try {
+    const invitation = await api<AdminInvitationIssued>("/admin/invitations", {
+      method: "POST",
+      body: JSON.stringify({
+        email: String(form.get("email")),
+        role: String(form.get("role")) as "admin" | "member",
+      }),
+    });
+    revalidatePath("/members");
+    return { invitationId: invitation.id, email: invitation.email, invitationUrl: invitation.invitation_url };
+  } catch (error) {
+    return { error: invitationError(error) };
+  }
 }
 
 export async function updateUser(form: FormData) {
@@ -351,11 +398,19 @@ export async function removeClientStatus(form: FormData) {
   revalidatePath("/clients");
 }
 
-export async function resendInvitation(form: FormData) {
-  await api(`/admin/invitations/${form.get("invitation_id")}/resend`, {
-    method: "POST",
-  });
-  revalidatePath("/members");
+export async function regenerateInvitation(
+  _: InvitationLinkState,
+  form: FormData,
+): Promise<InvitationLinkState> {
+  try {
+    const invitation = await api<AdminInvitationIssued>(
+      `/admin/invitations/${form.get("invitation_id")}/regenerate`,
+      { method: "POST" },
+    );
+    return { invitationId: invitation.id, email: invitation.email, invitationUrl: invitation.invitation_url };
+  } catch (error) {
+    return { error: invitationError(error) };
+  }
 }
 
 export async function cancelInvitation(form: FormData) {

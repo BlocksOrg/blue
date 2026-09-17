@@ -1676,6 +1676,10 @@ async fn build_app_inner(
             get(get_invitation).delete(cancel_invitation),
         )
         .route("/admin/invitations/:id/resend", post(resend_invitation))
+        .route(
+            "/admin/invitations/:id/regenerate",
+            post(regenerate_invitation),
+        )
         .route("/admin/client-status", get(list_client_status))
         .route("/admin/client-status/facets", get(client_status_facets))
         .route(
@@ -8923,11 +8927,26 @@ fn normalize_email(email: &str) -> Result<String, ApiError> {
     }
 }
 
-fn log_invitation(state: &AppState, id: &str, email: &str) {
-    let url = format!(
+fn invitation_url_for_base(auth_public_url: &str, id: &str) -> String {
+    format!(
         "{}/accept-invitation?id={id}",
-        state.config.auth_public_url.trim_end_matches('/')
-    );
+        auth_public_url.trim_end_matches('/')
+    )
+}
+
+fn invitation_url(state: &AppState, id: &str) -> String {
+    invitation_url_for_base(&state.config.auth_public_url, id)
+}
+
+fn issued_invitation_json(state: &AppState, row: InvitationRow) -> serde_json::Value {
+    let url = invitation_url(state, &row.id);
+    let mut value = invitation_json(row);
+    value["invitation_url"] = json!(url);
+    value
+}
+
+fn log_invitation(state: &AppState, id: &str, email: &str) {
+    let url = invitation_url(state, id);
     tracing::info!(%email, %url, "Blue invitation");
 }
 
@@ -8986,10 +9005,61 @@ async fn create_invitation(
     log_invitation(&state, &id, &email);
     Ok((
         StatusCode::CREATED,
-        Json(invitation_json(
+        Json(issued_invitation_json(
+            &state,
             invitation_row(&state.pool, who.organization_id, &id).await?,
         )),
     ))
+}
+
+async fn regenerate_invitation(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if state.config.auth_mode == "oidc" {
+        return Err(ApiError::conflict(
+            "invitations are disabled for identity-provider-managed workspaces",
+        ));
+    }
+    let auth_org = auth_org_id(&state.pool, who.organization_id).await?;
+    let mut transaction = state.pool.begin().await?;
+    // sqlx-guard: allow-raw row locking query; covered by the transaction integration flow
+    let (email, role, status) = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "select email,role,status from auth.\"invitation\" where \"organizationId\"=$1 and id=$2 for update",
+    )
+    .bind(&auth_org)
+    .bind(&id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(|| ApiError::not_found("invitation not found"))?;
+    if status != "pending" {
+        return Err(ApiError::conflict(
+            "only pending or expired invitations can be regenerated",
+        ));
+    }
+    sqlx::query!(
+        "update auth.\"invitation\" set status='canceled' where id=$1",
+        &id
+    )
+    .execute(&mut *transaction)
+    .await?;
+    let new_id = Uuid::new_v4().to_string();
+    sqlx::query!("insert into auth.\"invitation\" (id,\"organizationId\",email,role,status,\"expiresAt\",\"createdAt\",\"inviterId\") \
+         values ($1,$2,$3,$4,'pending',now()+interval '24 hours',now(),$5)",
+        &new_id,
+        &auth_org,
+        &email,
+        role.as_deref(),
+        &who.subject)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    log_invitation(&state, &new_id, &email);
+    Ok(Json(issued_invitation_json(
+        &state,
+        invitation_row(&state.pool, who.organization_id, &new_id).await?,
+    )))
 }
 
 async fn resend_invitation(
@@ -11754,6 +11824,19 @@ mod tests {
         );
         assert!(normalize_email("developer at example.com").is_err());
         assert!(normalize_email("developer@localhost").is_err());
+    }
+
+    #[test]
+    fn invitation_urls_ignore_a_trailing_public_url_slash() {
+        let expected = "https://blue.example/accept-invitation?id=invitation-id";
+        assert_eq!(
+            invitation_url_for_base("https://blue.example", "invitation-id"),
+            expected
+        );
+        assert_eq!(
+            invitation_url_for_base("https://blue.example/", "invitation-id"),
+            expected
+        );
     }
 
     #[test]
