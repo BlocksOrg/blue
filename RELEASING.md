@@ -111,7 +111,10 @@ dispatch the workflow again: finalize takes no inputs, discovers the PR and the
 version off the branch, refreshes that current not-yet-released documentation
 snapshot from the synchronized `next` tree, and commits only if the tree
 changed. Replacement is automation-only and refuses to touch any historical
-release that is not the first/default stable navigation entry.
+release that is not the first/default stable navigation entry. The replacement
+flag is accepted only when the CLI is running in the Release Please workflow,
+and the finalizer checks GitHub before changing the worktree and refuses to
+replace a snapshot when that version's GitHub Release is already published.
 
 ## Release candidates
 

@@ -73,5 +73,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (positional.length !== 1 || args.some((arg) => arg.startsWith("--") && arg !== "--replace-current")) {
     throw new Error("usage: npm run release:docs -- <major.minor.patch> [--replace-current]");
   }
+  if (
+    replaceCurrent
+    && (process.env.GITHUB_ACTIONS !== "true" || process.env.GITHUB_WORKFLOW !== "Release Please")
+  ) {
+    throw new Error("--replace-current is reserved for the Release Please finalizer");
+  }
   await releaseVersion(positional[0], { replaceCurrent });
 }
