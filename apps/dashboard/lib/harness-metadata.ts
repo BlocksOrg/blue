@@ -5,6 +5,7 @@ export type HarnessMetadata = {
   description: string;
   binary_names: string[];
   install_command_template: string;
+  gateway_model_exposure: "catalog" | "selected_only";
   capabilities: string[];
   component_rules: {
     agents_require_plugin: boolean;

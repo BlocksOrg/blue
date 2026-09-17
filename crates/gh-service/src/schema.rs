@@ -60,7 +60,7 @@ pub struct GovernanceConfig {
 
 impl GovernanceConfig {
     pub const DEFAULT_TTL_SECONDS: u64 = 300;
-    pub const CONTRACT_VERSION: u32 = 3;
+    pub const CONTRACT_VERSION: u32 = 4;
     pub const CAPABILITIES: &'static [&'static str] = &[
         "adapter_intervals",
         "compiled_harness_registry",
@@ -68,6 +68,7 @@ impl GovernanceConfig {
         "versioned_state",
         "unverified_harness_versions",
         "gateway_inference_jwt",
+        "gateway_model_catalog",
     ];
 
     pub fn ttl_seconds(&self) -> u64 {
@@ -121,6 +122,10 @@ pub struct HarnessPolicy {
     /// scoped by an administrator-authored range.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_unverified_versions: bool,
+    /// Exact provider model IDs assigned to this harness in gateway mode.
+    /// Direct-mode adapters intentionally ignore this catalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateway_models: Vec<String>,
     /// Model / approval / permission flags written into the harness's config.
     #[serde(default)]
     pub managed_config: ManagedConfig,

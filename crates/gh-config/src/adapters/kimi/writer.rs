@@ -40,12 +40,33 @@ pub fn write(
         table.remove("default_yolo");
     }
     if let Some(w) = wiring {
-        let effective_model = policy.managed_config.model.clone().or_else(|| {
-            table
-                .get("default_model")
-                .and_then(Toml::as_str)
-                .map(str::to_owned)
-        });
+        let mut catalog = policy
+            .gateway_models
+            .iter()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        catalog.sort();
+        catalog.dedup();
+        if catalog.is_empty() {
+            return Err(GhError::config(
+                "gateway-mode Kimi policy requires at least one gateway_models entry",
+            ));
+        }
+        let effective_model = policy
+            .managed_config
+            .model
+            .clone()
+            .or_else(|| catalog.first().cloned());
+        if effective_model
+            .as_ref()
+            .is_some_and(|selected| !catalog.iter().any(|model| model == selected))
+        {
+            return Err(GhError::config(
+                "Kimi selected model must be present in gateway_models",
+            ));
+        }
         // kimi-code resolves the wire transport from the provider `type`
         // (`openai` vs `openai_responses`). The model-alias `protocol` field
         // only accepts the literal "anthropic": kimi-code 0.20.x–0.31.x hard-
@@ -59,8 +80,8 @@ pub fn write(
             Some("responses" | "openai_responses") => "openai_responses",
             _ => "openai",
         };
-        // Point the selected model at the governed provider.
-        if let Some(model) = effective_model {
+        // Point every assigned model at the governed provider.
+        for model in &catalog {
             let mut model_entry = toml::map::Map::new();
             model_entry.insert("provider".into(), Toml::String(GOVERNED_PROVIDER.into()));
             model_entry.insert("model".into(), Toml::String(model.clone()));
@@ -72,7 +93,12 @@ pub fn write(
                 .filter(|value| *value > 0)
                 .unwrap_or(262_144);
             model_entry.insert("max_context_size".into(), Toml::Integer(max_context_size));
-            upsert_subtable(&mut table, "models", model, Toml::Table(model_entry));
+            upsert_subtable(&mut table, "models", model.clone(), Toml::Table(model_entry));
+        }
+        if policy.managed_config.model.is_none() {
+            if let Some(model) = effective_model {
+                table.insert("default_model".into(), Toml::String(model));
+            }
         }
 
         let mut provider = toml::map::Map::new();
@@ -395,7 +421,11 @@ mod tests {
             auth: AuthPlacement::InFile,
         };
 
-        test_write(&home, &HarnessPolicy::default(), Some(&wiring), None).unwrap();
+        let policy = HarnessPolicy {
+            gateway_models: vec!["personal-default".into()],
+            ..HarnessPolicy::default()
+        };
+        test_write(&home, &policy, Some(&wiring), None).unwrap();
         let config = std::fs::read_to_string(home.join(".config/blue/runtime/kimi/config.toml"))
             .unwrap()
             .parse::<Toml>()

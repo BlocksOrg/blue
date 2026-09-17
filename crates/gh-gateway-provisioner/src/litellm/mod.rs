@@ -1,6 +1,6 @@
 use crate::{
-    EnsureRequest, GatewayProvisioner, ProvisionedCredential, ProvisionerError, RevokeRequest,
-    RevokeResponse, SecretString,
+    DiscoveredModel, EnsureRequest, GatewayProvisioner, ModelCatalog, ProvisionedCredential,
+    ProvisionerError, RevokeRequest, RevokeResponse, SecretString,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -292,6 +292,66 @@ impl LiteLlmProvisioner {
 impl GatewayProvisioner for LiteLlmProvisioner {
     fn kind(&self) -> &'static str {
         "builtin-litellm"
+    }
+
+    async fn list_models(&self) -> Result<ModelCatalog, ProvisionerError> {
+        let url = format!("{}/v1/models", self.base_url.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.admin_key)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|_| ProvisionerError::Unavailable("model discovery request failed".into()))?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(|_| {
+            ProvisionerError::DiscoveryResponse("gateway returned an unreadable response".into())
+        })?;
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            return Err(ProvisionerError::DiscoveryAuth(
+                self.rejection_message(status, &bytes),
+            ));
+        }
+        if !status.is_success() {
+            return Err(ProvisionerError::Unavailable(
+                self.rejection_message(status, &bytes),
+            ));
+        }
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            ProvisionerError::DiscoveryResponse("gateway returned invalid JSON".into())
+        })?;
+        let entries = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+            ProvisionerError::DiscoveryResponse("response has no data array".into())
+        })?;
+        let mut models = entries
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| DiscoveredModel {
+                id: id.to_owned(),
+                display_name: None,
+                // LiteLLM's OpenAI-compatible endpoint guarantees `id`; keep
+                // undocumented and potentially volatile fields out of drift.
+                metadata: Default::default(),
+            })
+            .collect::<Vec<_>>();
+        models.sort_by(|left, right| left.id.cmp(&right.id));
+        models.dedup_by(|left, right| left.id == right.id);
+        let revision = hex::encode(Sha256::digest(
+            models
+                .iter()
+                .flat_map(|model| model.id.as_bytes().iter().copied().chain([0]))
+                .collect::<Vec<_>>(),
+        ));
+        Ok(ModelCatalog {
+            models,
+            source_revision: Some(revision),
+        })
     }
 
     async fn ensure(

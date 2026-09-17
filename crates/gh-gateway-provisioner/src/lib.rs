@@ -10,6 +10,7 @@ pub mod litellm;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -99,6 +100,23 @@ pub struct RevokeResponse {
     pub revoked: bool,
 }
 
+/// A provider-neutral model returned by gateway discovery.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveredModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelCatalog {
+    pub models: Vec<DiscoveredModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum ProvisionerError {
     #[error("invalid provisioning configuration: {0}")]
@@ -113,6 +131,12 @@ pub enum ProvisionerError {
     Unavailable(String),
     #[error("gateway rejected provisioning: {0}")]
     Rejected(String),
+    #[error("gateway model discovery is unsupported")]
+    DiscoveryUnsupported,
+    #[error("gateway rejected model discovery authentication: {0}")]
+    DiscoveryAuth(String),
+    #[error("gateway returned an invalid model catalog: {0}")]
+    DiscoveryResponse(String),
 }
 
 #[async_trait]
@@ -124,6 +148,13 @@ pub trait GatewayProvisioner: Send + Sync + 'static {
     /// credentials to be reconciled even when `blue.yaml` is unchanged.
     fn policy_revision(&self) -> Option<&str> {
         None
+    }
+
+    /// Discover the gateway's current model catalog. Provisioners predating
+    /// this capability remain source-compatible and explicitly report that
+    /// discovery is unsupported.
+    async fn list_models(&self) -> Result<ModelCatalog, ProvisionerError> {
+        Err(ProvisionerError::DiscoveryUnsupported)
     }
 
     async fn ensure(

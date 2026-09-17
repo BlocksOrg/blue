@@ -2711,6 +2711,12 @@ async fn reconcile_deployment_governance(
         .map_err(|error| {
             ApiError::internal(format!("decoding merged governance config: {error}"))
         })?;
+    // The dashboard may have saved its capability list before the deployment
+    // enabled a newer gateway feature. Reassert the server-owned gateway mode
+    // after the three-way merge so its required capability floor cannot be
+    // lost to an older saved revision.
+    apply_deployment_gateway_policy(&mut merged, config.gateway_kind.as_deref());
+    let merged_value = normalized_governance_value(&merged)?;
     validate_complete_governance(&merged).map_err(|error| {
         ApiError::internal(format!("merged governance config is invalid: {error}"))
     })?;
@@ -3793,6 +3799,9 @@ fn provisioner_api_error(error: ProvisionerError) -> ApiError {
         ProvisionerError::Conflict(_) => StatusCode::CONFLICT,
         ProvisionerError::CredentialInvalid(_) => StatusCode::CONFLICT,
         ProvisionerError::Unavailable(_) | ProvisionerError::Rejected(_) => StatusCode::BAD_GATEWAY,
+        ProvisionerError::DiscoveryUnsupported => StatusCode::NOT_IMPLEMENTED,
+        ProvisionerError::DiscoveryAuth(_) => StatusCode::UNAUTHORIZED,
+        ProvisionerError::DiscoveryResponse(_) => StatusCode::BAD_GATEWAY,
     };
     ApiError::new(status, error.to_string())
 }
@@ -6589,6 +6598,19 @@ fn validate_complete_governance(config: &gh_service::GovernanceConfig) -> Result
     {
         return Err("gateway mode requires capability `gateway_inference_jwt`".into());
     }
+    let uses_gateway_models = config
+        .harnesses
+        .values()
+        .any(|policy| !policy.gateway_models.is_empty());
+    if config.gateway.is_some()
+        && uses_gateway_models
+        && !config
+            .required_capabilities
+            .iter()
+            .any(|capability| capability == "gateway_model_catalog")
+    {
+        return Err("gateway model mappings require capability `gateway_model_catalog`".into());
+    }
     if let Some(gateway) = config.gateway.as_ref() {
         if gateway.proxy_url.is_some() || gateway.token.is_some() {
             return Err("gateway proxy_url and token are runtime-only fields".into());
@@ -6616,6 +6638,32 @@ fn validate_complete_governance(config: &gh_service::GovernanceConfig) -> Result
                     "harness `{harness}` has invalid version requirement `{requirement}`: {error}"
                 )
             })?;
+        }
+        let mut unique_models = std::collections::BTreeSet::new();
+        for model in &policy.gateway_models {
+            if model.trim().is_empty() || model != model.trim() {
+                return Err(format!(
+                    "harness `{harness}` has an invalid empty or untrimmed gateway model ID"
+                ));
+            }
+            if !unique_models.insert(model) {
+                return Err(format!(
+                    "harness `{harness}` has duplicate gateway model `{model}`"
+                ));
+            }
+        }
+        if config.gateway.is_some()
+            && policy
+                .managed_config
+                .model
+                .as_ref()
+                .is_some_and(|selected| {
+                    !policy.gateway_models.iter().any(|model| model == selected)
+                })
+        {
+            return Err(format!(
+                "harness `{harness}` selected gateway model is not assigned to that harness"
+            ));
         }
     }
     let uses_version_aware_features = config
@@ -8119,6 +8167,19 @@ fn stamp_version_aware_client_floor(config: &mut gh_service::GovernanceConfig) {
             config
                 .required_capabilities
                 .push("gateway_inference_jwt".to_owned());
+        }
+        if config
+            .harnesses
+            .values()
+            .any(|policy| !policy.gateway_models.is_empty())
+            && !config
+                .required_capabilities
+                .iter()
+                .any(|capability| capability == "gateway_model_catalog")
+        {
+            config
+                .required_capabilities
+                .push("gateway_model_catalog".to_owned());
         }
     }
 }

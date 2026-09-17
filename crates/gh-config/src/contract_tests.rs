@@ -363,6 +363,7 @@ fn every_production_interval_has_a_pure_golden_plan() {
                 }
                 let policy: HarnessPolicy = serde_json::from_value(serde_json::json!({
                     "managed_config": managed_config,
+                    "gateway_models": if gateway_enabled { vec![managed_model.unwrap_or("fixture-model")] } else { Vec::<&str>::new() },
                     "mcp":[{"name":"fixture", "command":"fixture-mcp", "args":["--stdio"]}]
                 }))
                 .unwrap();

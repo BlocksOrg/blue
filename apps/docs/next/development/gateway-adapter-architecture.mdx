@@ -52,7 +52,7 @@ agent request with session-bound inference JWT
 | `gh-gateway::GatewayAdapter` | Registry identity, client route validation, upstream path/auth policy, and invalid-credential classification | Network I/O, harness files, or credential bytes |
 | `HarnessImplementation` | Version-specific inference-token placement and agent wire protocol | Gateway-type dispatch or upstream-provider behavior |
 | Inference proxy | Streaming, limits, credential resolution, request forwarding, and application of adapter decisions | Provider administrator operations |
-| `GatewayProvisioner` | Creating, retaining, rotating, and revoking upstream user credentials | Agent configuration or inference forwarding |
+| `GatewayProvisioner` | Creating, retaining, rotating, and revoking upstream user credentials; asynchronously discovering models | Agent configuration or inference forwarding |
 | Control API | Server-selected gateway mode, policy personalization, encrypted credentials, and startup validation | Enabling gateway mode from client input |
 
 `gateway.type` selects the compiled adapter. `gateway.provisioner.type` selects
@@ -82,6 +82,13 @@ pub trait GatewayAdapter: Send + Sync {
 dispatcher attaches the harness-owned `AuthPlacement` and `wire_api` afterward,
 so a gateway cannot replace those decisions. Route and wiring debug output
 redacts the token.
+
+Model discovery deliberately does not belong to this trait. The Control API
+calls the asynchronous `GatewayProvisioner::list_models` capability, persists
+the last successful snapshot, and distinguishes unsupported or failed refreshes
+from a successful snapshot that removed a model. Custom executable
+provisioners may opt into the `list_models` protocol operation; older ones
+report discovery as unsupported.
 
 `UpstreamCredentialPlacement` declares bearer authentication or a named header;
 it never contains the credential itself. The proxy strips `Authorization`,
