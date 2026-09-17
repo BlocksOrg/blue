@@ -30,7 +30,7 @@ jobs:
       - run: tofu -chdir=infra/aws init
       - run: tofu -chdir=infra/aws apply -auto-approve
       - run: tofu -chdir=infra/aws output -json helm_values > generated-values.json
-      - run: docker build --build-arg BLUE_VERSION=0.1.0 -t "$IMAGE:${GITHUB_SHA}" .
+      - run: docker build --build-arg BLUE_VERSION=0.2.0 -t "$IMAGE:${GITHUB_SHA}" .
       - run: docker push "$IMAGE:${GITHUB_SHA}"
       # The module either created the cluster or attached to an existing one;
       # either way it reports which, so the workflow needs no cluster variable.

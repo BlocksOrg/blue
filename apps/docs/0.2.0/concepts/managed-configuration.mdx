@@ -1,0 +1,80 @@
+---
+title: "Managed configuration"
+description: "See which agent configuration files you own, which ones Blue owns, and what a governed launch inherits from your own configuration."
+icon: "layer-group"
+---
+
+Every supported agent ends up with two configurations: the one you already own, and a launch-scoped one Blue generates from the organization policy. A direct `codex` or `claude` launch reads only your own files. A governed `blue codex` launch adds Blue's generated configuration on top, for that launch only.
+
+## What you own and what Blue owns
+
+| Harness | Files you own | Files Blue owns | How the managed layer reaches the agent |
+| --- | --- | --- | --- |
+| Codex | `~/.codex/config.toml` | `~/.codex/blue.config.toml` | Blue launches Codex with `--profile blue`. |
+| Claude Code | `~/.claude/settings.json` and `~/.claude.json` | `runtime/claude/settings.json` and `runtime/claude/mcp.json` | Blue passes `--settings` and `--mcp-config` to the governed process. |
+| Kimi Code | `~/.kimi-code/config.toml` and `~/.kimi-code/mcp.json` | `runtime/kimi/` | Blue points `KIMI_CODE_HOME` at the generated directory. |
+| OpenCode | `~/.config/opencode/opencode.json` and `~/.local/share/opencode/auth.json` | `runtime/opencode/opencode.json` and its sibling package directories | Blue exports `OPENCODE_CONFIG_CONTENT` and `OPENCODE_CONFIG_DIR`. |
+
+Paths shown as `runtime/…` are relative to Blue's managed data directory, which is `~/.config/blue` on macOS and Linux and `%LOCALAPPDATA%\Blue\Data` on Windows. See [Windows paths and migration](/0.2.0/cli/windows-paths) for the full Windows layout.
+
+Only Codex places a Blue-owned file next to your own configuration, and it is a separate file with a separate profile. Blue never writes into the files in the first column.
+
+## What a governed launch inherits
+
+Blue reads your files; it does not copy them into the managed overlay. What each harness inherits differs.
+
+For Codex, the governed launch selects the separate `blue` profile, so the organization's model, approval, and sandbox settings come from `~/.codex/blue.config.toml` rather than from your own file. Blue reads your `~/.codex/config.toml` for two things while generating that profile: the names under `[mcp_servers]`, and your `[hooks]` table. A managed MCP entry whose name already exists in your file is skipped entirely, so your command or URL wins even when it differs from the organization's suggestion. Your hooks are copied into the managed profile so they keep running under a governed launch.
+
+For Claude Code, the generated settings and MCP files are passed as extra launch arguments, so Claude merges them with `~/.claude/settings.json` and `~/.claude.json` at startup.
+
+For OpenCode, the generated configuration arrives through environment variables and lands in OpenCode's own layered configuration, above your global `~/.config/opencode/opencode.json`.
+
+<Note>
+  Kimi Code works differently. Blue builds an isolated `KIMI_CODE_HOME` and seeds it from your native `~/.kimi-code/` files when it reconciles, rather than layering at launch. An edit to your own Kimi files therefore reaches a governed session only after the next `blue apply`.
+</Note>
+
+A direct launch of the native CLI is unaffected in every case. Nothing Blue generates is visible to it.
+
+## What Blue regenerates
+
+Blue rebuilds each owned output from scratch on every reconcile. The generated file is composed from the current policy revision and the parts of your configuration listed above, then written atomically over the previous one.
+
+<Warning>
+  Do not hand-edit a Blue-owned file. Your changes are discarded the next time `blue apply` or the daemon reconciles. Put the change in the file you own instead, or ask an administrator to change the organization policy.
+</Warning>
+
+The one exception is Codex's `hooks.state` table, where Codex records the hashes of hooks you have approved. Blue carries that table across a rebuild so an unchanged hook stays trusted; a hook whose contents changed still has to be approved again.
+
+Run `blue verify` to check whether the owned outputs match the current policy revision, and `blue status` to see which harnesses reconciled.
+
+## Add your own MCP server
+
+Add the server to the file you own, including any token, and reconcile:
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.internal-search]
+command = "npx"
+args = ["-y", "@example/internal-search-mcp"]
+env = { SEARCH_API_TOKEN = "..." }
+```
+
+```bash
+blue apply
+```
+
+The entry is yours, so it is never rewritten, backed up, or removed, and the token never leaves your machine. If the organization policy also ships an MCP server named `internal-search`, the collision resolves in your favor and Blue omits the managed entry.
+
+The same holds for the other harnesses: put personal servers in `~/.claude.json`, `~/.kimi-code/mcp.json`, or `~/.config/opencode/opencode.json`. Kimi Code needs a `blue apply` after the edit before the new server appears in a governed session.
+
+## Merge behavior
+
+- Existing native user configuration remains authoritative outside governed launches.
+- Remote MCP entries are additive. A local MCP with the same name wins and is never overwritten or removed.
+- Existing configuration changes prompt for review unless `--yes` or the explicit noninteractive policy allows them.
+- Identical reconciliations do not prompt again.
+- Writes are atomic, and changed files receive recoverable backups.
+- Package archives are SHA-256 verified and activate independently. An affected governed launch fails closed when one of its required packages cannot activate.
+- Removed managed packages are unregistered; modified owned content is quarantined instead of deleted.
+
+For the per-harness overlay strategy see [Supported harnesses](/0.2.0/cli/harnesses), for how a policy revision reaches your machine see [Configuration lifecycle](/0.2.0/concepts/configuration), and for the complete policy shape see [Governance configuration](/0.2.0/reference/governance-config).
