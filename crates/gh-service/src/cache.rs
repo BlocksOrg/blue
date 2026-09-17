@@ -43,12 +43,22 @@ pub fn save(config: &GovernanceConfig, fetched_at: i64) -> Result<(), GhError> {
     let cached = CachedConfig { fetched_at, config };
     let path = paths::governance_cache_path()?;
     let body = serde_json::to_vec_pretty(&cached).map_err(|e| GhError::Serde(e.to_string()))?;
-    write_atomic(&path, body)
+    write_atomic(&path, body)?;
+    match std::fs::remove_file(path.with_extension("invalidated")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(GhError::Io { path, source }),
+    }
 }
 
 /// Load the cached config, if present.
 pub fn load() -> Result<Option<CachedConfig>, GhError> {
     let path = paths::governance_cache_path()?;
+    // A deletion failure (e.g. a read-only cache on Windows) must not make an
+    // old policy usable again. Only a successful live save clears this marker.
+    if path.with_extension("invalidated").try_exists()? {
+        return Ok(None);
+    }
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice::<CachedConfig>(&bytes)
             .map(|mut cached| {
@@ -119,5 +129,41 @@ mod tests {
         let gateway = load().unwrap().unwrap().config.gateway.unwrap();
         assert_eq!(gateway.token, None);
         assert_eq!(gateway.proxy_url, None);
+    }
+}
+
+/// Remove a policy after a definitive live incompatibility.
+pub fn invalidate() -> Result<(), GhError> {
+    let path = paths::governance_cache_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => {
+            tracing::warn!(%source, path = %path.display(), "could not delete rejected cache; marking it unusable");
+            write_atomic(
+                &path.with_extension("invalidated"),
+                b"live governance rejected this client",
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod invalidation_tests {
+    use super::*;
+    #[test]
+    fn failed_cache_deletion_cannot_resurrect_policy() {
+        let _guard = test_support::with_cache_home("invalidation-marker");
+        let path = paths::governance_cache_path().unwrap();
+        // A directory at the file path deterministically refuses remove_file
+        // even for elevated test runners on Unix and Windows.
+        std::fs::create_dir_all(&path).unwrap();
+        invalidate().unwrap();
+        assert!(load().unwrap().is_none());
+        std::fs::remove_dir(&path).unwrap();
+        let config: GovernanceConfig = serde_json::from_str(r#"{"revision":"fresh"}"#).unwrap();
+        save(&config, 1).unwrap();
+        assert_eq!(load().unwrap().unwrap().config.revision, "fresh");
+        assert!(!path.with_extension("invalidated").exists());
     }
 }

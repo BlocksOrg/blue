@@ -190,7 +190,7 @@ paths:
           description: The governance config
           headers:
             X-Blue-Required-Client-Version:
-              description: Exact recommended Blue CLI release, identical to required_client_version in the document.
+              description: Exact recommended Blue CLI release, identical to required_client_version in the document. Same-major differences warn; different majors block.
               schema: { type: string }
           content:
             application/json:
@@ -201,7 +201,7 @@ paths:
           description: Client contract version or capabilities are insufficient
           headers:
             X-Blue-Required-Client-Version:
-              description: Exact recommended Blue CLI release, provided even when the document cannot be consumed.
+              description: Exact recommended Blue CLI release and major compatibility boundary, provided even when the document cannot be consumed.
               schema: { type: string }
 
   /harness-metadata:
@@ -1697,7 +1697,7 @@ components:
         minimum_client_version: { type: string, description: Operator-visible rollout floor; required capabilities enforce compatibility }
         required_client_version:
           type: string
-          description: Canonical exact SemVer of the recommended Blue CLI release. Defaults to the control API deployment version. Requires tenant_client_version_pin capability.
+          description: Canonical exact SemVer of the recommended Blue CLI release and major compatibility boundary. Unequal versions within the same major warn and continue; different majors block. Defaults to the control API deployment version. Requires tenant_client_version_pin capability.
           example: "0.1.0"
         ttl_seconds: { type: integer, description: Client cache TTL (default 300), example: 300 }
         required: { type: boolean, description: "If true, client fails closed without fresh config" }

@@ -305,7 +305,7 @@ The `governance` section is the deployment-authored baseline delivered to client
 | `contract_version` | Wire contract version. Current clients support version 3. |
 | `required_capabilities` | Features a client must support before accepting policy. |
 | `minimum_client_version` | Operator-visible rollout floor; required when using harness version ranges or versioned package adapters. |
-| `required_client_version` | Optional canonical exact SemVer recommendation for the Blue CLI. Defaults to the control API deployment version and requires `tenant_client_version_pin`. |
+| `required_client_version` | Optional canonical exact SemVer recommendation for the Blue CLI and major compatibility boundary. Same-major differences warn; different majors block. |
 | `ttl_seconds` | Client cache and polling interval; defaults to 300 seconds. |
 | `required` | When true, clients fail closed instead of launching from stale cached policy. |
 | `allowed_harnesses` | Supported agent keys users may launch through Blue. |
@@ -404,10 +404,10 @@ Every source must be immutable and SHA-256 pinned. Use `platform_sources` when h
   A complete rollout has healthy service probes, no unresolved environment references, the expected governance revision in the dashboard, and matching desired/applied revisions on a test client.
 </Check>
 
-## Recommended Blue CLI release
+## Tenant-compatible Blue CLI
 
 The reference control API advertises its deployment version as the exact
-recommended Blue CLI release. Set
+recommended Blue CLI release and the major-version compatibility boundary. Set
 `governance.required_client_version` to a published, compatible release to
 override that default, for example during a rolling upgrade. The default is
 applied when serving a document, so old revisions follow new deployments without
@@ -418,4 +418,31 @@ informational.
 The `tenant_client_version_pin` capability is required whenever a pin is served.
 The `X-Blue-Required-Client-Version` header exposes the same pin on successful
 config responses and capability/contract rejections (HTTP 426). Older clients
-without this capability cannot consume the document.
+without this capability are blocked and need a manual install.
+
+A CLI with the same major version continues governed commands and prints a
+neutral recommendation when its minor, patch, prerelease, or build metadata
+differs. This applies whether the client is older or newer. Exact matches are
+silent. Foreground commands warn at most once; background watchers log the
+recommendation without interrupting a running harness.
+
+A CLI with a different major version blocks governed commands before launching a
+harness or applying managed configuration. In an interactive foreground command,
+Blue offers to install the exact recommended release, with consent defaulting to
+no. It stages and verifies the release before replacing the running executable.
+After success, rerun the original command; the old process never continues the
+operation and returns a nonzero exit code. Automatic installation supports stable
+releases only and requires a writable, safely resolved installation destination.
+
+Noninteractive commands, daemons and internal hooks never prompt or install.
+`blue apply --yes` does not approve replacing Blue. A difference displays the
+recommended installer command when available. A major mismatch also displays
+`blue reset` as a way to detach; declining or failing installation leaves that
+command blocked.
+
+A live cross-major mismatch invalidates the previous cached policy. Cached
+documents are also checked against the executing CLI version. Same-major drift
+does not invalidate the cache or managed state. A client that has never observed
+a remote version change cannot discover it offline; otherwise compatible cached
+policy retains the usual offline behavior. `blue reset` remains available without
+fetching governance policy.

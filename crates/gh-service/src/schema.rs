@@ -28,7 +28,8 @@ pub struct GovernanceConfig {
     /// enforces whether a client may consume the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum_client_version: Option<String>,
-    /// Exact tenant-recommended Blue release exported by the control plane.
+    /// Exact tenant-recommended release. A different major is incompatible;
+    /// other differences are allowed with a recommendation to align.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_client_version: Option<String>,
     /// Client-side cache TTL. `None` ⇒ operator default (see [`Self::DEFAULT_TTL_SECONDS`]).
@@ -100,13 +101,52 @@ impl GovernanceConfig {
         Ok(version)
     }
 
-    pub fn ensure_client_compatible(&self) -> Result<(), String> {
+    pub fn client_version_compatibility(
+        required: &str,
+        installed: &str,
+    ) -> Result<ClientVersionCompatibility, gh_common::GhError> {
+        let required_version = Self::validate_client_version_pin(required)?;
+        let installed_version = semver::Version::parse(installed)
+            .map_err(|_| gh_common::GhError::config("invalid executing CLI version"))?;
+        if required_version.major != installed_version.major {
+            Ok(ClientVersionCompatibility::MajorMismatch {
+                installed: installed.into(),
+                recommended: required.into(),
+            })
+        } else if required_version == installed_version {
+            Ok(ClientVersionCompatibility::Exact)
+        } else {
+            Ok(ClientVersionCompatibility::SameMajorRecommendation {
+                installed: installed.into(),
+                recommended: required.into(),
+            })
+        }
+    }
+
+    pub fn check_client_version(required: &str, installed: &str) -> Result<(), gh_common::GhError> {
+        match Self::client_version_compatibility(required, installed)? {
+            ClientVersionCompatibility::MajorMismatch {
+                installed,
+                recommended,
+            } => Err(gh_common::GhError::ClientVersionMismatch {
+                installed,
+                required: recommended,
+            }),
+            ClientVersionCompatibility::Exact
+            | ClientVersionCompatibility::SameMajorRecommendation { .. } => Ok(()),
+        }
+    }
+
+    pub fn ensure_client_compatible(&self, client_version: &str) -> Result<(), gh_common::GhError> {
+        if let Some(required) = &self.required_client_version {
+            Self::check_client_version(required, client_version)?;
+        }
         if self.contract_version > Self::CONTRACT_VERSION {
-            return Err(format!(
+            return Err(gh_common::GhError::config(format!(
                 "governance contract {} is newer than this client's contract {}",
                 self.contract_version,
                 Self::CONTRACT_VERSION
-            ));
+            )));
         }
         let unsupported = self
             .required_capabilities
@@ -115,13 +155,26 @@ impl GovernanceConfig {
             .cloned()
             .collect::<Vec<_>>();
         if !unsupported.is_empty() {
-            return Err(format!(
+            return Err(gh_common::GhError::config(format!(
                 "governance requires unsupported client capabilities: {}",
                 unsupported.join(", ")
-            ));
+            )));
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientVersionCompatibility {
+    Exact,
+    SameMajorRecommendation {
+        installed: String,
+        recommended: String,
+    },
+    MajorMismatch {
+        installed: String,
+        recommended: String,
+    },
 }
 
 const fn default_contract_version() -> u32 {
@@ -583,7 +636,7 @@ mod tests {
             "minimum_client_version": "999.0.0"
         }))
         .unwrap();
-        assert!(config.ensure_client_compatible().is_ok());
+        assert!(config.ensure_client_compatible("0.1.0").is_ok());
     }
 
     #[test]
@@ -751,14 +804,16 @@ harnesses:
         }))
         .unwrap();
         assert!(config
-            .ensure_client_compatible()
+            .ensure_client_compatible("0.1.0")
             .unwrap_err()
+            .to_string()
             .contains("newer"));
         config.contract_version = GovernanceConfig::CONTRACT_VERSION;
         config.required_capabilities = vec!["future_feature".into()];
         assert!(config
-            .ensure_client_compatible()
+            .ensure_client_compatible("0.1.0")
             .unwrap_err()
+            .to_string()
             .contains("future_feature"));
     }
 
@@ -777,5 +832,63 @@ harnesses:
             serde_json::to_value(policy).unwrap()["allow_unverified_versions"],
             true
         );
+    }
+}
+
+#[cfg(test)]
+mod client_version_tests {
+    use super::*;
+    use gh_common::GhError;
+    #[test]
+    fn exact_is_silent_and_same_major_recommends_in_both_directions() {
+        assert_eq!(
+            GovernanceConfig::client_version_compatibility("1.2.3", "1.2.3").unwrap(),
+            ClientVersionCompatibility::Exact
+        );
+        for (required, installed) in [
+            ("1.2.3", "1.2.2"),
+            ("1.2.3", "1.3.0"),
+            ("1.2.3", "1.2.4"),
+            ("1.2.3+one", "1.2.3+two"),
+            ("1.2.3-rc.1", "1.2.3"),
+        ] {
+            assert!(matches!(
+                GovernanceConfig::client_version_compatibility(required, installed),
+                Ok(ClientVersionCompatibility::SameMajorRecommendation { .. })
+            ));
+            assert!(GovernanceConfig::check_client_version(required, installed).is_ok());
+        }
+    }
+    #[test]
+    fn different_majors_block_in_both_directions() {
+        for (required, installed) in [("2.0.0", "1.9.9"), ("1.9.9", "2.0.0")] {
+            assert!(matches!(
+                GovernanceConfig::check_client_version(required, installed),
+                Err(GhError::ClientVersionMismatch { .. })
+            ));
+        }
+    }
+    #[test]
+    fn rejects_noncanonical_or_ranged_pins() {
+        for pin in [
+            "", "v1.2.3", " 1.2.3", "1.2.3\n", ">=1.2.3", "1.2", "01.2.3",
+        ] {
+            assert!(matches!(
+                GovernanceConfig::check_client_version(pin, "1.2.3"),
+                Err(GhError::Config(_))
+            ));
+        }
+    }
+    #[test]
+    fn version_precedes_capabilities_but_never_overrides_them() {
+        let config: GovernanceConfig = serde_json::from_value(serde_json::json!({"revision":"r1", "required_client_version":"1.2.3", "required_capabilities":["future"]})).unwrap();
+        assert!(matches!(
+            config.ensure_client_compatible("2.0.0"),
+            Err(GhError::ClientVersionMismatch { .. })
+        ));
+        assert!(matches!(
+            config.ensure_client_compatible("1.2.4"),
+            Err(GhError::Config(_))
+        ));
     }
 }

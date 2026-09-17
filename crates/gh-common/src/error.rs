@@ -6,6 +6,9 @@ use std::path::PathBuf;
 /// (`services/*`) define their own error types.
 #[derive(Debug, thiserror::Error)]
 pub enum GhError {
+    #[error("Blue {installed} and this tenant's recommended Blue {required} have incompatible major versions")]
+    ClientVersionMismatch { installed: String, required: String },
+
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,

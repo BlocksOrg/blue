@@ -15,10 +15,10 @@ pub use client::{authenticate, login, require_session, RevisionStreamEnd, Servic
 pub use discovery::{discover, validate_deployment_url, DiscoveryDocument, DiscoveryOAuth};
 pub use identity::{default_cli_scopes, IdentityProvider, RefreshFailure, Session};
 pub use schema::{
-    legacy_requirement_interval, GatewayConfig, GovernanceConfig, HarnessPolicy, ManagedConfig,
-    ManagedPackage, McpServer, PackageAdapter, PackageAdapterInterval, PackageAdapterVariant,
-    PackageOverride, PackageSource, PlatformAsset, PresignedUpload, SessionUploadConfig,
-    TelemetryConfig,
+    legacy_requirement_interval, ClientVersionCompatibility, GatewayConfig, GovernanceConfig,
+    HarnessPolicy, ManagedConfig, ManagedPackage, McpServer, PackageAdapter,
+    PackageAdapterInterval, PackageAdapterVariant, PackageOverride, PackageSource, PlatformAsset,
+    PresignedUpload, SessionUploadConfig, TelemetryConfig,
 };
 pub use source::{
     bounded_detail, server_error_detail, session_rejected_message, ConfigSource, FileConfigSource,

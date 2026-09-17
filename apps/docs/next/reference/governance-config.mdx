@@ -79,7 +79,7 @@ harnesses:
 | `allowed_harnesses` | Harness names permitted by policy. |
 | `harnesses` | Per-harness policy keyed by supported harness name. |
 | `minimum_client_version` | Operator-visible rollout floor; it does not replace capability enforcement. |
-| `required_client_version` | Optional canonical exact SemVer recommendation for the Blue CLI. Defaults to the control API deployment version and requires `tenant_client_version_pin`. |
+| `required_client_version` | Optional canonical exact SemVer recommendation for the Blue CLI and major compatibility boundary. Same-major differences warn; different majors block. |
 | `packages` | Organization-selected, immutable extension packages and their harness adapters. |
 | `gateway` | Global inference routing policy applied to every allowed coding agent. |
 | `session_upload` | Global portable-session capture policy; compatible profiles upload integrity-checked bundles while older clients remain accepted as non-resumable raw artifacts. |
@@ -140,10 +140,10 @@ The dashboard can inspect `github:owner/repository@ref` for a public GitHub repo
 
 Removing a package disables it for subsequent governed launches. Unmodified owned content is deleted; locally changed content is moved to quarantine and reported as drift.
 
-## Recommended Blue CLI release
+## Tenant-compatible Blue CLI
 
 The reference control API advertises its deployment version as the exact
-recommended Blue CLI release. Set
+recommended Blue CLI release and the major-version compatibility boundary. Set
 `governance.required_client_version` to a published, compatible release to
 override that default. The value remains an exact canonical SemVer, not a range.
 `minimum_client_version` remains informational.
@@ -151,4 +151,18 @@ override that default. The value remains an exact canonical SemVer, not a range.
 The `tenant_client_version_pin` capability is required whenever a pin is served.
 The `X-Blue-Required-Client-Version` header exposes the same pin on successful
 config responses and capability/contract rejections (HTTP 426). Older clients
-without this capability cannot consume the document.
+without this capability are blocked and need a manual install.
+
+A different minor, patch, prerelease, or build value within the same major emits
+a neutral recommendation and continues, whether the client is older or newer.
+Exact matches are silent. A different major blocks before launch or configuration
+changes and may offer a consent-based install of the exact recommended release.
+
+Noninteractive commands, daemons and internal hooks never prompt or install;
+background sessions only log same-major recommendations. `blue apply --yes` does
+not approve replacing Blue. Cross-major errors include `blue reset` as a way to
+detach.
+
+A live cross-major mismatch invalidates the previous cached policy. Same-major
+drift keeps cached policy and managed state usable. Cached documents are checked
+on load, and `blue reset` remains available without fetching governance policy.
