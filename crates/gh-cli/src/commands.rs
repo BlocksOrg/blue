@@ -5320,6 +5320,7 @@ mod tests {
             contract_version: GovernanceConfig::CONTRACT_VERSION,
             required_capabilities: Vec::new(),
             minimum_client_version: None,
+            required_client_version: None,
             ttl_seconds: None,
             allowed_harnesses: vec!["codex".to_owned()],
             harnesses: Default::default(),

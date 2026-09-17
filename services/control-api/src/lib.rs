@@ -5042,6 +5042,15 @@ async fn revoke_current_gateway_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn default_client_version(runtime: Option<&str>) -> String {
+    runtime
+        .filter(|version| {
+            gh_service::GovernanceConfig::validate_client_version_pin(version).is_ok()
+        })
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .to_owned()
+}
+
 fn prepare_client_version_pin(
     config: &mut gh_service::GovernanceConfig,
     deployment_version: &str,
@@ -5079,7 +5088,9 @@ async fn governance_config(
     let revision = row.revision;
     let mut config = serde_json::from_value(row.document)
         .map_err(|error| ApiError::internal(format!("decoding stored config: {error}")))?;
-    let pin_headers = prepare_client_version_pin(&mut config, env!("CARGO_PKG_VERSION"))?;
+    let runtime_version = std::env::var("BLUE_DEPLOYMENT_VERSION").ok();
+    let deployment_version = default_client_version(runtime_version.as_deref());
+    let pin_headers = prepare_client_version_pin(&mut config, &deployment_version)?;
     if let Err(error) = enforce_client_capabilities(&headers, &config) {
         return Ok((pin_headers, error).into_response());
     }
@@ -12204,13 +12215,33 @@ mod client_version_pin_tests {
         serde_json::from_value(serde_json::json!({"revision":"r1"})).unwrap()
     }
     #[test]
+    fn default_client_version_uses_only_canonical_runtime_semver() {
+        for version in ["1.2.3", "1.2.3-rc.gabcdef0"] {
+            assert_eq!(default_client_version(Some(version)), version);
+        }
+
+        for version in [
+            None,
+            Some("development"),
+            Some("e2e"),
+            Some("v1.2.3"),
+            Some("1.2.03"),
+        ] {
+            assert_eq!(default_client_version(version), env!("CARGO_PKG_VERSION"));
+        }
+    }
+    #[test]
     fn old_revisions_acquire_current_deployment_pin_without_persistence() {
         let stored = document();
-        for version in ["1.2.3", "1.2.4"] {
+        for runtime_version in ["1.2.3", "1.2.4-rc.gabcdef0"] {
+            let version = default_client_version(Some(runtime_version));
             let mut served = stored.clone();
-            let headers = prepare_client_version_pin(&mut served, version).unwrap();
+            let headers = prepare_client_version_pin(&mut served, &version).unwrap();
             assert_eq!(headers["x-blue-required-client-version"], version);
-            assert_eq!(served.required_client_version.as_deref(), Some(version));
+            assert_eq!(
+                served.required_client_version.as_deref(),
+                Some(version.as_str())
+            );
             assert!(served
                 .required_capabilities
                 .iter()
