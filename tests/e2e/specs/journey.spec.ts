@@ -535,9 +535,17 @@ esac
   });
 
   test("@smoke CLI applies policy, reports health, and launches Codex transparently", async () => {
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
     for (const args of [["version"], ["help"], ["doctor"], ["config"], ["apply", "--yes"], ["status"], ["verify"]]) {
       const result = await runCli(home, args);
       expect(result.code, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+      if (args[0] === "status") {
+        expect(result.stdout).toContain(`Tenant URL     : ${control}`);
+      }
+      if (args[0] === "doctor") {
+        expect(result.stdout).toContain(`config source : ${control}/governance-config`);
+        expect(result.stdout).not.toContain(`http(${control}/governance-config)`);
+      }
     }
     const launched = await runCli(home, ["run", "codex", "--", "hello world"]);
     expect(launched.code, launched.stderr).toBe(0);
