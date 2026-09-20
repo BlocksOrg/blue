@@ -826,6 +826,15 @@ esac
     });
     expect(launched.code, launched.stderr).toBe(0);
     expect(launched.stdout).toContain("fake-claude-ok");
+    const startupAt = launched.stdout.indexOf("Starting claude");
+    const handoffAt = launched.stdout.indexOf(
+      "\u001b[?2026l\u001b[?1049l\u001b[r\u001b[2J\u001b[H\u001b[?25h",
+      startupAt,
+    );
+    const agentAt = launched.stdout.indexOf("fake-claude-ok");
+    expect(startupAt).toBeGreaterThanOrEqual(0);
+    expect(handoffAt).toBeGreaterThan(startupAt);
+    expect(agentAt).toBeGreaterThan(handoffAt);
     expect(launched.stdout).toContain("\u001b[38;2;1;2;3mBLUE_ANSI_OK\u001b[0m");
     const clearAt = launched.stdout.indexOf("\u001b[2J", launched.stdout.indexOf("BLUE_ANSI_OK"));
     expect(clearAt).toBeGreaterThanOrEqual(0);
