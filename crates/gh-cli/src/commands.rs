@@ -2234,11 +2234,14 @@ pub(crate) fn status_text(strict: bool) -> Result<String> {
             inventory.mark_reconciled(state.harnesses.clone());
         }
     }
-    let mut lines = vec![
-        format!(
-            "Authentication : {}",
-            session.email.as_deref().unwrap_or("authenticated")
-        ),
+    let mut lines = vec![format!(
+        "Authentication : {}",
+        session.email.as_deref().unwrap_or("authenticated")
+    )];
+    if cfg.has_http_service() {
+        lines.push(format!("Tenant URL     : {}", cfg.service.url));
+    }
+    lines.extend([
         format!("Desired config : {}", desired.revision),
         format!(
             "Applied config : {}",
@@ -2263,7 +2266,7 @@ pub(crate) fn status_text(strict: bool) -> Result<String> {
                 "ACTION REQUIRED — run `blue apply`"
             }
         ),
-    ];
+    ]);
     let packages = package_statuses().unwrap_or_default();
     if !desired.packages.is_empty() || !packages.is_empty() {
         lines.push("Managed packages:".into());
