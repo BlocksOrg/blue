@@ -73,7 +73,9 @@ fn codex_has_completed_certify_call(output: &str) -> bool {
                 == Some("blue_certify")
             && event.pointer("/item/status").and_then(serde_json::Value::as_str)
                 == Some("completed")
-            && event.pointer("/item/error").is_none()
+            && event
+                .pointer("/item/error")
+                .is_none_or(serde_json::Value::is_null)
             && event
                 .pointer("/item/result")
                 .is_some_and(|result| value_contains_string(result, "BLUE_MCP_OK"))
@@ -323,12 +325,16 @@ mod tests {
     use super::codex_has_completed_certify_call;
 
     #[test]
-    fn accepts_exact_completed_codex_certify_call() {
-        let output = concat!(
-            "not json\n",
-            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"blue_certify","status":"completed","result":{"content":[{"type":"text","text":"BLUE_MCP_OK"}]}}}"#,
-        );
-        assert!(codex_has_completed_certify_call(output));
+    fn accepts_completed_codex_certify_call_with_missing_or_null_error() {
+        for output in [
+            concat!(
+                "not json\n",
+                r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"blue_certify","status":"completed","result":{"content":[{"type":"text","text":"BLUE_MCP_OK"}]}}}"#,
+            ),
+            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"blue_certify","status":"completed","result":{"content":[{"type":"text","text":"BLUE_MCP_OK"}]},"error":null}}"#,
+        ] {
+            assert!(codex_has_completed_certify_call(output), "rejected: {output}");
+        }
     }
 
     #[test]
