@@ -161,6 +161,18 @@ test.describe.serial("Blue deployment journey", () => {
     expect(refreshedClaims.aud).toBeTruthy();
   });
 
+  test("@smoke authenticated users are redirected away from login", async ({ page }) => {
+    await loginAsAdmin(page);
+
+    await page.goto("/login", { waitUntil: "commit" });
+    await expect(page).toHaveURL(/\/sessions$/);
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+
+    await page.goto("/login?callbackURL=%2Fgateway", { waitUntil: "commit" });
+    await expect(page).toHaveURL(/\/gateway$/);
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+  });
+
   test("@smoke executable provisioner creates managed gateway access", async () => {
     const result = await runCli(home, ["gateway"]);
     expect(result.code, result.stderr).toBe(0);
