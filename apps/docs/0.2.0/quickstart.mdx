@@ -1,0 +1,147 @@
+---
+title: "Quickstart"
+description: "The three things you need to run Blue: the CLI, a config file, and a server."
+icon: "rocket"
+---
+
+Blue governs coding-agent CLIs (Codex, Claude Code, Kimi Code, OpenCode) from one place. Developers keep their native agent. Your organization decides which agents run and how they are configured, and can optionally route their inference through a gateway you operate.
+
+You need three things:
+
+| | What it is | Who uses it |
+| --- | --- | --- |
+| **1. The Blue CLI** | The `blue` binary that launches an agent under policy | Developers |
+| **2. A config file** | `blue.yaml`: your policy and the server's settings | Admins and platform |
+| **3. A Blue server** | The control plane the CLI connects to | Platform |
+
+## 1. The Blue CLI
+
+Developers install one binary and launch their agent through it. Each launch signs in, fetches the latest policy for that developer, applies it as a launch-scoped overlay, verifies any managed extensions, and starts the native agent. Arguments, terminal UI, signals, and exit codes pass straight through.
+
+<CodeGroup>
+```bash macOS and Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BlocksOrg/blue/releases/latest/download/install.sh | sh
+```
+
+```powershell Windows PowerShell
+irm https://github.com/BlocksOrg/blue/releases/latest/download/install.ps1 | iex
+```
+</CodeGroup>
+
+Connect it to your server and launch an agent:
+
+```bash
+blue setup      # enter the Control API URL, e.g. https://api.blue.example.com, then sign in
+blue doctor     # which agents are installed, and what policy allows
+blue codex      # launch Codex under policy; or claude, kimi, opencode
+```
+
+Bare `blue` launches your preferred agent. Hold Ctrl and press `]` inside a session for status, health, and reload controls. See [CLI commands](/0.2.0/cli/commands) for installation options and the full command list, including `blue status` and `blue verify` for scripts.
+
+## 2. The config file
+
+`blue.yaml` is where your organization's policy starts. Its `governance` section manages your developers' coding-agent configuration:
+
+- **Which agents are allowed**, and which versions.
+- **Default model and settings** per agent: model, reasoning effort, approval policy, sandbox mode, and other agent-native options.
+- **MCP servers** added to every governed launch.
+- **Extensions**: digest-pinned skills, plugins, hooks, subagents, and helper binaries.
+- **Session capture**, if you turn it on.
+
+Developers get this policy on every launch. Their personal agent config is not overwritten; Blue applies policy as a launch-scoped overlay. After the first deployment, admins edit policy from the dashboard, which creates a new revision without touching the file.
+
+The file also has a `control_api` section with the server's runtime settings: database, storage, and the public URLs. Secrets never go in the file; `os.environ/NAME` reads them from the environment at startup.
+
+A minimal governance-only file:
+
+```yaml
+governance:
+  revision: "2026-09-15.1"
+  contract_version: 3
+  required: true
+  allowed_harnesses: [codex, claude, kimi, opencode]
+  harnesses:
+    codex:
+      managed_config:
+        model: gpt-5.6-sol
+        approval_policy: on-request
+    claude:
+      managed_config:
+        model: claude-opus-4-8
+
+control_api:
+  database_url: os.environ/HARNESS_DATABASE_URL
+  bootstrap:
+    admin_email: os.environ/HARNESS_BOOTSTRAP_ADMIN_EMAIL
+  auth:
+    public_url: https://blue.example.com               # dashboard, as users reach it
+    audience:   https://api.blue.example.com           # Control API, as the CLI reaches it
+    issuer:     https://blue.example.com/api/auth
+    client_id:  blue-cli
+    session_url: http://blue-blue-dashboard:3000/api/auth/get-session   # dashboard, as the server reaches it
+    jwks_url:    http://blue-blue-dashboard:3000/api/auth/jwks
+  blob_storage:
+    bucket: os.environ/HARNESS_BLOB_BUCKET
+    region: us-west-2
+  package_artifacts:
+    bucket: os.environ/HARNESS_PACKAGE_BUCKET
+```
+
+Adding one top-level `gateway` section turns on gateway mode. The release bundle ships a starter with every section filled in. See [Configure blue.yaml](/0.2.0/deployment/blue-yaml) for every field, and [Governance configuration](/0.2.0/reference/governance-config) for the full policy schema.
+
+## 3. The Blue server
+
+The server is the control plane. It is one container image run as three workloads, on top of PostgreSQL and two S3-compatible buckets. It reads `blue.yaml` from `/etc/blue/blue.yaml`.
+
+| Workload | What it does |
+| --- | --- |
+| Dashboard | Browser sign-in and administration. Issues the OAuth tokens the CLI uses |
+| Control API | Serves each developer their personalized policy. The CLI talks to this |
+| Worker | One replica of the Control API that runs the cleanup and reconciliation loops |
+
+**In governance-only mode** the server manages sign-in and membership, stores every policy revision, serves each developer the policy that applies to them, tracks which clients are on which revision, and stores captured sessions if enabled. Inference is untouched: agents keep talking to their own provider with their own credentials.
+
+**In gateway mode** the server also runs an inference proxy in front of a LiteLLM gateway you operate. It provisions one gateway key per user, keeps that key and the provider keys server-side, and hands each governed launch a short-lived token instead. Agents send inference to the proxy, the proxy swaps the token for the real key, and LiteLLM forwards to the provider. Nothing secret lands on the developer machine.
+
+### How to deploy
+
+The application contract is the same on every platform. Your platform team owns placement, networking, secret delivery, scaling, and rollout policy.
+
+<Columns cols={3}>
+  <Card title="Kubernetes and Helm" icon="boxes-stacked" href="/0.2.0/deployment/production">
+    Use the maintained chart and optional AWS OpenTofu starter as a reference production implementation.
+  </Card>
+  <Card title="Your platform" icon="server" href="/0.2.0/deployment/runtime-contract">
+    Map the image commands, ports, health checks, configuration, and dependencies onto ECS, Nomad, VMs, or another scheduler.
+  </Card>
+  <Card title="Local evaluation" icon="docker" href="/0.2.0/development/local-compose">
+    Run the reference stack with Docker Compose before designing a production deployment.
+  </Card>
+</Columns>
+
+<Warning>
+  Docker Compose includes development credentials and trusted-network settings. Use it to evaluate Blue, not as an unchanged production template.
+</Warning>
+
+Two public HTTPS origins are exposed: the dashboard and the Control API. Gateway mode adds a third for the inference proxy. The [Deployment contract](/0.2.0/deployment/runtime-contract) lists the image commands, ports, health checks, required environment variables, and the external dependencies each mode needs.
+
+<Check>
+  The dashboard accepts the bootstrap admin login, `blue doctor` shows your agent as allowed, and the agent opens under the organization's policy.
+</Check>
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Configure blue.yaml" icon="file-code" href="/0.2.0/deployment/blue-yaml">
+    Every runtime and policy field, secret references, and reconciliation rules.
+  </Card>
+  <Card title="Deployment contract" icon="list-check" href="/0.2.0/deployment/runtime-contract">
+    Workloads, ports, health checks, and dependencies for any platform.
+  </Card>
+  <Card title="Bring your own gateway" icon="route" href="/0.2.0/concepts/gateway-mode">
+    Turn on gateway mode and route inference through your LiteLLM.
+  </Card>
+  <Card title="Managed extensions" icon="package" href="/0.2.0/admin/managed-packages">
+    Publish skills, plugins, hooks, and MCP servers from the dashboard.
+  </Card>
+</Columns>

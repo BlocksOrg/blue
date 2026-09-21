@@ -10,7 +10,7 @@ You need `tofu`, `aws`, `kubectl`, `helm`, `jq`, `docker`, and AWS credentials t
 
 Nothing in Blue reads Redis. It is here for the LiteLLM gateway you may run later; drop `include_redis` to save the cost. To land in a cluster or VPC you already run, set `eks_cluster_name` and `vpc_id`; see the [AWS module README](https://github.com/BlocksOrg/blue/blob/main/deploy/tofu/aws/README.md).
 
-Blue does not need Kubernetes. This is the maintained implementation of the [Deployment contract](/next/deployment/runtime-contract); any platform that meets the contract works.
+Blue does not need Kubernetes. This is the maintained implementation of the [Deployment contract](/0.2.0/deployment/runtime-contract); any platform that meets the contract works.
 
 ## Before you start
 ```bash
@@ -166,7 +166,7 @@ EOF
 # Uploads the config into the cluster so Blue's pods can read it.
 kubectl -n "$BLUE_KUBE_NAMESPACE" create configmap blue-config --from-file=blue.yaml="$BLUE_CONFIG_FILE"
 ```
-The bucket names come from the environment, which the generated Helm settings fill in. The two `blue-blue-dashboard` URLs are calls inside the cluster, so they stay plain HTTP. See [Configure blue.yaml](/next/deployment/blue-yaml) for every field.
+The bucket names come from the environment, which the generated Helm settings fill in. The two `blue-blue-dashboard` URLs are calls inside the cluster, so they stay plain HTTP. See [Configure blue.yaml](/0.2.0/deployment/blue-yaml) for every field.
 
 ## 5. Write the Helm settings
 ```bash
@@ -277,7 +277,7 @@ Back up PostgreSQL, the package bucket, and the session bucket separately; they 
 
 Continues from step 8 with the cluster still running. Adds Blue's inference proxy at `https://iproxy.<zone>`: agents send model calls there, the proxy checks a Blue-issued token, then forwards to your LiteLLM, which holds the provider keys. LiteLLM is already running somewhere you manage, and you have its URL and master key. It must serve a model named `claude-opus-4-8`, the name the governance policy in step 4 hands to agents. Installs cert-manager into the cluster for the internal certificates.
 
-Read [Bring your own gateway](/next/concepts/gateway-mode) for how the routing and credentials work.
+Read [Bring your own gateway](/0.2.0/concepts/gateway-mode) for how the routing and credentials work.
 
 ## 9. Point Blue at your LiteLLM
 ```bash
@@ -316,7 +316,7 @@ The proxy and the API talk over an encrypted internal link where each side shows
 helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --version v1.18.2 \
   --namespace cert-manager --create-namespace --set crds.enabled=true --wait
 ```
-Already have a PKI, or no cert-manager? See [Internal certificates](/next/concepts/gateway-mode#internal-certificates) for pointing the chart at your own issuer or supplying the two certificate Secrets yourself.
+Already have a PKI, or no cert-manager? See [Internal certificates](/0.2.0/concepts/gateway-mode#internal-certificates) for pointing the chart at your own issuer or supplying the two certificate Secrets yourself.
 
 ## 12. Add the gateway to Blue's config
 ```bash

@@ -1,0 +1,226 @@
+---
+title: "Managed repository connections"
+description: "Configure private GitHub and Bitbucket repositories as organization-managed extension sources."
+icon: "folder-tree"
+---
+
+Managed repository connections let administrators import extension bundles from private GitHub and Bitbucket repositories. The Control API authenticates to the repository, resolves the requested branch or tag to an immutable commit, and mirrors the archive into organization-scoped object storage.
+
+Repository credentials never appear in governance configuration or reach developer machines. Clients receive an `artifact_id` and SHA-256 digest, then use their existing harness session to request a short-lived object-storage download.
+
+<Warning>
+  Repository archives can contain executable hooks, plugins, and helper binaries. Grant repository access only to reviewed namespaces and inspect the capability mappings before publishing a package.
+</Warning>
+
+## Prerequisites
+
+Before adding a connection, prepare:
+
+- A dedicated, non-expiring S3-compatible bucket for package artifacts.
+- The organization slug used by Blue, such as the `control_api.bootstrap.organization_slug` value for the bootstrap organization.
+- A read-only GitHub App or Bitbucket access token.
+- A mounted PEM CA bundle when an enterprise provider uses a private certificate authority.
+
+The Compose stack creates the `package-artifacts` MinIO bucket automatically. Production deployments must create the bucket separately and set `HARNESS_PACKAGE_BUCKET`.
+
+## Configure artifact storage
+
+Package artifacts must not use the raw-session bucket because session retention policies may delete objects still referenced by historical governance revisions.
+
+```yaml blue.yaml
+control_api:
+  package_artifacts:
+    bucket: os.environ/HARNESS_PACKAGE_BUCKET
+```
+
+Compose fixes the package-artifact bucket name in `deploy/docker-compose.yml`; setting `HARNESS_PACKAGE_BUCKET` in `deploy/.env` does not override it. Change the Compose service environment explicitly when you need another bucket.
+
+The Control API uses the same S3 endpoint, region, public endpoint, path-style setting, and ambient AWS credentials configured under `control_api.blob_storage`.
+
+## Configure a provider
+
+Add connections under `control_api.package_sources.connections`. Connection IDs must contain only letters, numbers, hyphens, and underscores. Each organization entry maps a Blue organization slug to the repository namespaces it may import.
+
+<Tabs>
+  <Tab title="GitHub.com">
+    Create a GitHub App, grant it read-only **Contents** permission, and install it on the target organization or account. Select only the repositories Blue should import.
+
+    ```yaml blue.yaml
+    control_api:
+      package_sources:
+        connections:
+          - id: github-com
+            name: GitHub
+            provider: github
+            app_id: os.environ/HARNESS_GITHUB_APP_ID
+            private_key: file:///run/secrets/github-app-private-key.pem
+            organizations:
+              dev:
+                - BlocksOrg
+    ```
+
+    `app_id` is the GitHub App ID, not the OAuth client ID. Blue creates a repository-scoped installation token when an administrator inspects a source.
+  </Tab>
+
+  <Tab title="GitHub Enterprise">
+    Register and install a GitHub App on the Enterprise Server instance. Set `api_base_url` to the REST API root, normally `/api/v3`.
+
+    ```yaml blue.yaml
+    control_api:
+      package_sources:
+        connections:
+          - id: corporate-github
+            name: Corporate GitHub
+            provider: github
+            api_base_url: https://github.example.com/api/v3
+            app_id: os.environ/HARNESS_GHES_APP_ID
+            private_key: file:///run/secrets/ghes-app-private-key.pem
+            ca_bundle: file:///run/secrets/corporate-ca.pem
+            download_hosts:
+              - github-assets.example.com
+            organizations:
+              dev:
+                - platform-engineering
+    ```
+
+    Add an exact hostname to `download_hosts` only when the configured server redirects archive downloads to that trusted hostname. Wildcards, ports, paths, and embedded credentials are rejected. Same-host downloads require no entry.
+  </Tab>
+
+  <Tab title="Bitbucket Cloud">
+    Create a repository, project, or workspace access token with read-only repository permission. Prefer the narrowest token that covers the approved repositories.
+
+    ```yaml blue.yaml
+    control_api:
+      package_sources:
+        connections:
+          - id: bitbucket-cloud
+            name: Bitbucket Cloud
+            provider: bitbucket_cloud
+            token: os.environ/HARNESS_BITBUCKET_TOKEN
+            organizations:
+              dev:
+                - product-engineering
+    ```
+
+    Namespace entries are Bitbucket workspace slugs. Blue sends the access token as a Bearer token and resolves refs through the Bitbucket Cloud API.
+  </Tab>
+
+  <Tab title="Bitbucket Data Center">
+    Create a read-only HTTP access token for the repository or project. Set `api_base_url` to the instance root, including any deployment context path.
+
+    ```yaml blue.yaml
+    control_api:
+      package_sources:
+        connections:
+          - id: corporate-bitbucket
+            name: Corporate Bitbucket
+            provider: bitbucket_data_center
+            api_base_url: https://bitbucket.example.com/bitbucket
+            token: os.environ/HARNESS_BITBUCKET_DC_TOKEN
+            ca_bundle: file:///run/secrets/corporate-ca.pem
+            download_hosts:
+              - bitbucket-assets.example.com
+            organizations:
+              dev:
+                - PLATFORM
+    ```
+
+    Namespace entries are Bitbucket project keys. Archive access requires at least repository read permission.
+  </Tab>
+</Tabs>
+
+## Supply deployment secrets
+
+Environment references use `os.environ/NAME` or `env://NAME`. File references use `file:///absolute/path`. Keep private keys and tokens outside the repository.
+
+For Compose, add the environment variables and read-only secret mounts to the Control API service:
+
+```yaml docker-compose.override.yml
+services:
+  control-api:
+    environment:
+      HARNESS_GITHUB_APP_ID: "123456"
+      HARNESS_BITBUCKET_TOKEN: ${HARNESS_BITBUCKET_TOKEN}
+    volumes:
+      - ./secrets/github-app-private-key.pem:/run/secrets/github-app-private-key.pem:ro
+      - ./secrets/corporate-ca.pem:/run/secrets/corporate-ca.pem:ro
+```
+
+<Info>
+  Connection secrets and referenced files are loaded when the Control API starts. Restart the service after rotating a key, token, URL reference, or CA bundle. Already mirrored artifacts remain installable after provider credentials change.
+</Info>
+
+## Control organization access
+
+The `organizations` map is an authorization boundary, not a display filter. The Control API rejects a namespace before contacting the provider when it is not allowed for the authenticated administrator's organization.
+
+```yaml
+organizations:
+  dev:
+    - BlocksOrg
+    - blocks-internal
+  security:
+    - security-engineering
+```
+
+Namespace comparisons are case-insensitive. A `"*"` entry permits every namespace accessible to the connection credential and should be reserved for single-organization deployments with an equivalent trust boundary.
+
+## Start and verify the connection
+
+<Steps>
+  <Step title="Restart the Control API">
+    Rebuild or restart the service after changing the server configuration or secrets.
+
+    ```bash
+    (cd deploy && docker compose up -d --build control-api dashboard)
+    ```
+  </Step>
+  <Step title="Check startup health">
+    Confirm the service starts without secret, URL, CA, database migration, or object-storage errors.
+
+    ```bash
+    (cd deploy && docker compose logs --tail=100 control-api)
+    curl -fsS http://127.0.0.1:8080/health
+    ```
+  </Step>
+  <Step title="Inspect a repository">
+    Open **Extensions**, select **Add extension**, then choose **Managed repository**. Select the connection, enter `namespace/repository` and a branch, tag, or commit, and select **Inspect source**.
+  </Step>
+  <Step title="Confirm immutable metadata">
+    Verify that the form shows a resolved commit, archive size, and SHA-256 digest. Add the capability mappings and publish the pending governance revision.
+  </Step>
+  <Step title="Verify client installation">
+    Run `blue apply` or launch an allowed harness. The client requests a fresh download with its harness session, verifies the digest, and installs the compatible package contents.
+  </Step>
+</Steps>
+
+## Configuration fields
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `id` | Yes | Stable connection identifier shown in artifact provenance. |
+| `name` | No | Dashboard label; defaults to `id`. |
+| `provider` | Yes | `github`, `bitbucket_cloud`, or `bitbucket_data_center`. |
+| `app_id` | GitHub | GitHub App ID or environment/file reference. |
+| `private_key` | GitHub | RSA private key generated for the GitHub App. |
+| `token` | Bitbucket | Read-only repository, project, or workspace access token. |
+| `api_base_url` | Enterprise | GitHub REST API root or Bitbucket Data Center instance root. |
+| `web_base_url` | Optional | Bitbucket Cloud web origin override; omit for `bitbucket.org`. |
+| `ca_bundle` | Optional | PEM CA bundle or secret reference for a private enterprise CA. |
+| `download_hosts` | Optional | Additional exact trusted cross-host archive redirect destinations. HTTP archive redirects are HTTPS-only and capped at five hops, and credentials are sent only to the original scheme, host, and port. Bitbucket Cloud's Git acquisition path refuses redirects entirely. |
+| `organizations` | Yes | Blue organization slugs mapped to allowed repository namespaces. |
+
+## Troubleshooting
+
+| Symptom | Resolution |
+| --- | --- |
+| No managed repository connections appear | Confirm the signed-in organization slug has an entry under `organizations`, then restart the Control API. |
+| Namespace is not allowed | Add the exact GitHub owner, Bitbucket workspace, or Bitbucket project key to that organization's allowlist. |
+| GitHub App cannot access the repository | Confirm the App is installed on the owner, the repository is selected, and Contents permission is read-only or greater. |
+| Ref resolution returns `401` or `403` | Rotate the Bitbucket token or verify the GitHub App installation and provider permissions. |
+| Archive redirects to an untrusted host | Verify the provider's archive hostname, then add only that trusted hostname to `download_hosts`. |
+| Provider CA bundle is invalid | Mount a PEM bundle readable by the Control API and check the `file://` path. |
+| Archive exceeds 100 MiB | Remove unrelated repository content or publish a smaller purpose-built extension archive. |
+| Client cannot install a new artifact offline | Restore access to the Control API for the first download. Digest-cached packages continue to work offline. |
+
+See [Managed packages](/0.2.0/admin/managed-packages) for capability mapping and client installation behavior, and [Production deployment](/0.2.0/deployment/production) for storage and secret-management requirements.
