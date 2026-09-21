@@ -9,11 +9,12 @@
 //! Each `<agent>_certifies` test:
 //!   1. `blue apply --yes` — asserts the managed `e2e-remote` MCP server and the
 //!      managed `example` skill are wired into that agent's config.
-//!   2. `blue run <agent>` with a tool-forcing prompt — asserts exit 0, the
-//!      `mcp-started` + `mcp-called` component markers, and `BLUE_MCP_OK` in the
-//!      output (the marker the managed MCP tool returns). This proves the agent
-//!      really launched, the MCP server started and was called, and a real model
-//!      round-trip completed.
+//!   2. `blue run <agent>` with a tool-forcing prompt — asserts exit 0 and
+//!      `BLUE_MCP_OK` in the output (the marker the managed MCP tool returns).
+//!      Harnesses that preserve the marker-directory environment must also
+//!      create the `mcp-started` + `mcp-called` component markers; Codex must
+//!      instead emit a completed call for the exact managed server and tool in
+//!      its structured JSON event stream.
 //!   3. LiteLLM spend logs — asserts this test's user (every test runs as its
 //!      own unique user) produced an inference that resolved to the governed
 //!      upstream model, and that the recorded credential is a hashed virtual
@@ -44,6 +45,40 @@ use std::path::Path;
 use std::time::Duration;
 
 use e2e_slim::{AgentMatrix, AgentSelection, Home};
+
+fn value_contains_string(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.contains(needle),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_string(value, needle)),
+        serde_json::Value::Object(values) => values
+            .values()
+            .any(|value| value_contains_string(value, needle)),
+        _ => false,
+    }
+}
+
+fn codex_has_completed_certify_call(output: &str) -> bool {
+    output.lines().any(|line| {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        event.get("type").and_then(serde_json::Value::as_str) == Some("item.completed")
+            && event.pointer("/item/type").and_then(serde_json::Value::as_str)
+                == Some("mcp_tool_call")
+            && event.pointer("/item/server").and_then(serde_json::Value::as_str)
+                == Some("e2e-remote")
+            && event.pointer("/item/tool").and_then(serde_json::Value::as_str)
+                == Some("blue_certify")
+            && event.pointer("/item/status").and_then(serde_json::Value::as_str)
+                == Some("completed")
+            && event.pointer("/item/error").is_none()
+            && event
+                .pointer("/item/result")
+                .is_some_and(|result| value_contains_string(result, "BLUE_MCP_OK"))
+    })
+}
 
 /// The current lock-pin version for `agent` (the newest/blessed cell). Read from
 /// the shared lock so it tracks the single source of truth for the pin.
@@ -220,14 +255,21 @@ fn certify_cell(agent: &str, version: &str) {
         output.status.success(),
         "`blue run {agent}` exited non-zero:\n{combined}"
     );
-    assert!(
-        markers.join("mcp-started").is_file(),
-        "{agent}: mcp-started marker missing (MCP server never launched):\n{combined}"
-    );
-    assert!(
-        markers.join("mcp-called").is_file(),
-        "{agent}: mcp-called marker missing (managed MCP tool never invoked):\n{combined}"
-    );
+    if agent == "codex" {
+        assert!(
+            codex_has_completed_certify_call(&combined),
+            "{agent}: output missing a completed e2e-remote/blue_certify MCP call:\n{combined}"
+        );
+    } else {
+        assert!(
+            markers.join("mcp-started").is_file(),
+            "{agent}: mcp-started marker missing (MCP server never launched):\n{combined}"
+        );
+        assert!(
+            markers.join("mcp-called").is_file(),
+            "{agent}: mcp-called marker missing (managed MCP tool never invoked):\n{combined}"
+        );
+    }
     assert!(
         combined.contains("BLUE_MCP_OK"),
         "{agent}: output missing the BLUE_MCP_OK MCP marker:\n{combined}"
@@ -275,3 +317,31 @@ fn certify_cell(agent: &str, version: &str) {
 // including the lock-pin cell per agent (which preserves today's per-agent
 // certification coverage).
 include!(concat!(env!("OUT_DIR"), "/matrix_cert_cases.rs"));
+
+#[cfg(test)]
+mod tests {
+    use super::codex_has_completed_certify_call;
+
+    #[test]
+    fn accepts_exact_completed_codex_certify_call() {
+        let output = concat!(
+            "not json\n",
+            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"blue_certify","status":"completed","result":{"content":[{"type":"text","text":"BLUE_MCP_OK"}]}}}"#,
+        );
+        assert!(codex_has_completed_certify_call(output));
+    }
+
+    #[test]
+    fn rejects_non_evidence_codex_events() {
+        for output in [
+            r#"{"type":"item.started","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"blue_certify","status":"in_progress","result":"BLUE_MCP_OK"}}"#,
+            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"other","tool":"blue_certify","status":"completed","result":"BLUE_MCP_OK"}}"#,
+            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"other","status":"completed","result":"BLUE_MCP_OK"}}"#,
+            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"blue_certify","status":"failed","result":"BLUE_MCP_OK"}}"#,
+            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","server":"e2e-remote","tool":"blue_certify","status":"completed","result":"BLUE_MCP_OK","error":{"message":"tool failed"}}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"BLUE_MCP_OK"}}"#,
+        ] {
+            assert!(!codex_has_completed_certify_call(output), "accepted: {output}");
+        }
+    }
+}

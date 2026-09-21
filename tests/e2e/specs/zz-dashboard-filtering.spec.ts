@@ -842,7 +842,7 @@ test.describe.serial("dashboard table filtering", () => {
     await dialog.getByRole("button", { name: "Regenerate link" }).click();
     await expect(dialog.getByRole("heading", { name: "Share replacement invitation link" })).toBeVisible();
 
-    const replacementUrl = await dialog.getByLabel("Invitation link").inputValue();
+    const replacementUrl = await dialog.getByRole("textbox", { name: "Invitation link" }).inputValue();
     const replacementId = new URL(replacementUrl).searchParams.get("id");
     expect(replacementId).toBeTruthy();
     expect(replacementId).not.toBe(original.id);
