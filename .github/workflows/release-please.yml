@@ -110,17 +110,15 @@ jobs:
             echo "manifest version is not MAJOR.MINOR.PATCH (got '$version')" >&2
             exit 1
           fi
+          if [[ "$(gh release view "v$version" --json isDraft --jq .isDraft 2>/dev/null)" == "false" ]]; then
+            echo "v$version is already published; refusing to replace its documentation snapshot" >&2
+            exit 1
+          fi
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
           scripts/set-version.sh "$version"
 
-          # release-version.mjs throws if docs.json already lists the version, so
-          # skip it on a re-run rather than letting an idempotent job fail.
-          if [ -d "apps/docs/$version" ]; then
-            echo "apps/docs/$version already exists; leaving the snapshot as-is"
-          else
-            node apps/docs/scripts/release-version.mjs "$version"
-          fi
+          node apps/docs/scripts/release-version.mjs "$version" --replace-current
 
           scripts/check-release-version.sh "v$version"
           node apps/docs/scripts/check-release-snapshot.mjs "$version"
