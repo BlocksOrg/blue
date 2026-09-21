@@ -2772,8 +2772,9 @@ fn run_prepared(
         .and_then(|gateway| gateway.token.as_deref())
         .and_then(jwt_expires_at);
     let code = if interactive {
-        if let Some(startup) = startup.as_mut() {
+        if let Some(mut startup) = startup.take() {
             startup.ready()?;
+            startup.handoff()?;
         }
         let gateway_state = if config.gateway.is_some() && !cfg.mode.force_governance_only {
             "managed"
