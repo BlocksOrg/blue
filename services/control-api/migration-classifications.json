@@ -20,6 +20,11 @@
       "version": 34,
       "classification": "expand",
       "raises_compatibility_floor": false
+    },
+    {
+      "version": 35,
+      "classification": "expand",
+      "raises_compatibility_floor": false
     }
   ]
 }
