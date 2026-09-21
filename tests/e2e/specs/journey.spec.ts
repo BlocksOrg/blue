@@ -161,6 +161,18 @@ test.describe.serial("Blue deployment journey", () => {
     expect(refreshedClaims.aud).toBeTruthy();
   });
 
+  test("@smoke authenticated users are redirected away from login", async ({ page }) => {
+    await loginAsAdmin(page);
+
+    await page.goto("/login", { waitUntil: "commit" });
+    await expect(page).toHaveURL(/\/sessions$/);
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+
+    await page.goto("/login?callbackURL=%2Fgateway", { waitUntil: "commit" });
+    await expect(page).toHaveURL(/\/gateway$/);
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+  });
+
   test("@smoke executable provisioner creates managed gateway access", async () => {
     const result = await runCli(home, ["gateway"]);
     expect(result.code, result.stderr).toBe(0);
@@ -535,9 +547,17 @@ esac
   });
 
   test("@smoke CLI applies policy, reports health, and launches Codex transparently", async () => {
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
     for (const args of [["version"], ["help"], ["doctor"], ["config"], ["apply", "--yes"], ["status"], ["verify"]]) {
       const result = await runCli(home, args);
       expect(result.code, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+      if (args[0] === "status") {
+        expect(result.stdout).toContain(`Tenant URL     : ${control}`);
+      }
+      if (args[0] === "doctor") {
+        expect(result.stdout).toContain(`config source : ${control}/governance-config`);
+        expect(result.stdout).not.toContain(`http(${control}/governance-config)`);
+      }
     }
     const launched = await runCli(home, ["run", "codex", "--", "hello world"]);
     expect(launched.code, launched.stderr).toBe(0);
@@ -826,6 +846,15 @@ esac
     });
     expect(launched.code, launched.stderr).toBe(0);
     expect(launched.stdout).toContain("fake-claude-ok");
+    const startupAt = launched.stdout.indexOf("Starting claude");
+    const handoffAt = launched.stdout.indexOf(
+      "\u001b[?2026l\u001b[?1049l\u001b[r\u001b[2J\u001b[H\u001b[?25h",
+      startupAt,
+    );
+    const agentAt = launched.stdout.indexOf("fake-claude-ok");
+    expect(startupAt).toBeGreaterThanOrEqual(0);
+    expect(handoffAt).toBeGreaterThan(startupAt);
+    expect(agentAt).toBeGreaterThan(handoffAt);
     expect(launched.stdout).toContain("\u001b[38;2;1;2;3mBLUE_ANSI_OK\u001b[0m");
     const clearAt = launched.stdout.indexOf("\u001b[2J", launched.stdout.indexOf("BLUE_ANSI_OK"));
     expect(clearAt).toBeGreaterThanOrEqual(0);
@@ -1622,7 +1651,7 @@ esac
         headers: {
           authorization: `Bearer ${memberOauth.token}`,
           "x-blue-contract-version": "3",
-          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,unverified_harness_versions",
+          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,unverified_harness_versions,tenant_client_version_pin",
         },
       });
       expect(memberConfig.status(), await memberConfig.text()).toBe(200);

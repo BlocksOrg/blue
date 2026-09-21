@@ -107,7 +107,7 @@ async function mintInferenceToken(
       authorization: `Bearer ${session.token}`,
       "x-blue-contract-version": "3",
       "x-blue-capabilities":
-        "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt",
+        "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,tenant_client_version_pin",
     },
   });
   expect(config.status(), await config.text()).toBe(200);
@@ -265,7 +265,7 @@ test.describe.serial("Gateway M2M auth", () => {
           authorization: `Bearer ${session.token}`,
           "x-blue-contract-version": "3",
           "x-blue-capabilities":
-            "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt",
+            "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,tenant_client_version_pin",
         },
       },
     );

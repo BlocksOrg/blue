@@ -63,4 +63,63 @@ for bad in "v$version-rc.zzz" "v$version-beta" "v$version-rc" ""; do
     || fail "package-deployment.sh accepted '$bad'"
 done
 
+# --- allowlisted live documentation ----------------------------------------
+
+# Exercise the writer in an isolated minimal repository. Stub the two external
+# commands: their behavior is tested elsewhere, while this fixture is concerned
+# only with the exact fields set-version.sh owns.
+fixture="$tmp/repository"
+mkdir -p "$fixture/scripts" "$fixture/crates/gh-cli" \
+  "$fixture/deploy/contract" "$fixture/deploy/helm" \
+  "$fixture/deploy/consumer/.github/workflows" "$fixture/deploy/consumer/blue" \
+  "$fixture/apps/docs/openapi" "$fixture/apps/docs/scripts" \
+  "$fixture/apps/docs/next/deployment" "$fixture/apps/docs/next/development" \
+  "$fixture/apps/docs/next/cli" "$tmp/bin"
+for file in Cargo.toml crates/gh-cli/Cargo.toml deploy/contract/governance.openapi.yaml \
+  deploy/helm/Chart.yaml deploy/docker-compose.yml \
+  deploy/consumer/.github/workflows/deploy.yml deploy/consumer/blue/blue.yaml \
+  deploy/consumer/provisioner.sh apps/docs/openapi/next.yaml \
+  apps/docs/next/deployment/production.mdx \
+  apps/docs/next/development/local-compose.mdx apps/docs/next/cli/commands.mdx \
+  apps/docs/next/development/contributing.mdx; do
+  cp "$root/$file" "$fixture/$file"
+done
+cp "$root/scripts/set-version.sh" "$root/scripts/check-release-version.sh" "$fixture/scripts/"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/node"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/cargo"
+chmod +x "$tmp/bin/node" "$tmp/bin/cargo" "$fixture/deploy/consumer/provisioner.sh"
+
+unrelated='minimum_client_version: 7.6.5'
+printf '\n%s\n' "$unrelated" >> "$fixture/apps/docs/next/development/contributing.mdx"
+PATH="$tmp/bin:$PATH" "$fixture/scripts/set-version.sh" 9.8.7 >/dev/null
+PATH="$tmp/bin:$PATH" "$fixture/scripts/check-release-version.sh" v9.8.7 >/dev/null \
+  || fail "release scripts rejected synchronized live documentation fields"
+grep -Fx "$unrelated" "$fixture/apps/docs/next/development/contributing.mdx" >/dev/null \
+  || fail "set-version.sh changed an unrelated semantic version example"
+grep -F 'ghcr.io/blocksorg/blue:${VERSION}' "$fixture/apps/docs/next/deployment/production.mdx" >/dev/null \
+  || fail "set-version.sh did not make the production image follow VERSION"
+
+assert_named_mismatch() {
+  file="$1"
+  expression="$2"
+  expected="$3"
+  cp "$file" "$file.before-mismatch"
+  sed "$expression" "$file.before-mismatch" > "$file"
+  output="$("$fixture/scripts/check-release-version.sh" v9.8.7 2>&1 || true)"
+  mv "$file.before-mismatch" "$file"
+  printf '%s\n' "$output" | grep -F "$expected" >/dev/null \
+    || fail "release checker did not identify mismatched field: $expected"
+}
+
+assert_named_mismatch "$fixture/apps/docs/next/deployment/production.mdx" \
+  's/^VERSION=9\.8\.7$/VERSION=9.8.6/' 'docs production VERSION version is 9.8.6'
+assert_named_mismatch "$fixture/apps/docs/next/development/local-compose.mdx" \
+  's/^BLUE_DEPLOYMENT_VERSION=9\.8\.7$/BLUE_DEPLOYMENT_VERSION=9.8.6/' 'docs compose version version is 9.8.6'
+assert_named_mismatch "$fixture/apps/docs/next/cli/commands.mdx" \
+  's/BLUE_VERSION=9\.8\.7/BLUE_VERSION=9.8.6/' 'docs CLI installer version version is 9.8.6'
+assert_named_mismatch "$fixture/apps/docs/next/development/contributing.mdx" \
+  's/release:docs -- 9\.8\.7/release:docs -- 9.8.6/' 'docs release command version version is 9.8.6'
+assert_named_mismatch "$fixture/apps/docs/next/deployment/production.mdx" \
+  's/blue:${VERSION}/blue:9.8.7/' 'docs production image reference must use ${VERSION} exactly once'
+
 echo "Release version tests passed"

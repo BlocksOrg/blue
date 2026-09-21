@@ -5051,19 +5051,61 @@ async fn revoke_current_gateway_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn default_client_version(runtime: Option<&str>) -> String {
+    runtime
+        .filter(|version| {
+            gh_service::GovernanceConfig::validate_client_version_pin(version).is_ok()
+        })
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .to_owned()
+}
+
+fn prepare_client_version_pin(
+    config: &mut gh_service::GovernanceConfig,
+    deployment_version: &str,
+) -> Result<HeaderMap, ApiError> {
+    let required = config
+        .required_client_version
+        .get_or_insert_with(|| deployment_version.to_owned());
+    gh_service::GovernanceConfig::validate_client_version_pin(required)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-blue-required-client-version",
+        required
+            .parse()
+            .map_err(|_| ApiError::internal("invalid client version header"))?,
+    );
+    if !config
+        .required_capabilities
+        .iter()
+        .any(|cap| cap == "tenant_client_version_pin")
+    {
+        config
+            .required_capabilities
+            .push("tenant_client_version_pin".into());
+    }
+    Ok(headers)
+}
+
 async fn governance_config(
     State(state): State<Arc<AppState>>,
     Extension(who): Extension<Principal>,
     headers: HeaderMap,
-) -> Result<Json<gh_service::GovernanceConfig>, ApiError> {
+) -> Result<Response, ApiError> {
     let row = current_config(&state.pool, who.organization_id).await?;
     let revision = row.revision;
     let mut config = serde_json::from_value(row.document)
         .map_err(|error| ApiError::internal(format!("decoding stored config: {error}")))?;
-    enforce_client_capabilities(&headers, &config)?;
+    let runtime_version = std::env::var("BLUE_DEPLOYMENT_VERSION").ok();
+    let deployment_version = default_client_version(runtime_version.as_deref());
+    let pin_headers = prepare_client_version_pin(&mut config, &deployment_version)?;
+    if let Err(error) = enforce_client_capabilities(&headers, &config) {
+        return Ok((pin_headers, error).into_response());
+    }
     personalize_package_config(&state.pool, &revision, who.user_id, &mut config).await?;
     personalize_gateway_config(&state, &who, &mut config).await?;
-    Ok(Json(config))
+    Ok((pin_headers, Json(config)).into_response())
 }
 
 async fn personalize_package_config(
@@ -6577,6 +6619,10 @@ fn uncertified_harness_range(config: &gh_service::GovernanceConfig) -> Option<St
 }
 
 fn validate_complete_governance(config: &gh_service::GovernanceConfig) -> Result<(), String> {
+    if let Some(pin) = &config.required_client_version {
+        gh_service::GovernanceConfig::validate_client_version_pin(pin)
+            .map_err(|error| error.to_string())?;
+    }
     if config.contract_version == 0
         || config.contract_version > gh_service::GovernanceConfig::CONTRACT_VERSION
     {
@@ -8114,6 +8160,16 @@ async fn validate_package_audiences(
 }
 
 fn stamp_version_aware_client_floor(config: &mut gh_service::GovernanceConfig) {
+    if config.required_client_version.is_some()
+        && !config
+            .required_capabilities
+            .iter()
+            .any(|cap| cap == "tenant_client_version_pin")
+    {
+        config
+            .required_capabilities
+            .push("tenant_client_version_pin".into());
+    }
     let required = config
         .harnesses
         .values()
@@ -12209,6 +12265,86 @@ mod gateway_ttl_config_tests {
             )
             .unwrap(),
             43_200
+        );
+    }
+}
+
+#[cfg(test)]
+mod client_version_pin_tests {
+    use super::*;
+    fn document() -> gh_service::GovernanceConfig {
+        serde_json::from_value(serde_json::json!({"revision":"r1"})).unwrap()
+    }
+    #[test]
+    fn default_client_version_uses_only_canonical_runtime_semver() {
+        for version in ["1.2.3", "1.2.3-rc.gabcdef0"] {
+            assert_eq!(default_client_version(Some(version)), version);
+        }
+
+        for version in [
+            None,
+            Some("development"),
+            Some("e2e"),
+            Some("v1.2.3"),
+            Some("1.2.03"),
+        ] {
+            assert_eq!(default_client_version(version), env!("CARGO_PKG_VERSION"));
+        }
+    }
+    #[test]
+    fn old_revisions_acquire_current_deployment_pin_without_persistence() {
+        let stored = document();
+        for runtime_version in ["1.2.3", "1.2.4-rc.gabcdef0"] {
+            let version = default_client_version(Some(runtime_version));
+            let mut served = stored.clone();
+            let headers = prepare_client_version_pin(&mut served, &version).unwrap();
+            assert_eq!(headers["x-blue-required-client-version"], version);
+            assert_eq!(
+                served.required_client_version.as_deref(),
+                Some(version.as_str())
+            );
+            assert!(served
+                .required_capabilities
+                .iter()
+                .any(|cap| cap == "tenant_client_version_pin"));
+        }
+        assert!(stored.required_client_version.is_none());
+        assert!(stored.required_capabilities.is_empty());
+    }
+    #[test]
+    fn override_and_admin_validation_use_exact_recommendation() {
+        let mut config = document();
+        config.required_client_version = Some("3.2.1".into());
+        stamp_version_aware_client_floor(&mut config);
+        assert!(validate_complete_governance(&config).is_ok());
+        let headers = prepare_client_version_pin(&mut config, "1.2.3").unwrap();
+        assert_eq!(headers["x-blue-required-client-version"], "3.2.1");
+        config.required_client_version = Some("^3.2.1".into());
+        assert!(validate_complete_governance(&config).is_err());
+        assert!(prepare_client_version_pin(&mut config, "1.2.3").is_err());
+    }
+    #[test]
+    fn successful_and_rejected_responses_expose_the_same_pin() {
+        let mut config = document();
+        let pin_headers = prepare_client_version_pin(&mut config, "1.2.3").unwrap();
+        let rejection = enforce_client_capabilities(&HeaderMap::new(), &config).unwrap_err();
+        let response = (pin_headers.clone(), rejection).into_response();
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(
+            response.headers()["x-blue-required-client-version"],
+            "1.2.3"
+        );
+        let mut supported = HeaderMap::new();
+        supported.insert(
+            "x-blue-capabilities",
+            "tenant_client_version_pin".parse().unwrap(),
+        );
+        assert!(enforce_client_capabilities(&supported, &config).is_ok());
+        let response = (pin_headers, Json(config)).into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["x-blue-required-client-version"],
+            "1.2.3"
         );
     }
 }

@@ -28,6 +28,9 @@ pub struct GovernanceConfig {
     /// enforces whether a client may consume the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum_client_version: Option<String>,
+    /// Exact tenant-recommended Blue release exported by the control plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_client_version: Option<String>,
     /// Client-side cache TTL. `None` ⇒ operator default (see [`Self::DEFAULT_TTL_SECONDS`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<u64>,
@@ -62,6 +65,7 @@ impl GovernanceConfig {
     pub const DEFAULT_TTL_SECONDS: u64 = 300;
     pub const CONTRACT_VERSION: u32 = 4;
     pub const CAPABILITIES: &'static [&'static str] = &[
+        "tenant_client_version_pin",
         "adapter_intervals",
         "compiled_harness_registry",
         "transactional_reconcile",
@@ -81,6 +85,20 @@ impl GovernanceConfig {
 
     pub fn policy(&self, harness: &str) -> Option<&HarnessPolicy> {
         self.harnesses.get(harness)
+    }
+
+    pub fn validate_client_version_pin(
+        required: &str,
+    ) -> Result<semver::Version, gh_common::GhError> {
+        let version = semver::Version::parse(required).map_err(|_| {
+            gh_common::GhError::config("required_client_version must be canonical exact SemVer")
+        })?;
+        if version.to_string() != required {
+            return Err(gh_common::GhError::config(
+                "required_client_version must be canonical exact SemVer",
+            ));
+        }
+        Ok(version)
     }
 
     pub fn ensure_client_compatible(&self) -> Result<(), String> {

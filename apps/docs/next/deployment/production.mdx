@@ -16,7 +16,7 @@ Blue does not need Kubernetes. This is the maintained implementation of the [Dep
 ```bash
 # Downloads the release bundle, checks it, and moves into the AWS folder. The bundle holds
 # the Helm chart at chart/blue and the OpenTofu module at infra/aws.
-VERSION=0.1.0
+VERSION=0.2.0
 curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/blue-deployment-v${VERSION}.tar.gz"
 curl -LO "https://github.com/BlocksOrg/blue/releases/download/v${VERSION}/SHA256SUMS"
 grep "blue-deployment-v${VERSION}.tar.gz" SHA256SUMS | shasum -a 256 -c -
@@ -69,7 +69,7 @@ export BLUE_HELM_DEPLOY_FOLDER=../../chart/blue
 tofu output -json helm_values > "$BLUE_HELM_GENERATED_FILE"
 
 # Pins the image to an exact build. The chart refuses a moving tag in production.
-export BLUE_IMAGE_DIGEST="$(docker buildx imagetools inspect ghcr.io/blocksorg/blue:0.1.0 | awk '/^Digest:/{print $2}')"
+export BLUE_IMAGE_DIGEST="$(docker buildx imagetools inspect ghcr.io/blocksorg/blue:${VERSION} | awk '/^Digest:/{print $2}')"
 echo "$BLUE_IMAGE_DIGEST"   # must print sha256:...; if empty, stop here
 ```
 **DNS not in Route 53?** Leave the four domain lines out of `terraform.tfvars`, skip the three `tofu output` lines for the certificate and hostnames, and set them yourself:

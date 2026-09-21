@@ -35,6 +35,7 @@ type OpenApiDocument = {
     operationId?: string;
     security?: SecurityRequirement[];
     requestBody?: { content?: Record<string, { schema?: Schema }> };
+    responses?: Record<string, { headers?: Record<string, unknown> }>;
   }>>;
   components?: { schemas?: Record<string, Schema> };
 };
@@ -135,6 +136,31 @@ test("every OpenAPI operation resolves and enforces its declared authentication 
     } else {
       expect(response.status(), `${operation.operationId} did not reject invalid credentials`).toBe(401);
     }
+  }
+});
+
+test("OpenAPI declares the tenant client-version compatibility surface", async () => {
+  const { document } = await contract();
+  const schema = document.components?.schemas?.GovernanceConfig;
+  expect(schema).toBeDefined();
+  expect(typeof schema).not.toBe("boolean");
+  if (!schema || typeof schema === "boolean") return;
+
+  const capabilities = schema.properties?.required_capabilities;
+  expect(typeof capabilities).not.toBe("boolean");
+  if (!capabilities || typeof capabilities === "boolean") return;
+  const capabilityItems = capabilities.items;
+  expect(typeof capabilityItems).not.toBe("boolean");
+  if (!capabilityItems || typeof capabilityItems === "boolean") return;
+  expect(capabilityItems.enum).toContain("tenant_client_version_pin");
+  expect(schema.properties?.required_client_version).toBeDefined();
+
+  const responses = document.paths["/governance-config"]?.get?.responses;
+  for (const status of ["200", "426"]) {
+    expect(
+      responses?.[status]?.headers,
+      `GET /governance-config ${status} response headers`,
+    ).toHaveProperty("X-Blue-Required-Client-Version");
   }
 });
 

@@ -1152,6 +1152,11 @@ impl StartupView {
         self.draw()
     }
 
+    pub fn handoff(self) -> Result<()> {
+        handoff_control_surface(&mut std::io::stdout())?;
+        Ok(())
+    }
+
     fn draw(&mut self) -> Result<()> {
         let frame = self.frame(std::env::var_os("NO_COLOR").is_none());
         let mut stdout = std::io::stdout();
@@ -2189,6 +2194,11 @@ fn open_control_terminal() -> std::io::Result<ControlTerminal> {
 
 const CONTROL_SURFACE_HANDOFF: &[u8] = b"\x1b[?2026l\x1b[?1049l\x1b[r\x1b[2J\x1b[H\x1b[?25h";
 
+fn handoff_control_surface(stdout: &mut impl Write) -> std::io::Result<()> {
+    stdout.write_all(CONTROL_SURFACE_HANDOFF)?;
+    stdout.flush()
+}
+
 fn close_control_surface(
     terminal: &mut Option<ControlTerminal>,
     stdout: &mut impl Write,
@@ -2197,8 +2207,7 @@ fn close_control_surface(
     // full-screen process. The next harness must start from a clean primary
     // screen even when the previous harness or Blue used an alternate screen.
     terminal.take();
-    stdout.write_all(CONTROL_SURFACE_HANDOFF)?;
-    stdout.flush()
+    handoff_control_surface(stdout)
 }
 
 fn start_connectivity_probe(
@@ -3118,10 +3127,32 @@ mod tests {
 
     #[test]
     fn control_surface_handoff_resets_and_clears_the_primary_screen() {
+        #[derive(Default)]
+        struct TrackingWriter {
+            bytes: Vec<u8>,
+            flushed: bool,
+        }
+
+        impl Write for TrackingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushed = true;
+                Ok(())
+            }
+        }
+
+        let mut writer = TrackingWriter::default();
+        handoff_control_surface(&mut writer).expect("handoff should succeed");
+
         assert_eq!(
-            CONTROL_SURFACE_HANDOFF,
+            writer.bytes,
             b"\x1b[?2026l\x1b[?1049l\x1b[r\x1b[2J\x1b[H\x1b[?25h"
         );
+        assert!(writer.flushed);
     }
 
     fn remote_session(cwd: Option<String>) -> commands::RemoteSession {
