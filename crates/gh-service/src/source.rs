@@ -190,7 +190,7 @@ impl ConfigSource for HttpConfigSource {
     }
 
     fn describe(&self) -> String {
-        format!("http({})", self.endpoint())
+        self.endpoint()
     }
 }
 
@@ -250,6 +250,15 @@ pub fn parse_config(path: &std::path::Path, text: &str) -> Result<GovernanceConf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_descriptions_distinguish_http_endpoints_from_local_files() {
+        let http = HttpConfigSource::new("https://api.bluee.sh/").unwrap();
+        assert_eq!(http.describe(), "https://api.bluee.sh/governance-config");
+
+        let file = FileConfigSource::new("/tmp/blue-governance.yaml");
+        assert_eq!(file.describe(), "file(/tmp/blue-governance.yaml)");
+    }
 
     #[test]
     fn a_rejected_session_relays_the_reason_the_server_gave() {
