@@ -196,6 +196,7 @@ test.describe.serial("Blue deployment journey", () => {
     expect(originalResponse.status(), await originalResponse.text()).toBe(200);
     const original = await originalResponse.json();
     const gatewayConfig = YAML.parse(original.managed_yaml);
+    gatewayConfig.harnesses.codex.managed_config.model = "gpt-e2e";
     gatewayConfig.gateway = { type: "litellm" };
     const gatewayResponse = await page.request.put(`${control}/admin/governance-config`, {
       data: {
@@ -1587,11 +1588,11 @@ esac
       );
       await memberPage.getByRole("button", { name: "Provision key" }).click();
       expect((await posted).status()).toBe(200);
-      await expect(memberPage.getByRole("alert")).toContainText("gateway account is not provisioned: member has no upstream account");
+      await expect(memberPage.getByText("gateway account is not provisioned: member has no upstream account", { exact: true })).toBeVisible();
       await expect(memberPage.getByRole("tab", { name: "Key" })).toBeVisible();
 
       await memberPage.reload();
-      await expect(memberPage.getByRole("alert")).toContainText("gateway account is not provisioned: member has no upstream account");
+      await expect(memberPage.getByText("gateway account is not provisioned: member has no upstream account", { exact: true })).toBeVisible();
       const access = await memberContext.request.get(`${control}/gateway/key`);
       expect(access.status(), await access.text()).toBe(200);
       expect(await access.json()).toMatchObject({ status: "error", error: "gateway account is not provisioned: member has no upstream account" });
