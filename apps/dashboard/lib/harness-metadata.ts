@@ -29,4 +29,19 @@ export type HarnessMetadata = {
 export type HarnessMetadataResponse = {
   contract_version: number;
   harnesses: HarnessMetadata[];
+  effective_verified_ceilings?: Record<string, Record<string, string>>;
+  known_versions_source?: "compiled" | "public_manifest";
+  known_versions_refreshed_at?: string | null;
 };
+
+export function effectiveHarnesses(response: HarnessMetadataResponse): HarnessMetadata[] {
+  return response.harnesses.map((harness) => ({
+    ...harness,
+    generations: harness.generations.map((generation) => ({
+      ...generation,
+      verified_before:
+        response.effective_verified_ceilings?.[harness.key]?.[generation.profile] ??
+        generation.verified_before,
+    })),
+  }));
+}

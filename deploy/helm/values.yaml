@@ -82,6 +82,10 @@ blue:
     controlApi: https://api.blue.example.com
     inferenceProxy: https://inference.blue.example.com
   env: {}
+  knownVersions:
+    enabled: true
+    url: https://raw.githubusercontent.com/BlocksOrg/blue/main/known-agent-versions.json
+    refreshSeconds: 3600
 
 components:
   controlApi:

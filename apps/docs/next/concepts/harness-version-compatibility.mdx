@@ -250,6 +250,20 @@ Blue records the selected profile, normalized version, and generated paths in ha
 
 See [Governance configuration](/next/reference/governance-config) for the complete schema and [Troubleshooting](/next/cli/troubleshooting) for reconciliation diagnostics.
 
+## Refreshing certification without a client release
+
+When a tested upstream release uses the existing compiled profile, maintainers
+update `tests/e2e/agents.lock.json` and root `known-agent-versions.json`
+together. The Control API fetches and validates this data-only manifest and
+sends effective exclusive ceilings through governance config; clients never
+fetch it directly. Layout or behavior changes still require a new `VersionSpec`
+and a Blue release.
+
+Operators may override `control_api.known_versions.url` with an HTTPS mirror,
+change `refresh_seconds`, or set `enabled: false`. Failed refreshes retain the
+last valid in-memory snapshot; after restart the fallback is the stricter
+compiled ceiling. `allow_unverified_versions` remains the explicit escape hatch.
+
 ## Install an absent agent
 
 In a Unix terminal, `blue <agent>`, bare `blue`, and `blue agent` offer

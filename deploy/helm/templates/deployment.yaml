@@ -76,6 +76,9 @@ spec:
               value: "false"
             - name: HARNESS_INTERNAL_LISTEN
               value: 0.0.0.0:8082
+            - { name: HARNESS_KNOWN_VERSIONS_ENABLED, value: {{ .Values.blue.knownVersions.enabled | quote }} }
+            - { name: HARNESS_KNOWN_VERSIONS_URL, value: {{ .Values.blue.knownVersions.url | quote }} }
+            - { name: HARNESS_KNOWN_VERSIONS_REFRESH_SECONDS, value: {{ .Values.blue.knownVersions.refreshSeconds | quote }} }
             {{- if .Values.blue.enableInferenceProxy }}
             - { name: HARNESS_GATEWAY_TYPE, value: {{ required "blue.gatewayType is required when blue.enableInferenceProxy=true" .Values.blue.gatewayType | quote }} }
             - { name: HARNESS_INTERNAL_TRANSPORT_MODE, value: {{ .Values.blue.internalTransport.mode | quote }} }

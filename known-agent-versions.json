@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "harnesses": {
+    "codex": { "profile": "codex-v0_145_0", "verified_before": "0.151.1-0" },
+    "claude": { "profile": "claude-v2_0_12", "verified_before": "2.1.253-0" },
+    "kimi": { "profile": "kimi-v0_0_0", "verified_before": "0.39.2-0" },
+    "opencode": { "profile": "opencode-v0_0_0", "verified_before": "1.18.26-0" }
+  }
+}

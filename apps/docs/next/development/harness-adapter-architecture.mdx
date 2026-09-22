@@ -270,3 +270,8 @@ Before review, verify these invariants:
 - Old specs, operation sets, fixtures, and golden plans remain present.
 
 Run the complete repository checks documented in [Contributing](/next/development/contributing).
+
+For certification without an adapter behavior change, update the E2E agent lock
+and root `known-agent-versions.json` together. The manifest can only extend the
+exact compiled profile; it cannot change selection, capabilities, or intervals.
+Behavioral or layout changes require the full generation workflow and a release.

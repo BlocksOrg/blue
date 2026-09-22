@@ -66,6 +66,15 @@
           }
         },
         "existingSecret": { "type": "string" },
+        "knownVersions": {
+          "type": "object",
+          "required": ["enabled", "url", "refreshSeconds"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "url": { "type": "string", "format": "uri" },
+            "refreshSeconds": { "type": "integer", "minimum": 1 }
+          }
+        },
         "config": {
           "type": "object",
           "properties": {

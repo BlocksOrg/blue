@@ -24,6 +24,10 @@ pub struct GovernanceConfig {
     /// Features a client must implement before accepting this document.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
+    /// Server-validated certification ceilings. These can only extend a
+    /// compiled profile and never participate in implementation selection.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub effective_verified_ceilings: BTreeMap<String, BTreeMap<String, String>>,
     /// Operator-visible rollout floor. Capability negotiation, not this field,
     /// enforces whether a client may consume the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,6 +76,7 @@ impl GovernanceConfig {
         "versioned_state",
         "unverified_harness_versions",
         "gateway_inference_jwt",
+        "dynamic_verified_ceilings",
     ];
 
     pub fn ttl_seconds(&self) -> u64 {

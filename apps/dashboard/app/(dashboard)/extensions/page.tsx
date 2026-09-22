@@ -6,7 +6,7 @@ import {
   type PackageSourceConnection,
 } from "../configuration/package-manager";
 import type { McpByHarness, McpServer } from "../configuration/mcp-manager";
-import type { HarnessMetadataResponse } from "@/lib/harness-metadata";
+import { effectiveHarnesses, type HarnessMetadataResponse } from "@/lib/harness-metadata";
 
 type PackageOverride = {
   enabled?: boolean;
@@ -60,7 +60,7 @@ export default async function Extensions() {
       overrides={overrides}
       connections={connections}
       mcp={mcp}
-      harnesses={metadata.harnesses}
+      harnesses={effectiveHarnesses(metadata)}
     />
   );
 }
