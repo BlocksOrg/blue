@@ -529,7 +529,7 @@ pub fn resolve_with_effective(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn resolve_for_definition(
     definition: &'static adapters::HarnessDefinition,
     version: Option<&Version>,
