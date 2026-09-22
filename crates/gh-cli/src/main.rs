@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "blue",
-    version,
+    version = gh_common::blue_version(),
     about = "Governance wrapper for supported coding-agent CLIs",
     long_about = None,
 )]
@@ -145,7 +145,7 @@ fn foreground_command(command: &Option<Command>) -> bool {
                 | Command::Run { .. }
                 | Command::Config
                 | Command::Gateway
-                | Command::Apply { .. }
+                | Command::Apply { yes: false }
                 | Command::External(_)
         )
     )
@@ -271,6 +271,15 @@ mod tests {
             cli.command,
             Some(Command::Agent { name: Some(name) }) if name == "claude"
         ));
+    }
+
+    #[test]
+    fn apply_yes_is_not_an_interactive_client_repair_command() {
+        let interactive = Cli::try_parse_from(["blue", "apply"]).unwrap();
+        assert!(foreground_command(&interactive.command));
+
+        let unattended = Cli::try_parse_from(["blue", "apply", "--yes"]).unwrap();
+        assert!(!foreground_command(&unattended.command));
     }
 
     #[test]

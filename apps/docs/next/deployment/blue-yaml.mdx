@@ -420,16 +420,19 @@ The `X-Blue-Required-Client-Version` header exposes the same pin on successful
 config responses and capability/contract rejections (HTTP 426). Older clients
 without this capability are blocked and need a manual install.
 
-A CLI with the same major version continues governed commands and prints a
-neutral recommendation when its minor, patch, prerelease, or build metadata
-differs. This applies whether the client is older or newer. Exact matches are
-silent. Foreground commands warn at most once; background watchers log the
-recommendation without interrupting a running harness.
+A CLI with the same major version prints a neutral recommendation when its minor,
+patch, prerelease, or build metadata differs. In an interactive foreground
+command, Blue offers to install the exact recommended release with consent
+defaulting to yes. Declining, cancelling, failing, or being unable to offer the
+compatible update leaves the installed release in place and lets the command
+continue. After a successful replacement, rerun the command so the old process
+does not continue. Noninteractive commands continue after printing the
+recommendation, and background watchers only log it. Exact matches are silent.
 
 A CLI with a different major version blocks governed commands before launching a
 harness or applying managed configuration. In an interactive foreground command,
 Blue offers to install the exact recommended release, with consent defaulting to
-no. It stages and verifies the release before replacing the running executable.
+yes. It stages and verifies the release before replacing the running executable.
 After success, rerun the original command; the old process never continues the
 operation and returns a nonzero exit code. Automatic installation supports stable
 releases only and requires a writable, safely resolved installation destination.

@@ -33,6 +33,7 @@ impl Fixture {
         let mut command = Command::new(self.0.join("bin/blue"));
         command
             .current_dir(&self.0)
+            .env("HOME", &self.0)
             .env("XDG_CONFIG_HOME", self.0.join("config"))
             .env("XDG_CACHE_HOME", self.0.join("cache"))
             .env("PATH", self.0.join("bin"))
@@ -58,6 +59,76 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn run_pty(
+    fixture: &Fixture,
+    args: &[&str],
+    decline_prompt: Option<&str>,
+) -> (std::process::ExitStatus, String, bool) {
+    let (mut master, mut slave) = (0, 0);
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { fs::File::from_raw_fd(master) };
+    let slave = unsafe { fs::File::from_raw_fd(slave) };
+    let mut child = fixture
+        .command()
+        .args(args)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut reader = master.try_clone().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut output = String::new();
+    let mut declined = false;
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match receiver.recv_timeout(remaining) {
+            Ok(bytes) => {
+                output.push_str(&String::from_utf8_lossy(&bytes));
+                if !declined && decline_prompt.is_some_and(|prompt| output.contains(prompt)) {
+                    master.write_all(b"n\r").unwrap();
+                    declined = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let status = match child.try_wait().unwrap() {
+        Some(status) => status,
+        None => {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("Blue did not terminate: {output}");
+        }
+    };
+    (status, output, declined)
+}
+
+fn run_pty_without_input(fixture: &Fixture, args: &[&str]) -> (std::process::ExitStatus, String) {
+    let (status, output, responded) = run_pty(fixture, args, None);
+    assert!(!responded);
+    (status, output)
 }
 
 #[test]
@@ -113,64 +184,50 @@ fn same_major_commands_continue_with_one_noninteractive_recommendation() {
 }
 
 #[test]
+fn same_major_interactive_decline_continues_the_command() {
+    let installed = gh_common::blue_version();
+    let mut version = semver::Version::parse(installed).unwrap();
+    version.patch += 1;
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    let required = version.to_string();
+    let fixture = Fixture::new(&required);
+    let prompt = format!("Install Blue {required} now");
+    let (status, output, declined) = run_pty(&fixture, &["config"], Some(&prompt));
+
+    assert!(declined, "no compatible install prompt: {output}");
+    assert!(status.success(), "{output}");
+    assert!(output.contains("\"revision\": \"mismatch\""), "{output}");
+}
+
+#[test]
+fn apply_yes_never_offers_client_replacement_in_a_terminal() {
+    let installed = gh_common::blue_version();
+    let mut version = semver::Version::parse(installed).unwrap();
+    version.patch += 1;
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    let compatible = Fixture::new(&version.to_string());
+    let (status, output) = run_pty_without_input(&compatible, &["apply", "--yes"]);
+    assert!(status.success(), "{output}");
+    assert!(
+        output.contains("is compatible, but this tenant recommends"),
+        "{output}"
+    );
+    assert!(!output.contains("Install Blue"), "{output}");
+
+    let incompatible = Fixture::new("99.0.0");
+    let (status, output) = run_pty_without_input(&incompatible, &["apply", "--yes"]);
+    assert!(!status.success(), "{output}");
+    assert!(!output.contains("Install Blue 99.0.0 now"), "{output}");
+    incompatible.assert_blocked(&output, "99.0.0");
+}
+
+#[test]
 fn bare_blue_decline_remains_blocked_and_never_launches() {
     let fixture = Fixture::new("99.0.0");
-    let (mut master, mut slave) = (0, 0);
-    assert_eq!(
-        unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        },
-        0
-    );
-    let mut master = unsafe { fs::File::from_raw_fd(master) };
-    let slave = unsafe { fs::File::from_raw_fd(slave) };
-    let mut child = fixture
-        .command()
-        .stdin(Stdio::from(slave.try_clone().unwrap()))
-        .stdout(Stdio::from(slave.try_clone().unwrap()))
-        .stderr(Stdio::from(slave))
-        .spawn()
-        .unwrap();
-    let mut reader = master.try_clone().unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = [0; 4096];
-        while let Ok(count) = reader.read(&mut buffer) {
-            if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let mut output = String::new();
-    let mut declined = false;
-    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
-        match receiver.recv_timeout(remaining) {
-            Ok(bytes) => {
-                output.push_str(&String::from_utf8_lossy(&bytes));
-                if !declined && output.contains("Install Blue 99.0.0 now") {
-                    master.write_all(b"n\r").unwrap();
-                    declined = true;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    let status = match child.try_wait().unwrap() {
-        Some(status) => status,
-        None => {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("bare Blue did not terminate: {output}");
-        }
-    };
+    let (status, output, declined) = run_pty(&fixture, &[], Some("Install Blue 99.0.0 now"));
     assert!(!status.success());
-    assert!(declined, "no default-no install prompt: {output}");
+    assert!(declined, "no install prompt: {output}");
     fixture.assert_blocked(&output, "99.0.0");
 }

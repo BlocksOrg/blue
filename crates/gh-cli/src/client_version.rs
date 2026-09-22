@@ -32,14 +32,36 @@ pub(crate) fn recommendation(installed: &str, recommended: &str, os: &str, arch:
     message
 }
 
-pub(crate) fn warn_if_recommended(config: &GovernanceConfig) {
+#[derive(Debug)]
+struct ClientUpdateInstalled {
+    required: String,
+    path: PathBuf,
+}
+
+impl std::fmt::Display for ClientUpdateInstalled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Installed Blue {} at {}. Rerun your command to continue.",
+            self.required,
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for ClientUpdateInstalled {}
+
+pub(crate) fn warn_if_recommended(
+    config: &GovernanceConfig,
+    allow_interactive_install: bool,
+) -> Result<()> {
     let Some(required) = config.required_client_version.as_deref() else {
-        return;
+        return Ok(());
     };
     if let Ok(gh_service::ClientVersionCompatibility::SameMajorRecommendation {
         installed,
         recommended,
-    }) = GovernanceConfig::client_version_compatibility(required, env!("CARGO_PKG_VERSION"))
+    }) = GovernanceConfig::client_version_compatibility(required, gh_common::blue_version())
     {
         eprintln!(
             "{}",
@@ -50,7 +72,23 @@ pub(crate) fn warn_if_recommended(config: &GovernanceConfig) {
                 std::env::consts::ARCH
             )
         );
+        let interactive = allow_interactive_install
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal();
+        if interactive && target(std::env::consts::OS, std::env::consts::ARCH).is_some() {
+            match compatible_repair(&mut NativeRuntime, &installed, &recommended, true) {
+                CompatibleRepair::Continue => {}
+                CompatibleRepair::Installed(path) => {
+                    return Err(ClientUpdateInstalled {
+                        required: recommended,
+                        path,
+                    }
+                    .into());
+                }
+            }
+        }
     }
+    Ok(())
 }
 
 fn target(os: &str, arch: &str) -> Option<String> {
@@ -96,7 +134,7 @@ pub(crate) fn remedy(installed: &str, required: &str, os: &str, arch: &str) -> S
 
 trait Runtime {
     fn destination(&mut self) -> Result<PathBuf>;
-    fn confirm(&mut self, message: &str) -> Result<bool>;
+    fn confirm(&mut self, message: &str, default: bool) -> Result<bool>;
     fn install(&mut self, destination: &Path, required: &str) -> Result<()>;
 }
 
@@ -105,6 +143,7 @@ fn repair(
     installed: &str,
     required: &str,
     interactive: bool,
+    mandatory: bool,
 ) -> Result<Option<PathBuf>> {
     stable_pin(required)?;
     if !interactive {
@@ -116,19 +155,55 @@ fn repair(
     } else {
         "downgrade"
     };
-    if !runtime.confirm(&format!(
-        "Blue {installed} must {direction} to {required}. Install Blue {required} now at {}?",
-        destination.display()
-    ))? {
+    let context = if mandatory {
+        format!("Blue {installed} must {direction} to {required}.")
+    } else {
+        format!("Blue {installed} is compatible; this tenant recommends Blue {required}.")
+    };
+    if !runtime.confirm(
+        &format!(
+            "{context} Install Blue {required} now at {}?",
+            destination.display()
+        ),
+        true,
+    )? {
         return Ok(None);
     }
     runtime.install(&destination, required)?;
     Ok(Some(destination))
 }
 
-/// Returns true when this is the specific error handled here. The caller always
-/// exits unsuccessfully: even a successful repair did not run the user's command.
+enum CompatibleRepair {
+    Continue,
+    Installed(PathBuf),
+}
+
+fn compatible_repair(
+    runtime: &mut dyn Runtime,
+    installed: &str,
+    recommended: &str,
+    interactive: bool,
+) -> CompatibleRepair {
+    match repair(runtime, installed, recommended, interactive, false) {
+        Ok(Some(path)) => CompatibleRepair::Installed(path),
+        Ok(None) => CompatibleRepair::Continue,
+        Err(error) => {
+            eprintln!(
+                "Blue installation did not complete: {error:#}. Continuing with compatible Blue {installed}; use the manual remedy above."
+            );
+            CompatibleRepair::Continue
+        }
+    }
+}
+
+/// Returns true when this is a client-version outcome handled here. The caller
+/// always exits unsuccessfully: even a successful repair did not run the user's
+/// command.
 pub(crate) fn handle(error: &anyhow::Error, foreground: bool) -> bool {
+    if let Some(installed) = error.downcast_ref::<ClientUpdateInstalled>() {
+        eprintln!("{installed}");
+        return true;
+    }
     let Some(gh_common::GhError::ClientVersionMismatch {
         installed,
         required,
@@ -150,7 +225,7 @@ pub(crate) fn handle(error: &anyhow::Error, foreground: bool) -> bool {
     }
     let interactive =
         foreground && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    match repair(&mut NativeRuntime, installed, required, interactive) {
+    match repair(&mut NativeRuntime, installed, required, interactive, true) {
         Ok(Some(path)) => eprintln!(
             "Installed Blue {required} at {}. Rerun your command to continue.",
             path.display()
@@ -172,8 +247,10 @@ impl Runtime for NativeRuntime {
         let _probe = AttemptDirectory::new(path.parent().context("executable has no parent")?)?;
         Ok(path)
     }
-    fn confirm(&mut self, message: &str) -> Result<bool> {
-        Ok(cliclack::confirm(message).initial_value(false).interact()?)
+    fn confirm(&mut self, message: &str, default: bool) -> Result<bool> {
+        Ok(cliclack::confirm(message)
+            .initial_value(default)
+            .interact()?)
     }
     fn install(&mut self, destination: &Path, required: &str) -> Result<()> {
         install(destination, required)
@@ -488,14 +565,16 @@ mod tests {
         confirms: usize,
         installs: usize,
         fail: bool,
+        defaults: Vec<bool>,
     }
     impl Runtime for Fake {
         fn destination(&mut self) -> Result<PathBuf> {
             Ok("/fixture/blue".into())
         }
-        fn confirm(&mut self, message: &str) -> Result<bool> {
+        fn confirm(&mut self, message: &str, default: bool) -> Result<bool> {
             self.confirms += 1;
             assert!(message.contains("/fixture/blue"));
+            self.defaults.push(default);
             self.consent.context("cancelled")
         }
         fn install(&mut self, _: &Path, _: &str) -> Result<()> {
@@ -507,7 +586,7 @@ mod tests {
         }
     }
     #[test]
-    fn recommendation_is_neutral_and_does_not_invoke_repair() {
+    fn recommendation_message_is_neutral() {
         for (installed, recommended) in [("1.2.2", "1.2.3"), ("1.3.0", "1.2.3")] {
             let message = recommendation(installed, recommended, "linux", "x86_64");
             assert!(message.starts_with(&format!(
@@ -528,9 +607,11 @@ mod tests {
                         confirms: 0,
                         installs: 0,
                         fail: false,
+                        defaults: Vec::new(),
                     };
-                    let result = repair(&mut fake, installed, "2.0.0", interactive);
+                    let result = repair(&mut fake, installed, "2.0.0", interactive, true);
                     assert_eq!(fake.confirms, usize::from(interactive));
+                    assert!(fake.defaults.iter().all(|default| *default));
                     assert_eq!(
                         fake.installs,
                         usize::from(interactive && consent == Some(true))
@@ -550,8 +631,60 @@ mod tests {
             confirms: 0,
             installs: 0,
             fail: true,
+            defaults: Vec::new(),
         };
-        assert!(repair(&mut fake, "1.0.0", "2.0.0", true).is_err());
+        assert!(repair(&mut fake, "1.0.0", "2.0.0", true, true).is_err());
+    }
+    #[test]
+    fn compatible_decline_and_install_failure_continue() {
+        let mut declined = Fake {
+            consent: Some(false),
+            confirms: 0,
+            installs: 0,
+            fail: false,
+            defaults: Vec::new(),
+        };
+        assert!(matches!(
+            compatible_repair(&mut declined, "1.2.2", "1.2.3", true),
+            CompatibleRepair::Continue
+        ));
+        assert_eq!(declined.confirms, 1);
+        assert_eq!(declined.installs, 0);
+        assert_eq!(declined.defaults, vec![true]);
+
+        let mut failed = Fake {
+            consent: Some(true),
+            confirms: 0,
+            installs: 0,
+            fail: true,
+            defaults: Vec::new(),
+        };
+        assert!(matches!(
+            compatible_repair(&mut failed, "1.2.2", "1.2.3", true),
+            CompatibleRepair::Continue
+        ));
+        assert_eq!(failed.confirms, 1);
+        assert_eq!(failed.installs, 1);
+        assert_eq!(failed.defaults, vec![true]);
+    }
+    #[test]
+    fn compatible_accept_installs_and_stops_for_rerun() {
+        let mut accepted = Fake {
+            consent: Some(true),
+            confirms: 0,
+            installs: 0,
+            fail: false,
+            defaults: Vec::new(),
+        };
+        let CompatibleRepair::Installed(path) =
+            compatible_repair(&mut accepted, "1.2.2", "1.2.3", true)
+        else {
+            panic!("accepted compatible repair should install");
+        };
+        assert_eq!(path, PathBuf::from("/fixture/blue"));
+        assert_eq!(accepted.confirms, 1);
+        assert_eq!(accepted.installs, 1);
+        assert_eq!(accepted.defaults, vec![true]);
     }
     #[test]
     fn foreground_commands_do_not_grant_implicit_consent() {
@@ -560,7 +693,7 @@ mod tests {
             vec!["blue"],
             vec!["blue", "run", "codex"],
             vec!["blue", "codex"],
-            vec!["blue", "apply", "--yes"],
+            vec!["blue", "apply"],
         ] {
             let cli = crate::Cli::try_parse_from(args).unwrap();
             assert!(crate::foreground_command(&cli.command));
@@ -569,11 +702,16 @@ mod tests {
                 confirms: 0,
                 installs: 0,
                 fail: false,
+                defaults: Vec::new(),
             };
-            assert!(repair(&mut fake, "1.0.0", "2.0.0", true).unwrap().is_none());
+            assert!(repair(&mut fake, "1.0.0", "2.0.0", true, true)
+                .unwrap()
+                .is_none());
             assert_eq!(fake.installs, 0);
+            assert_eq!(fake.defaults, vec![true]);
         }
         for args in [
+            vec!["blue", "apply", "--yes"],
             vec!["blue", "daemon"],
             vec!["blue", "session-upload", "codex"],
             vec!["blue", "session-start", "codex"],
