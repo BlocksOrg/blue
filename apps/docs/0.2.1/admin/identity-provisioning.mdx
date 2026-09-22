@@ -1,0 +1,345 @@
+---
+title: "Set up Okta SSO and SCIM"
+description: "Configure OIDC single sign-on and SCIM 2.0 user and group provisioning with Okta, then validate the complete identity lifecycle."
+icon: "id-card"
+---
+
+Blue supports either local password authentication or one deployment-managed OIDC provider per workspace. This guide configures Okta, but the integration uses standard OIDC discovery and SCIM 2.0 so you can substitute another standards-compatible identity provider.
+
+In OIDC mode, users enter their email in Blue and continue to Okta to authenticate. Okta must provision a user through SCIM before that user can sign in. The protected bootstrap administrator remains available with its local password for recovery.
+
+<Info>
+  Blue currently uses strict directory provisioning rather than just-in-time (JIT) provisioning. Assigning a user only to an OIDC application permits authentication in Okta, but OIDC does not notify Blue about assignment, profile changes, group changes, or deactivation. SCIM creates the account before first login and remains the lifecycle source of truth.
+</Info>
+
+Okta represents authentication and private SCIM provisioning as two application instances during development:
+
+| Okta application | Purpose |
+| --- | --- |
+| OIDC Web Application | Authenticates the user and returns the browser to Blue. |
+| SCIM 2.0 Test App (Header Auth) | Creates, updates, groups, and deactivates the Blue account. |
+
+Assign each managed user to both applications. The word “Test” is Okta's name for its generic private SCIM connector; it is not a second user authentication mechanism.
+
+## Before you begin
+
+You need:
+
+- An Okta administrator who can create an OIDC web application and a private SCIM integration
+- Public HTTPS URLs for the dashboard and Control API in production
+- Access to the Blue deployment configuration and secrets
+- The bootstrap administrator credentials
+
+Record these values before you start:
+
+| Value | Example |
+| --- | --- |
+| Dashboard URL (`BETTER_AUTH_URL`) | `https://governance.example.com` |
+| Control API URL (`CONTROL_API_PUBLIC_URL`) | `https://control.example.com` |
+| Provider ID | `okta` |
+| OIDC callback URL | `https://governance.example.com/api/auth/callback/okta` |
+| SCIM base URL | `https://control.example.com/scim/v2` |
+| Okta issuer | `https://example.okta.com` |
+
+<Note>
+  The callback URL is `{BETTER_AUTH_URL}/api/auth/callback/{HARNESS_OIDC_PROVIDER_ID}`. The provider ID is part of the URL, so changing it later also changes the callback URL registered in Okta.
+</Note>
+
+### Test with local services
+
+For local development, the browser can return directly to the loopback dashboard:
+
+```text
+http://127.0.0.1:3000/api/auth/callback/okta
+```
+
+Okta's SCIM service cannot reach your loopback Control API. Expose port `8080` with an HTTPS tunnel such as ngrok, then use the tunnel URL only as Okta's SCIM connector base URL:
+
+```bash
+ngrok http 8080
+```
+
+```text
+https://your-tunnel.ngrok-free.app/scim/v2
+```
+
+Keep the tunnel running while Okta provisions users. A temporary tunnel URL may change when the tunnel restarts.
+
+## Configure Okta and Blue
+
+<Steps>
+  <Step title="Generate the deployment secrets">
+    Generate a dedicated, high-entropy SCIM bearer token. For a new deployment, also generate and persist a Better Auth secret. For example:
+
+    ```bash
+    openssl rand -base64 48
+    ```
+
+    Store the generated value in your deployment secret manager as `HARNESS_SCIM_BEARER_TOKEN`. Do not reuse a user password, OIDC client secret, or API token.
+
+    <Warning>
+      If the deployment already has authentication data, keep its existing `BETTER_AUTH_SECRET`. Better Auth encrypts OAuth signing keys with this value. Replacing it without a planned key rotation prevents token issuance with “Failed to decrypt private key” and invalidates existing browser sessions.
+    </Warning>
+  </Step>
+
+  <Step title="Create the Okta OIDC application">
+    In the Okta Admin Console, create an **OIDC - OpenID Connect** app integration with **Web Application** as the application type.
+
+    Configure the application with:
+
+    - **Sign-in redirect URI:** the callback URL from the table above
+    - **Grant type:** Authorization Code
+    - **Assignments:** the people or groups that are allowed to use Blue
+
+    Save the integration, then copy its client ID and client secret. See Okta's [web application redirect guide](https://developer.okta.com/docs/guides/sign-into-web-app-redirect/) if your Admin Console labels differ.
+
+    <Warning>
+      Assigning a user to the Okta application does not create the user in Blue. Configure SCIM and provision the user before testing SSO.
+    </Warning>
+  </Step>
+
+  <Step title="Find the OIDC issuer">
+    For basic workforce SSO, use Okta's organization authorization server. Its issuer is the Okta domain without `/oauth2/default`:
+
+    ```text
+    https://example.okta.com
+    ```
+
+    Blue uses OIDC discovery from this issuer. Confirm that `{issuer}/.well-known/openid-configuration` is reachable from the dashboard service.
+
+    If your organization requires the custom `default` authorization server, use `https://example.okta.com/oauth2/default`. You must also permit the OIDC client:
+
+    1. Go to **Security → API → Authorization Servers → default → Access Policies**.
+    2. Add a policy assigned to the Blue OIDC client.
+    3. Add a rule allowing **Authorization Code**, assigned users, and the `openid`, `profile`, and `email` scopes.
+
+    A custom authorization-server request that matches no policy and rule fails with “Policy evaluation failed for this request.”
+  </Step>
+
+  <Step title="Configure Blue identity settings">
+    Set these environment variables for the deployment:
+
+    ```bash
+    HARNESS_AUTH_MODE=oidc
+    HARNESS_OIDC_PROVIDER_ID=okta
+    HARNESS_OIDC_PROVIDER_NAME=Okta
+    HARNESS_OIDC_ISSUER=https://example.okta.com
+    HARNESS_OIDC_CLIENT_ID=your-okta-client-id
+    HARNESS_OIDC_CLIENT_SECRET=your-okta-client-secret
+    HARNESS_SCIM_BEARER_TOKEN=your-generated-scim-token
+    HARNESS_SCIM_GROUP_ROLE_MAPPINGS={"Blue Admins":"admin"}
+    ```
+
+    Keep the existing `BETTER_AUTH_URL`, `CONTROL_API_PUBLIC_URL`, bootstrap credentials, database, and internal service settings. For Docker Compose, place the values in the environment or `.env` file read by Compose.
+
+    `HARNESS_SCIM_GROUP_ROLE_MAPPINGS` must be a JSON object. Group names are exact and case-sensitive, and roles must be `admin` or `member`. A provisioned user defaults to `member`; an `admin` mapping takes precedence if multiple pushed groups match.
+  </Step>
+
+  <Step title="Deploy OIDC mode and verify SCIM">
+    Rebuild or restart the Control API and dashboard with the new settings. Verify the Control API and authenticated SCIM discovery endpoint:
+
+    ```bash
+    curl --fail-with-body https://control.example.com/health
+    curl --fail-with-body \
+      --header "Authorization: Bearer $HARNESS_SCIM_BEARER_TOKEN" \
+      https://control.example.com/scim/v2/ServiceProviderConfig
+    ```
+
+    The second request should return a SCIM `ServiceProviderConfig` document. A `401 Unauthorized` response normally means the bearer token does not match the deployment secret.
+
+    <Tip>
+      Use the bootstrap administrator while you finish provisioning. Ordinary local password users cannot sign in after the deployment switches to OIDC mode.
+    </Tip>
+  </Step>
+
+  <Step title="Create the Okta SCIM integration">
+    Create Okta's generic private SCIM connector:
+
+    1. Go to **Applications → Applications → Browse App Catalog**.
+    2. Search for **SCIM 2.0 Test App (Header Auth)** and select **Add Integration**.
+    3. Give the application a recognizable label.
+    4. Leave the initial sign-on options at their defaults and finish creating the application.
+    5. Open **Provisioning → Configure API Integration** and enable the API integration.
+
+    Configure:
+
+    - **SCIM connector base URL:** the SCIM base URL from the table above
+    - **Unique identifier field for users:** `userName`
+    - **Authentication mode:** HTTP Header
+    - **API Token:** `Bearer ` followed by the `HARNESS_SCIM_BEARER_TOKEN` value
+
+    Test the API credentials in Okta before continuing. Follow Okta's [private SCIM integration guide](https://developer.okta.com/docs/guides/scim-provisioning-integration-connect/) for the current Admin Console workflow.
+
+    <Warning>
+      The **SCIM 2.0 Test App (Header Auth)** sends the API Token field as the complete `Authorization` header. Include the literal `Bearer ` prefix, but do not include the environment-variable name, quotes, or extra whitespace.
+    </Warning>
+  </Step>
+
+  <Step title="Enable provisioning actions and attributes">
+    Enable these To App actions in Okta:
+
+    - Create Users
+    - Update User Attributes
+    - Deactivate Users
+
+    Leave password synchronization disabled. SCIM-managed users authenticate through Okta and do not receive a local password.
+
+    Ensure profile mappings send `userName`, `active`, `name.givenName`, and `name.familyName`. Blue treats `userName` as the user's email address and also accepts the standard SCIM email attribute.
+  </Step>
+
+  <Step title="Provision a test user">
+    Assign one non-administrator test user to the SCIM application and confirm that Okta reports a successful push. Then assign the same user to the separate OIDC Web Application.
+
+    Both assignments are required:
+
+    - The SCIM assignment creates the Blue account.
+    - The OIDC assignment permits the user to authenticate. Without it, Okta reports that the user is not assigned to the client application.
+
+    Sign in as the bootstrap administrator and open **Members**. The test user should appear with a SCIM-managed indicator and the `member` role. In managed mode, the **Identity & provisioning** tab shows the status reported by `GET /admin/identity/status`.
+
+    If an existing local user has the same normalized email, SCIM converts that account to an identity-provider-managed account. Governance history remains attached to the user, while the local password and issued credentials are revoked. The protected bootstrap administrator cannot be converted.
+  </Step>
+
+  <Step title="Configure groups and administrator mapping">
+    Create or select the Okta group whose members should administer Blue. Its name must match a key in `HARNESS_SCIM_GROUP_ROLE_MAPPINGS`; for example, `Blue Admins`.
+
+    To grant the configured example administrator role:
+
+    1. Go to **Directory → Groups** and create `Blue Admins`.
+    2. Add the managed user to the group.
+    3. Open the SCIM application and select **Push Groups**.
+    4. Select **Push Groups → Find groups by name**.
+    5. Select `Blue Admins` and push its memberships immediately.
+
+    Verify that the pushed test administrator has the `admin` role on **Members**.
+
+    Users with no matching group remain `member`. Removing the final matching administrator group demotes the user to `member`; it does not deactivate the account.
+  </Step>
+
+  <Step title="Test SSO and lifecycle changes">
+    Sign out, enter the provisioned user's email on the Blue login page, and confirm that the browser redirects to Okta. Complete authentication and verify that you return to the dashboard.
+
+    Test the complete lifecycle with your test user:
+
+    1. Remove and restore an administrator group membership, confirming the role changes.
+    2. Deactivate the user in Okta, confirming access and active sessions are revoked.
+    3. Reactivate the user, confirming a new SSO login works but an old session does not.
+    4. If you use the CLI, run its device login and confirm browser approval uses Okta SSO.
+  </Step>
+</Steps>
+
+## Prepare gateway access for CLI users
+
+SSO authenticates the dashboard and CLI device-authorization browser flow. Gateway access is a separate downstream dependency. If `blue.yaml` contains the top-level `gateway` section, finish gateway setup before asking users to run `blue login`.
+
+Confirm:
+
+- LiteLLM is running and reachable from the Control API.
+- The inference proxy is running and its public URL is reachable from the user's machine.
+- `LITELLM_MASTER_KEY` is available to the deployment as `HARNESS_LITELLM_ADMIN_KEY`.
+- `HARNESS_GATEWAY_URL`, `HARNESS_INFERENCE_PROXY_URL`, and the inference proxy's OAuth client-credentials settings (`HARNESS_PROXY_OAUTH_TOKEN_URL`, `HARNESS_PROXY_OAUTH_CLIENT_ID`, `HARNESS_PROXY_OAUTH_CLIENT_SECRET`, `HARNESS_PROXY_OAUTH_RESOURCE`) are configured.
+- A LiteLLM user exists with the exact SCIM email, ignoring case.
+- The configured provisioner's account, team, and policy requirements are satisfied. The provided local Compose provisioner requires the LiteLLM user to belong to at least one team.
+- Blue can create or update one managed key for that user. The shipped LiteLLM provisioners use `blue:<email>` as the base alias and add a numeric suffix when it is occupied.
+
+For the provided local deployment, start the gateway profile with the same LiteLLM environment:
+
+```bash
+docker compose --env-file /path/to/ai-gateway/.env \
+  --profile gateway up -d --build control-api inference-proxy
+```
+
+After SSO and SCIM provisioning succeed, provision or reconcile the user's managed gateway key:
+
+```bash
+blue login
+blue gateway
+blue apply
+blue status
+```
+
+`blue status` should report matching desired and applied revisions with managed files present.
+
+<Warning>
+  SCIM provisions the Blue identity but does not create the LiteLLM user or satisfy provisioner-specific account policy. Once those prerequisites are met, Blue provisions the managed key automatically. If gateway mode is active and provisioning prerequisites are missing, CLI configuration cannot complete. Governance-only deployments can omit the top-level `gateway` section from `blue.yaml` and skip this section.
+</Warning>
+
+## Identity lifecycle behavior
+
+| Identity provider action | Blue result |
+| --- | --- |
+| Create user | Creates a passwordless, SCIM-managed `member`, or converts the matching local account. |
+| Update user | Updates the managed email and display name. |
+| Push group membership | Recalculates the role from exact group mappings. |
+| Set `active: false` | Suspends access and revokes browser, CLI, device, and gateway credentials. |
+| Set `active: true` | Allows a new login; old sessions remain revoked. |
+| Delete user | Removes authentication access while retaining governance and captured-session history. |
+
+Dashboard administrators can revoke sessions for managed users, but role and lifecycle changes must come from the identity provider. Invitations are disabled in OIDC mode.
+
+## Roll out from password authentication
+
+SCIM endpoints are enabled whenever `scim_bearer_token` is configured, independently of authentication mode. OIDC mode requires SCIM configuration, and ordinary local password login is disabled as soon as you switch modes. Plan a short controlled migration:
+
+1. Create the Okta OIDC and SCIM applications and prepare all deployment secrets.
+2. Back up the database and confirm the bootstrap administrator credentials work.
+3. Deploy `HARNESS_AUTH_MODE=oidc` and verify SCIM discovery.
+4. Immediately provision a small test group, validate login, then provision the remaining users.
+5. Push administrator groups only after confirming their names and membership.
+
+<Warning>
+  Switching back to password mode does not restore passwords or credentials revoked when a local account was converted to SCIM. The bootstrap administrator can still sign in, but converted users need newly issued local access before they can use password mode again.
+</Warning>
+
+## Rotate secrets
+
+The deployment accepts one SCIM bearer token at a time. Coordinate rotation so Okta and Blue change together:
+
+1. Generate a new high-entropy token.
+2. Update Okta and the deployment secret in the same maintenance window.
+3. Restart the Control API.
+4. Test API credentials in Okta and trigger a test user update.
+
+To rotate the OIDC client secret, follow Okta's application-secret procedure, update `HARNESS_OIDC_CLIENT_SECRET`, restart the dashboard, and complete a new SSO login.
+
+Do not rotate `BETTER_AUTH_SECRET` as though it were an OIDC client secret. It protects Better Auth data at rest, including the private signing key stored in the database. A planned rotation must replace or re-encrypt that stored key and intentionally invalidate sessions; changing only the environment variable breaks OAuth token issuance.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| Okta's API credentials test returns `401` | For the Header Auth test app, enter `Bearer ` plus the exact current SCIM token in the API Token field. |
+| Okta cannot reach SCIM | Confirm the base URL ends in `/scim/v2`, uses publicly trusted TLS, and reaches the Control API. |
+| OIDC reports a redirect URI error | Confirm the URI exactly matches `{BETTER_AUTH_URL}/api/auth/callback/{provider-id}`. |
+| Okta says the user is not assigned to the client | Assign the user to the OIDC Web Application as well as the SCIM application. |
+| Okta reports “Policy evaluation failed” | If the issuer uses `/oauth2/default`, add an access policy and Authorization Code rule for the OIDC client. |
+| Login says the account is not provisioned | Push the active user through SCIM first. OIDC sign-up is intentionally disabled. |
+| The user stays a `member` | Confirm the group and membership were pushed and the mapping name matches exactly, including case. |
+| Password login no longer appears | This is expected for non-bootstrap users in OIDC mode. Enter the email to continue to Okta. |
+| OIDC discovery fails | Confirm the issuer and dashboard access to `.well-known/openid-configuration`. |
+| A user signs in with the wrong account | Ensure Okta's verified email claim matches the SCIM `userName` or email after normalization. |
+| CLI token exchange returns an empty `500` | Check dashboard logs for a Better Auth private-key decryption error and restore the stable `BETTER_AUTH_SECRET` used to create the stored JWKS. |
+| CLI falls back to cached config with a gateway-runtime error | Configure LiteLLM and the inference proxy, then restart the Control API with the gateway admin key. |
+| `blue gateway` reports no active keys | Provision an active LiteLLM API key for the matching email and include every model required by the agents' managed configuration. |
+
+## Configuration reference
+
+| Setting | Purpose |
+| --- | --- |
+| `HARNESS_AUTH_MODE=oidc` | Enables email-first OIDC login and disables invitations; it also requires SCIM configuration. |
+| `HARNESS_OIDC_PROVIDER_ID` | Stable provider key; defaults to `okta`. |
+| `HARNESS_OIDC_PROVIDER_NAME` | Login UI label; defaults to `Okta`. |
+| `HARNESS_OIDC_ISSUER` | OIDC discovery issuer. |
+| `HARNESS_OIDC_CLIENT_ID` / `HARNESS_OIDC_CLIENT_SECRET` | Confidential OIDC web application credentials. |
+| `HARNESS_SCIM_BEARER_TOKEN` | Dedicated administrative token sent by the SCIM client. |
+| `HARNESS_SCIM_GROUP_ROLE_MAPPINGS` | JSON object mapping exact group names to `admin` or `member`. |
+
+The SCIM bearer token and group-role mappings may instead be supplied in `blue.yaml` as `control_api.identity.scim_bearer_token` and `control_api.identity.group_role_mappings`.
+
+## Use another identity provider
+
+The integration does not call Okta-specific APIs. Create a confidential OIDC web application and a SCIM 2.0 client in the other provider, then change the provider ID, display name, issuer, and credentials. Keep the same callback and SCIM URL patterns and validate the provider's claims and SCIM payloads with a test user before rollout.
+
+<Warning>
+  Treat the SCIM bearer token as an administrative credential. Expose SCIM only over TLS, store the token in deployment secrets, and never reuse it for user or CLI authentication.
+</Warning>

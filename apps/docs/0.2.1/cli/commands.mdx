@@ -115,7 +115,7 @@ When you confirm, Blue:
 4. Attempts bounded remote gateway and OAuth cleanup without persisting any rotated credential, then always deletes the local session even when remote cleanup reports an error. Credentials are never put in the archive.
 5. Removes the active `blue.toml` and governance cache so policy from the previous tenant cannot be used by a different tenant.
 
-Blue keeps a separate installation ID for each tenant under `~/.config/blue/identities` on Unix or `%APPDATA%\Blue\identities` on Windows. Reconnecting to the same tenant reuses its ID; connecting to another tenant creates a different one. See [Windows paths and migration](/next/cli/windows-paths) for the complete native layout.
+Blue keeps a separate installation ID for each tenant under `~/.config/blue/identities` on Unix or `%APPDATA%\Blue\identities` on Windows. Reconnecting to the same tenant reuses its ID; connecting to another tenant creates a different one. See [Windows paths and migration](/0.2.1/cli/windows-paths) for the complete native layout.
 
 ### Connect again
 

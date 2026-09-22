@@ -1,0 +1,272 @@
+---
+title: "Harness adapter architecture"
+description: "Extend Blue across new agent harnesses and breaking harness-version boundaries."
+icon: "code-branch"
+---
+
+## Version-owned implementations
+
+`gh_common::harness_catalog!` generates harness identity, enumeration, discovery
+metadata, and the config implementation registrations. Add a catalog entry and
+an `adapters/<harness>/` family module containing the interval registrations,
+shared writer and inspection code, named atomic operation sets, and an initial
+version specification. Close the previous breaking-generation interval when
+adding a new version.
+
+### Contract ownership
+
+Keep each fact in one layer. Public summaries may be derived from a lower layer,
+but contributors must not author the same compatibility rule in two registries.
+
+| Layer | Owns | Must not own |
+| --- | --- | --- |
+| `gh_common::harness_catalog!` | Harness key, aliases, label, binary names, discovery and installer metadata | Version-dependent capabilities or component rules |
+| `adapters/<harness>/mod.rs` | Ordered version registrations, family operations, shared writer and inspection functions | Organization policy or server-selected behavior |
+| `adapters/<harness>/<version>/VersionSpec` | One version range's operation set, capabilities, component rules, and optional feature strategies | Writes outside the family operation contract |
+| `compat.rs` | Policy intersection, breaking-generation dispatch, certification ceilings, install selection | Harness-specific config rendering |
+| `packages.rs` | Adapter availability, layout-variant selection, verified package activation | Harness-specific placement decisions |
+| `plan.rs` | Pure desired writes, removals, ownership, environment, and launch arguments | Direct filesystem mutation |
+
+The public harness metadata endpoint retains top-level `capabilities` and
+`component_rules` for older consumers. Those fields are derived from the version
+specifications: capabilities are the union across generations and component
+rules describe the current generation. New consumers should read the matching
+`generations[]` entry.
+
+### Family layout
+
+A harness family follows this shape:
+
+```text
+crates/gh-config/src/adapters/<harness>/
+├── mod.rs                 # registrations, named Operations sets, shared behavior
+├── inspection.rs          # native version/config inspection
+├── writer.rs              # pure rendering helpers
+├── v0_0_0/
+│   └── mod.rs             # initial VersionSpec
+└── vX_Y_Z/
+    └── mod.rs             # later breaking-generation VersionSpec
+```
+
+The directory name identifies the inclusive compatibility boundary. It is not a
+copy of the whole adapter. A version specification selects a complete named
+operation set from the family and declares optional features explicitly.
+
+Rust has trait defaults and dynamic dispatch, but no class inheritance or class
+method overriding. Harness families therefore use composition: one
+`HarnessImplementation` delegates through an immutable `VersionSpec`. Every
+spec selects a complete `Operations` table, while `Feature<T>` requires each
+optional capability to be either `Supported(strategy)` or
+`Unsupported(reason)`. A version that changes only one capability reuses the
+existing operation set and changes that field. A version that changes paths,
+rendering, inspection, package placement, gateway wiring, transcript discovery,
+installation, launch behavior, or native update controls adds a named operation
+set in the family module. Existing specs and operation sets remain unchanged.
+
+<Info>
+  Reusing an operation set is an assertion that every operation remains compatible.
+  If only an optional feature changes, reuse the operation set and change the
+  feature strategy in the new `VersionSpec`.
+</Info>
+
+Implementations declare `ImplementationPaths`, consume immutable, package-grouped
+`ResolvedPackages`, and construct `ReconcilePlan` in memory. The plan contains
+bytes, modes, removals, ownership, environment, and launch arguments. Shared plan
+helpers serialize documents and expand component trees; they never write a real
+or simulated home. `PreparedPackages` and pending activation state stay private
+to the engine.
+
+The engine validates authority, snapshots affected files, applies the plan, and
+commits package activation and V4 compatibility state together. Previous ownership
+permits stale cleanup but is never added to new ownership. Native migration
+permissions are exact paths. Intermediate symlinks and final write symlinks are
+rejected; exact authorized symlink removals are snapshotted without following the
+link. Revision transactions include prior ownership before any harness commits.
+
+Installed binaries require successful version detection. Inspection uses persisted
+profiles when present; unknown profiles fail. Legacy `*-v1` names explicitly alias
+the implementations that preserve their previous behavior. New reconciliation
+writes canonical profile names while retaining state schema 4. Cleanup without
+state does not infer ownership. Installation selects the newest interval that
+intersects the policy and its certified release ceiling, and includes both in
+the selector; the CLI probes the installed binary again afterward.
+
+Installation has two parts. The selected implementation produces the
+policy-constrained install selector. The interactive CLI executes it only after
+confirmation and verifies the same executable path it detected before repair.
+Harnesses with standalone installers may resolve the selector to a concrete
+published version and update that installation in place; they must not install a
+second binary that remains shadowed on `PATH`.
+
+Wrapped-launch update suppression is also generation-owned. Each named
+`Operations` set declares how its harness version disables native update checks
+or automatic installation. The same operation decorates both a newly reconciled
+plan and the read-only launch path, preventing their environment and arguments
+from diverging. Blue applies the operation when the organization range has a
+maximum or the effective limit is the compiled certification ceiling. It skips
+the operation only when `allow_unverified_versions: true` accompanies an
+explicit range without an upper bound. If a vendor changes or removes its update
+control, add a new operation set at that version boundary rather than changing a
+shipped set.
+
+Every generation declares two different upper bounds. `before` is the optional
+breaking-format boundary used for dispatch. `verified_before` is the mandatory
+exclusive ceiling through which the implementation has been tested. Releases
+at or above that ceiling fail closed even when they remain in the same breaking
+generation. An organization may deliberately accept that risk only by setting
+both an explicit `version_requirement` and `allow_unverified_versions: true`.
+Successful reconciliation then emits a warning that vendor changes may break
+the generated configuration. The server adds the
+`unverified_harness_versions` required capability so older clients cannot
+silently ignore the opt-in.
+
+Support metadata is generation-owned. Each `VersionSpec` exposes its own
+component rules and optional capabilities, and package adapters are validated
+against every compatible generation reachable through the harness policy.
+Adding a capability to one generation therefore does not falsely advertise it
+for older generations.
+
+The central harness catalog owns invariant identity, discovery, and installer
+metadata only. Behavioral capabilities and component rules live exclusively in
+`VersionSpec`; public top-level summaries are derived from those specs for
+backward compatibility. Package adapters separately declare their harness
+availability with `introduced` and optional `before` bounds. Layout `variants`
+must remain inside that availability interval.
+
+## Contributor workflows
+
+### Certify another release without a breaking change
+
+Use this path when the existing writer, paths, package placement, hooks, gateway
+wiring, inspection, and launch behavior still work.
+
+1. Update the stable harness release in `tests/e2e/agents.lock.json`.
+2. Exercise that exact release through the harness matrix and inspect its native
+   files and launch behavior.
+3. Advance only the current registration's exclusive `verified_before` ceiling
+   to the next patch's `-0` sentinel. For a verified `1.18.25`, use `1.18.26-0`.
+4. Update version-output fixtures and rerun registry, golden, and E2E tests.
+
+Do not create a new version directory merely to advance certification.
+
+### Add a breaking version boundary
+
+Use this path when native behavior changes across a release boundary.
+
+1. Set the previous registration's exclusive `before` to the first affected
+   version.
+2. Add a version directory whose `VersionSpec` begins at that exact version.
+3. Reuse an existing named `Operations` set when every operation remains valid.
+   Otherwise add a new complete operation set in the family module.
+4. Declare every optional feature as `Supported(strategy)` or
+   `Unsupported(reason)` and define the generation's component rules.
+5. Add version-output fixtures and golden plans for the release immediately
+   below the boundary and the release at the boundary, in governance-only and
+   gateway modes.
+6. Retain the previous specification and operation set so older installations
+   continue to dispatch deterministically.
+
+Intervals are contiguous and half-open: `[introduced, before)`. The final
+breaking generation may omit `before`, but its `verified_before` remains finite.
+
+### Add a new harness
+
+1. Add one catalog entry with stable identity, binary probes, and installer
+   metadata.
+2. Create the adapter family, shared writer and inspection modules, initial
+   operations, and `v0_0_0/VersionSpec`.
+3. Implement the entire `HarnessImplementation` contract, including pure plan,
+   launch, native update controls, gateway wiring, component validation, package
+   placement, inspection, transcript discovery, and installation.
+4. Add the harness to explicit documentation and E2E matrices. Runtime dispatch
+   and API harness keys come from the compiled catalog and require no second enum.
+5. Add golden plans, version parsing fixtures, transaction/rollback coverage,
+   and at least one unsupported-package assertion.
+
+### Change package compatibility
+
+Adapter-level `[introduced, before)` describes when the package works with a
+harness. Nested variants describe archive layout changes only inside that
+availability interval. A variant-only adapter must cover the complete
+availability range contiguously. A fallback layout permits gaps, but overlapping
+variants are always invalid.
+
+Governance validation intersects package availability, variants, harness policy,
+breaking generations, and certified ceilings. It also checks the effective
+version-selected adapters together so helper-name collisions hidden inside
+variants fail before publication.
+
+```yaml
+adapters:
+  claude:
+    introduced: 2.0.12
+    before: 3.0.0
+    variants:
+      - introduced: 2.0.12
+        before: 2.5.0
+        plugin_dir: toolkit/claude-v2
+      - introduced: 2.5.0
+        before: 3.0.0
+        plugin_dir: toolkit/claude-v2_5
+```
+
+## Production boundaries and evidence
+
+- Codex: `0.145.0` separates automatic `SessionEnd` upload from the legacy
+  implementation. [The upstream introduction](https://github.com/openai/codex/commit/7bd44085e1650c406533745348e3c54f072ce5f6)
+  adds the lifecycle event; earlier inline hooks do not establish support for it.
+- Codex: `0.114.0` separates the `SessionStart` boundary. `SessionStart` exists
+  from `0.114.0` even though `SessionEnd` only arrives at `0.145.0`, so the
+  `codex-v0_114_0` interval declares the `session_start` capability while leaving
+  `session_upload` unsupported. On this interval Blue records the
+  `BLUE_SESSION_ID` → native-session mapping at start and uploads the transcript
+  from `blue run`'s post-exit fallback rather than a `SessionEnd` hook. See the
+  upstream [`SessionStart` hook documentation](https://github.com/openai/codex).
+- Claude: `1.0.38` introduces hooks and `2.0.12` introduces plugin packaging.
+  The hooks-only interval accepts hook components but rejects plugin packages,
+  standalone skills, and agents. Automatic upload is conservatively disabled
+  throughout that interval: `SessionEnd` arrived at `1.0.85`, so it is not
+  supported uniformly. These releases are recorded in the
+  [upstream changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+- Kimi and OpenCode retain one production interval each. Candidate transitions
+  and the evidence still needed are recorded in
+  `crates/gh-config/tests/fixtures/future-boundaries.json`; they are not production
+  boundaries.
+
+## Contract tests and verification
+
+`crates/gh-config/src/contract_tests.rs` covers normalized golden plans for each
+interval in both operating modes, source-home purity, exact boundaries, profile
+aliases, ownership, symlinks, production transitions, activation failure,
+revision rollback, and a synthetic two-version definition with different paths,
+schemas, component placement, hooks, and launch arguments. Adapter tests also
+assert that unchanged versions reuse their family operation table and that
+unsupported capabilities carry a nonempty reason. Golden paths and the Blue
+executable are normalized to `$HOME` and `$BLUE`.
+
+Update fixtures intentionally, then rerun without the environment variable:
+
+```bash
+BLUE_UPDATE_GOLDENS=1 cargo test -p gh-config --lib
+cargo test -p gh-config --lib
+```
+
+Registry tests require each certified ceiling to be valid and ensure the active
+ceiling is exactly `next-patch-0` beyond the stable release pinned in
+`tests/e2e/agents.lock.json`. Updating that lock therefore forces maintainers to
+make newly verified support explicit.
+
+Before review, verify these invariants:
+
+- Every breaking interval is ordered, contiguous, and selects exactly one spec.
+- Every `verified_before` is exclusive and no later than the breaking `before`.
+- No version-dependent capability or component rule is authored in the catalog.
+- Plans remain pure, and only the transaction engine writes or removes files.
+- Package availability covers every harness version allowed by the organization
+  policy, unless that package is disabled for the harness.
+- Installer repair updates and rechecks the originally detected executable.
+- Native update controls come from the selected operation set and match between
+  fresh reconciliation and cached launch resolution.
+- Old specs, operation sets, fixtures, and golden plans remain present.
+
+Run the complete repository checks documented in [Contributing](/0.2.1/development/contributing).
