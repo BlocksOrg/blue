@@ -253,10 +253,10 @@ mod tests {
 
     #[test]
     fn source_descriptions_distinguish_http_endpoints_from_local_files() {
-        let http = HttpConfigSource::new("https://api.bluee.sh/").unwrap();
+        let http = HttpConfigSource::new("https://api.bluee.sh/", "1.2.3").unwrap();
         assert_eq!(http.describe(), "https://api.bluee.sh/governance-config");
 
-        let file = FileConfigSource::new("/tmp/blue-governance.yaml");
+        let file = FileConfigSource::new("/tmp/blue-governance.yaml", "1.2.3");
         assert_eq!(file.describe(), "file(/tmp/blue-governance.yaml)");
     }
 
