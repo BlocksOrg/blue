@@ -3759,6 +3759,7 @@ async fn record_catalog_failure(
     supported: bool,
     message: Option<&str>,
 ) -> Result<(), ApiError> {
+    // sqlx-guard: allow-raw gateway catalog refresh state upsert
     sqlx::query(
         "INSERT INTO public.gateway_model_catalog_sync_state \
          (organization_id,gateway_type,last_refresh_at,latest_error,latest_error_at,discovery_supported) \
@@ -3791,6 +3792,7 @@ async fn persist_model_catalog(
         let metadata = serde_json::to_value(&model.metadata).map_err(|error| {
             ApiError::internal(format!("serializing discovered model metadata: {error}"))
         })?;
+        // sqlx-guard: allow-raw gateway catalog model upsert
         sqlx::query(
             "INSERT INTO public.gateway_model_catalog \
              (organization_id,gateway_type,model_id,display_name,metadata,fingerprint,first_seen_at,last_seen_at,unavailable_since,acknowledged_fingerprint,acknowledged_at) \
@@ -3807,6 +3809,7 @@ async fn persist_model_catalog(
         .execute(&mut **transaction)
         .await?;
     }
+    // sqlx-guard: allow-raw gateway catalog stale-model marker
     sqlx::query(
         "UPDATE public.gateway_model_catalog SET unavailable_since=coalesce(unavailable_since,now()) \
          WHERE organization_id=$1 AND gateway_type=$2 AND NOT(model_id = ANY($3))",
@@ -3816,6 +3819,7 @@ async fn persist_model_catalog(
     .bind(&model_ids)
     .execute(&mut **transaction)
     .await?;
+    // sqlx-guard: allow-raw gateway catalog refresh success upsert
     sqlx::query(
         "INSERT INTO public.gateway_model_catalog_sync_state \
          (organization_id,gateway_type,last_refresh_at,last_successful_refresh_at,last_successful_source_revision,latest_error,latest_error_at,discovery_supported) \
@@ -3847,6 +3851,7 @@ async fn refresh_gateway_model_catalog(
         .ok_or_else(|| ApiError::bad_request("gateway mode is disabled"))?;
 
     if !manual {
+        // sqlx-guard: allow-raw gateway catalog discovery support lookup
         let unsupported = sqlx::query_scalar::<_, Option<bool>>(
             "SELECT discovery_supported FROM public.gateway_model_catalog_sync_state WHERE organization_id=$1 AND gateway_type=$2",
         )
@@ -3862,6 +3867,7 @@ async fn refresh_gateway_model_catalog(
     }
 
     let mut transaction = state.pool.begin().await?;
+    // sqlx-guard: allow-raw gateway catalog advisory lock
     let locked = sqlx::query_scalar::<_, bool>(
         "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 928452))",
     )
@@ -3953,6 +3959,7 @@ async fn gateway_models_resource(
     let current = current_config(&state.pool, organization_id).await?;
     let config: gh_service::GovernanceConfig = serde_json::from_value(current.document)
         .map_err(|error| ApiError::internal(format!("decoding stored config: {error}")))?;
+    // sqlx-guard: allow-raw gateway catalog resource query
     let rows = sqlx::query_as::<_, GatewayModelCatalogRow>(
         "SELECT model_id,display_name,metadata,fingerprint,acknowledged_fingerprint,first_seen_at,last_seen_at,unavailable_since \
          FROM public.gateway_model_catalog WHERE organization_id=$1 AND gateway_type=$2 ORDER BY model_id",
@@ -3961,6 +3968,7 @@ async fn gateway_models_resource(
     .bind(gateway_type)
     .fetch_all(&state.pool)
     .await?;
+    // sqlx-guard: allow-raw gateway catalog sync-state resource query
     let sync = sqlx::query_as::<_, GatewayModelSyncRow>(
         "SELECT last_refresh_at,last_successful_refresh_at,last_successful_source_revision,latest_error,latest_error_at,discovery_supported \
          FROM public.gateway_model_catalog_sync_state WHERE organization_id=$1 AND gateway_type=$2",
@@ -4177,6 +4185,7 @@ async fn acknowledge_gateway_model(
         .gateway_kind
         .as_deref()
         .ok_or_else(|| ApiError::not_found("gateway mode is disabled"))?;
+    // sqlx-guard: allow-raw gateway catalog acknowledgement update
     let result = sqlx::query(
         "UPDATE public.gateway_model_catalog SET acknowledged_fingerprint=fingerprint,acknowledged_at=now(),acknowledged_by=$1 \
          WHERE organization_id=$2 AND gateway_type=$3 AND model_id=$4 AND fingerprint=$5",
@@ -4206,6 +4215,7 @@ async fn refresh_gateway_model_catalogs(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(seconds));
     loop {
         interval.tick().await;
+        // sqlx-guard: allow-raw background gateway catalog organization scan
         let organizations = match sqlx::query_scalar::<_, Uuid>("SELECT id FROM organizations")
             .fetch_all(&state.pool)
             .await
