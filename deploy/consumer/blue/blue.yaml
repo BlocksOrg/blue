@@ -56,10 +56,11 @@ control_api:
 #     reconcile_ttl_seconds: 86400
 #     max_concurrency: 8
 #     timeout_seconds: 15
+#     model_catalog_refresh_seconds: 300
 
 governance:
   revision: "2026-08-30.1"
-  contract_version: 3
+  contract_version: 4
   required_capabilities:
     - adapter_intervals
     - compiled_harness_registry
@@ -67,6 +68,7 @@ governance:
     - versioned_state
     # Required when gateway is enabled.
     # - gateway_inference_jwt
+    # - gateway_model_catalog
   minimum_client_version: "0.1.0"
   # Exact recommended release and major compatibility boundary. Same-major
   # differences warn and continue; different majors block.
@@ -75,7 +77,7 @@ governance:
   required: true
   allowed_harnesses: [codex, claude, kimi, opencode]
   harnesses:
-    codex: { managed_config: {} }
-    claude: { managed_config: {} }
-    kimi: { managed_config: {} }
-    opencode: { managed_config: {} }
+    codex: { gateway_models: [gpt-5.6-sol], managed_config: {} }
+    claude: { gateway_models: [claude-opus-4-8], managed_config: {} }
+    kimi: { gateway_models: [moonshot-ai/kimi-k2.6], managed_config: {} }
+    opencode: { gateway_models: [anthropic/claude-opus-4-8], managed_config: {} }

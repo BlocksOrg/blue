@@ -28,7 +28,7 @@ mutable or retired Docker Hub tags.
 | Test | What it exercises | Needs a real agent CLI? | Needs the gateway path? |
 | --- | --- | --- | --- |
 | `bootstrap_login` | Mint token → control-api verifies it via JWKS (RS256 signature, issuer, audience, expiry) → `blue login` short-circuits → `GET /auth/me` returns the admin identity. | no | no |
-| `claude_config` | `blue apply` writes Claude's governed model, the `e2e-remote` MCP server, and the managed `example` skill into its managed config. | yes (`claude`) | no |
+| `claude_config` | `blue apply` writes Claude's governed model, enforced ordered model catalog and replacement picker, the `e2e-remote` MCP server, and the managed `example` skill into its managed config. | yes (`claude`) | no |
 | `all_agents_config` | The **same** model + MCP + skill assertions for `codex` / `kimi` / `opencode`, so all four agents are covered identically. | yes (per agent) | no |
 | `session_upload` | `blue session-upload` per harness → detached worker presigns → PUTs to MinIO → completes; the list shows all 4, and one artifact is downloaded and byte-compared to the upload. | no | no |
 | `agent_matrix_config` | **Tier A (version matrix).** The same model + MCP + skill assertions as `all_agents_config`, but per `(agent, version)` cell across multiple CLI versions (not just the pin). No inference. Self-skips unless the matrix is enabled. | yes (per cell) | no |

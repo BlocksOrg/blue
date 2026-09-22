@@ -89,7 +89,7 @@ export function cliEnv(home: string, extra: NodeJS.ProcessEnv = {}): NodeJS.Proc
     NO_COLOR: "1",
     E2E_AGENT_LOG_DIR: path.join(home, "agent-log"),
     E2E_CODEX_VERSION: "0.145.0",
-    E2E_CLAUDE_VERSION: "2.0.12",
+    E2E_CLAUDE_VERSION: "2.1.252",
     E2E_KIMI_VERSION: "0.0.0",
     E2E_OPENCODE_VERSION: "0.0.0",
     ...extra,

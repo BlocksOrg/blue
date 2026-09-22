@@ -327,7 +327,9 @@ fn every_production_interval_has_a_pure_golden_plan() {
                         component.agents.push(agents);
                         component.hooks.push(hooks);
                     }
-                    Harness::Claude if registration.interval.introduced == "2.0.12" => {
+                    Harness::Claude
+                        if matches!(registration.interval.introduced, "2.0.12" | "2.1.242") =>
+                    {
                         component.plugin = Some(plugin);
                     }
                     Harness::Claude if registration.interval.introduced == "1.0.38" => {
@@ -363,6 +365,7 @@ fn every_production_interval_has_a_pure_golden_plan() {
                 }
                 let policy: HarnessPolicy = serde_json::from_value(serde_json::json!({
                     "managed_config": managed_config,
+                    "gateway_models": if gateway_enabled { vec![managed_model.unwrap_or("fixture-model")] } else { Vec::<&str>::new() },
                     "mcp":[{"name":"fixture", "command":"fixture-mcp", "args":["--stdio"]}]
                 }))
                 .unwrap();
@@ -556,22 +559,29 @@ fn boundaries_aliases_and_unsupported_packages_are_explicit() {
         (Harness::Claude, "1.0.38", "claude-v1_0_38"),
         (Harness::Claude, "2.0.11", "claude-v1_0_38"),
         (Harness::Claude, "2.0.12", "claude-v2_0_12"),
+        (Harness::Claude, "2.1.241", "claude-v2_0_12"),
+        (Harness::Claude, "2.1.242", "claude-v2_1_242"),
     ] {
         assert_eq!(context(harness, version).profile.id, expected);
     }
     for harness in Harness::ALL {
         let alias = format!("{}-v1", harness.key());
-        assert_eq!(
-            adapters::implementation_for_profile(harness, &alias)
-                .unwrap()
-                .interval
-                .profile,
+        let expected = if harness == Harness::Claude {
+            "claude-v2_0_12"
+        } else {
             adapters::definition(harness)
                 .implementations
                 .last()
                 .unwrap()
                 .interval
                 .profile
+        };
+        assert_eq!(
+            adapters::implementation_for_profile(harness, &alias)
+                .unwrap()
+                .interval
+                .profile,
+            expected
         );
         assert!(adapters::implementation_for_profile(harness, "unknown-profile").is_none());
     }

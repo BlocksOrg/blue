@@ -151,13 +151,17 @@ control_api:
   package_artifacts: { bucket: os.environ/HARNESS_PACKAGE_BUCKET }
 governance:
   revision: "eks-1"   # a label for this baseline; the server detects edits by content, not by this value
-  contract_version: 3
-  required_capabilities: [adapter_intervals, compiled_harness_registry, versioned_state, transactional_reconcile, gateway_inference_jwt]
+  contract_version: 4
+  required_capabilities: [adapter_intervals, compiled_harness_registry, versioned_state, transactional_reconcile, gateway_inference_jwt, gateway_model_catalog]
   minimum_client_version: "0.1.0"
   ttl_seconds: 300
   required: true
   allowed_harnesses: [codex, claude, kimi, opencode]
-  harnesses: { claude: { managed_config: { model: claude-opus-4-8 } } }
+  harnesses:
+    codex: { gateway_models: [gpt-5.6-sol], managed_config: { model: gpt-5.6-sol } }
+    claude: { gateway_models: [claude-opus-4-8], managed_config: { model: claude-opus-4-8 } }
+    kimi: { gateway_models: [moonshot-ai/kimi-k2.6], managed_config: { model: moonshot-ai/kimi-k2.6 } }
+    opencode: { gateway_models: [anthropic/claude-opus-4-8], managed_config: { model: anthropic/claude-opus-4-8 } }
   # Uploads each finished coding session to the S3 bucket. Transcripts can hold prompts, code
   # and secrets, so agree a retention and access policy before turning this on.
   session_upload: { presign_url: "https://$BLUE_API_HOST/session-uploads/presign" }

@@ -46,6 +46,9 @@ case "$mode" in
 esac
 
 case "$request" in
+  *'"operation":"list_models"'*)
+    printf '%s\n' '{"protocol_version":1,"status":"success","result":{"models":[{"id":"gpt-e2e"},{"id":"claude-e2e"},{"id":"kimi-e2e"},{"id":"e2e/model"},{"id":"e2e/alternate"}],"source_revision":"e2e-models-v1"}}'
+    ;;
   *'"operation":"ensure"'*)
     printf '%s\n' "{\"protocol_version\":1,\"status\":\"success\",\"result\":{\"credential\":\"${E2E_PLUGIN_KEY:?}\",\"external_id\":\"e2e-executable\",\"alias\":\"e2e\",\"metadata\":{\"custom_provisioner\":true,\"runtime\":\"executable\"},\"expires_at\":null}}"
     ;;

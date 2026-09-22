@@ -185,6 +185,13 @@ Daemon runs, redirected/non-interactive commands, and `blue apply --yes` never i
 
 Each harness has an ordered registry of compiled profiles. Every profile has an inclusive `introduced` bound, an optional exclusive breaking-generation `before` bound, and a mandatory exclusive `verified_before` release ceiling. Dispatch may remain open-ended, but certified support never is: a parseable release at or beyond `verified_before` is blocked unless the organization uses the explicit unverified opt-in above.
 
+Claude Code `2.1.242` is a compatibility boundary for gateway model controls.
+Releases from `2.0.12` through `2.1.241` use `claude-v2_0_12` and retain
+selected-model-only behavior. Releases from `2.1.242` use
+`claude-v2_1_242`, which replaces Claude's built-in picker choices with Blue's
+ordered assigned catalog and enforces the first assignment as the Default-row
+fallback when no explicit managed model is selected.
+
 For example, introducing a profile at `2.0.0` produces these paths:
 
 | Installed version | Selected path |

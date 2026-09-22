@@ -41,6 +41,16 @@ pub fn write(
     session_upload_hook: Option<Toml>,
     session_start_hook: Option<Toml>,
 ) -> Result<HarnessWrite, GhError> {
+    if wiring.is_some()
+        && (policy.gateway_models.is_empty()
+            || policy.managed_config.model.as_ref().is_some_and(|selected| {
+                !policy.gateway_models.iter().any(|model| model == selected)
+            }))
+    {
+        return Err(GhError::config(
+            "gateway-mode Codex selected model must be present in gateway_models",
+        ));
+    }
     let base_path = home.join(".codex").join("config.toml");
     migrate_legacy_global_config(plan, &base_path, policy)?;
     let base = plan.read_toml_table(&base_path)?;

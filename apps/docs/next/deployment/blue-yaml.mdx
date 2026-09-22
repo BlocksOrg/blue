@@ -247,6 +247,7 @@ gateway:
   provisioner:
     type: builtin-litellm
     reconcile_ttl_seconds: 86400
+    model_catalog_refresh_seconds: 300
 ```
 
 | Field | Meaning |
@@ -269,6 +270,7 @@ gateway:
 | `provisioner.executable_sha256` | Lowercase SHA-256 pin for the exact custom executable. Required with `executable_path`. |
 | `provisioner.policy_revision` | Non-empty policy revision for a custom executable; changing it triggers reconciliation. |
 | `provisioner.reconcile_ttl_seconds` | Positive interval before Blue reconciles the managed gateway credential again. |
+| `provisioner.model_catalog_refresh_seconds` | Model discovery interval in seconds; defaults to `300` and must be at least `30`. `HARNESS_GATEWAY_MODEL_CATALOG_REFRESH_SECONDS` overrides it. |
 | `provisioner.timeout_seconds` | Per-invocation custom executable deadline; defaults to 15 seconds. |
 | `provisioner.max_concurrency` | Configured provisioner concurrency ceiling; defaults to `8` and is further limited by the database pool. |
 
@@ -302,7 +304,7 @@ The `governance` section is the deployment-authored baseline delivered to client
 | Field | Meaning |
 | --- | --- |
 | `revision` | Required seed value. The Control API replaces it with an immutable stored revision ID whenever it publishes a revision. |
-| `contract_version` | Wire contract version. Current clients support version 3. |
+| `contract_version` | Wire contract version. Current clients support version 4. |
 | `required_capabilities` | Features a client must support before accepting policy. |
 | `minimum_client_version` | Operator-visible rollout floor; required when using harness version ranges or versioned package adapters. |
 | `required_client_version` | Optional canonical exact SemVer recommendation for the Blue CLI. Defaults to the control API deployment version and requires `tenant_client_version_pin`. |

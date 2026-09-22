@@ -6,12 +6,22 @@ mod writer;
 pub mod v0_0_0;
 pub mod v1_0_38;
 pub mod v2_0_12;
+pub mod v2_1_242;
 
 pub const VERSION_PROBES: &[VersionProbe] = DEFAULT_VERSION_PROBES;
 type HookRenderer = fn(&str) -> Result<serde_json::Value, GhError>;
+type WriteOperation = fn(
+    &mut ReconcilePlan,
+    &Path,
+    &HarnessPolicy,
+    Option<&GatewayWiring>,
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+    bool,
+) -> Result<HarnessWrite, GhError>;
 const DISABLE_AUTOUPDATER_ENV: &str = "DISABLE_AUTOUPDATER";
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Operations {
     plan: fn(&Implementation, &ReconcileInput<'_>, &ResolvedPackages) -> Result<ReconcilePlan, GhError>,
     launch: fn(&Path, crate::HarnessLaunchSpec) -> Result<crate::HarnessLaunchSpec, GhError>,
@@ -28,6 +38,7 @@ pub struct Operations {
     proposed_values: ProposedValuesOperation,
     transcript_path: TranscriptOperation,
     apply_packages: fn(&mut ReconcilePlan, &Path, &mut HarnessWrite, &PackageComponents) -> Result<(), GhError>,
+    write: WriteOperation,
 }
 
 #[derive(Debug)]
@@ -66,6 +77,7 @@ pub static PRE_HOOKS_OPERATIONS: Operations = Operations {
     proposed_values,
     transcript_path: payload_transcript_path,
     apply_packages: apply_base_packages,
+    write: writer::write,
 };
 pub static HOOKS_ONLY_OPERATIONS: Operations = Operations {
     plan,
@@ -83,6 +95,7 @@ pub static HOOKS_ONLY_OPERATIONS: Operations = Operations {
     proposed_values,
     transcript_path: payload_transcript_path,
     apply_packages: apply_hook_packages,
+    write: writer::write,
 };
 pub static PLUGIN_OPERATIONS: Operations = Operations {
     plan,
@@ -100,6 +113,11 @@ pub static PLUGIN_OPERATIONS: Operations = Operations {
     proposed_values,
     transcript_path: payload_transcript_path,
     apply_packages: apply_plugin_packages,
+    write: writer::write,
+};
+pub static CATALOG_PLUGIN_OPERATIONS: Operations = Operations {
+    write: writer::write_catalog,
+    ..PLUGIN_OPERATIONS
 };
 
 pub static IMPLEMENTATIONS: &[ImplementationRegistration] = &[
@@ -130,11 +148,22 @@ pub static IMPLEMENTATIONS: &[ImplementationRegistration] = &[
             profile: "claude-v2_0_12",
             aliases: &["claude-v1"],
             introduced: "2.0.12",
+            before: Some("2.1.242"),
+            verified_before: "2.1.242-0",
+            lifecycle: ImplementationLifecycle::Supported,
+        },
+        implementation: &v2_0_12::IMPLEMENTATION,
+    },
+    ImplementationRegistration {
+        interval: VersionInterval {
+            profile: "claude-v2_1_242",
+            aliases: &[],
+            introduced: "2.1.242",
             before: None,
             verified_before: "2.1.253-0",
             lifecycle: ImplementationLifecycle::Supported,
         },
-        implementation: &v2_0_12::IMPLEMENTATION,
+        implementation: &v2_1_242::IMPLEMENTATION,
     },
 ];
 
@@ -463,7 +492,7 @@ fn execute(
         }
         _ => None,
     };
-    let mut report = writer::write(
+    let mut report = (implementation.spec.operations.write)(
         plan,
         input.home,
         input.policy,

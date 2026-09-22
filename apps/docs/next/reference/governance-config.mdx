@@ -8,8 +8,8 @@ This is the complete policy delivered to clients. The mounted deployment YAML su
 
 ```yaml
 revision: "organization-managed"
-contract_version: 3
-required_capabilities: [adapter_intervals, compiled_harness_registry, transactional_reconcile, versioned_state, gateway_inference_jwt]
+contract_version: 4
+required_capabilities: [adapter_intervals, compiled_harness_registry, transactional_reconcile, versioned_state, gateway_inference_jwt, gateway_model_catalog]
 ttl_seconds: 300
 required: true
 allowed_harnesses: [codex, claude, kimi, opencode]
@@ -48,6 +48,7 @@ packages:
 harnesses:
   codex:
     version_requirement: ">=0.149.0, <0.150.0"
+    gateway_models: [gpt-5.6-sol, gpt-5.6-terra]
     package_overrides:
       organization-toolkit:
         enabled: true
@@ -87,7 +88,21 @@ harnesses:
 
 ## Harness policy
 
-`managed_config` contains model and harness-specific settings. `mcp` is additive. `package_overrides` may enable or disable an organization package and provide adapter settings; it cannot replace the source, version, or digest. `minimum_client_version` remains visible to operators, while `required_capabilities` is the enforcement mechanism for contract features.
+`managed_config` contains the selected model and harness-specific settings. In
+gateway mode, `gateway_models` contains the exact upstream IDs assigned to that
+harness and the selected `managed_config.model` must be a member. Kimi,
+OpenCode, and Claude Code 2.1.242 or newer receive an enforced launch catalog
+containing exactly the assigned models. Older Claude releases and Codex support
+only the selected model. For catalog-aware harnesses, the first assigned model
+is the enforced fallback when no explicit managed default is selected. Codex's
+upstream [`model_catalog_json`](https://github.com/openai/codex/blob/main/codex-rs/core/src/config/mod.rs)
+setting replaces model metadata but is not an enforced allowlist, so Blue does
+not present Codex assignments as catalog governance.
+The field is ignored in direct mode, so native model catalogs remain untouched.
+`mcp` is additive. `package_overrides` may enable or disable an organization
+package and provide adapter settings; it cannot replace the source, version, or
+digest. `minimum_client_version` remains visible to operators, while
+`required_capabilities` is the enforcement mechanism for contract features.
 
 Managed Codex launches default to `approval_policy: on-request`, preserving native approval prompts while the configured sandbox remains active. An explicit `approval_policy` remains authoritative. The provider-neutral `auto_approve: true` selects `never` only when no explicit Codex approval policy is present; `auto_approve: false` and an absent value both select `on-request`.
 
@@ -101,7 +116,20 @@ accepted risk.
 
 The presence of top-level `gateway` enables gateway mode for every allowed coding agent and connects Blue to an upstream gateway operated by your organization. Blue does not bundle that gateway. `litellm` is the first and currently only supported type. The Control API injects `proxy_url` and the authenticated user's session-bound inference `token`; each agent inherits its model from its own `managed_config`, or leaves model selection to the agent when none is managed. `auth_style` remains on the wire, but `bearer` is the only supported client-to-proxy value.
 
-OpenCode is the exception to leaving model selection to the agent. Its governed runtime config merges over the user's own, so an unpinned model would survive next to the governed provider it no longer resolves against. When OpenCode has no managed model, Blue keeps the agent's native model if the gateway serves it, otherwise pins a governed default, and warns at launch so the gap stays visible. Set `managed_config.available_models` to the list your gateway actually serves to control that catalog.
+Gateway model catalogs are discovered server-side and retained as last-known
+state. A failed discovery does not make models appear removed. Administrator
+mappings are revisioned governance policy and are never silently renamed,
+substituted, or deleted when discovery reports drift. The former OpenCode-only
+`managed_config.available_models` escape hatch is deprecated; migrate those
+values to the typed harness `gateway_models` field.
+
+Administrators manage this from **Gateway → Models**, organized into
+**Discovery**, **Catalog**, and **Assignments** child tabs. Discovery runs
+periodically and can be refreshed on demand. Unknown and removed IDs remain
+assignable with a warning so an unavailable discovery service cannot erase an
+operator-authored mapping. A managed default is optional, but when present it
+must be assigned to the same harness. Material metadata changes keep routing
+active until an administrator acknowledges the new fingerprint.
 
 ## Managed packages
 

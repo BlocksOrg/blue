@@ -54,9 +54,10 @@ gateway:
     policy_revision: e2e-executable-v1
 governance:
   revision: "e2e-1"
-  contract_version: 3
+  contract_version: 4
   required_capabilities:
     - gateway_inference_jwt
+    - gateway_model_catalog
     - adapter_intervals
     - compiled_harness_registry
     - transactional_reconcile
@@ -90,6 +91,7 @@ governance:
     presign_url: http://127.0.0.1:8080/session-uploads/presign
   harnesses:
     codex:
+      gateway_models: [gpt-e2e]
       managed_config:
         model: gpt-e2e
         reasoning_effort: low
@@ -100,17 +102,20 @@ governance:
           command: node
           args: ["/work/tests/e2e/fixtures/mcp-server.mjs"]
     claude:
+      gateway_models: [claude-e2e]
       version_requirement: ">=2.0.12, <2.1.253-0"
       managed_config:
         model: claude-e2e
         auto_approve: true
       mcp: *e2e_mcp
     kimi:
+      gateway_models: [kimi-e2e]
       managed_config:
         model: kimi-e2e
         auto_approve: true
       mcp: *e2e_mcp
     opencode:
+      gateway_models: [e2e/model]
       managed_config:
         model: e2e/model
       mcp: *e2e_mcp

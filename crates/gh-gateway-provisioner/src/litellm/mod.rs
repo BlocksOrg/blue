@@ -1,6 +1,6 @@
 use crate::{
-    EnsureRequest, GatewayProvisioner, ProvisionedCredential, ProvisionerError, RevokeRequest,
-    RevokeResponse, SecretString,
+    DiscoveredModel, EnsureRequest, GatewayProvisioner, ModelCatalog, ProvisionedCredential,
+    ProvisionerError, RevokeRequest, RevokeResponse, SecretString,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -294,6 +294,66 @@ impl GatewayProvisioner for LiteLlmProvisioner {
         "builtin-litellm"
     }
 
+    async fn list_models(&self) -> Result<ModelCatalog, ProvisionerError> {
+        let url = format!("{}/v1/models", self.base_url.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.admin_key)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|_| ProvisionerError::Unavailable("model discovery request failed".into()))?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(|_| {
+            ProvisionerError::DiscoveryResponse("gateway returned an unreadable response".into())
+        })?;
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            return Err(ProvisionerError::DiscoveryAuth(
+                self.rejection_message(status, &bytes),
+            ));
+        }
+        if !status.is_success() {
+            return Err(ProvisionerError::Unavailable(
+                self.rejection_message(status, &bytes),
+            ));
+        }
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            ProvisionerError::DiscoveryResponse("gateway returned invalid JSON".into())
+        })?;
+        let entries = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+            ProvisionerError::DiscoveryResponse("response has no data array".into())
+        })?;
+        let mut models = entries
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| DiscoveredModel {
+                id: id.to_owned(),
+                display_name: None,
+                // LiteLLM's OpenAI-compatible endpoint guarantees `id`; keep
+                // undocumented and potentially volatile fields out of drift.
+                metadata: Default::default(),
+            })
+            .collect::<Vec<_>>();
+        models.sort_by(|left, right| left.id.cmp(&right.id));
+        models.dedup_by(|left, right| left.id == right.id);
+        let revision = hex::encode(Sha256::digest(
+            models
+                .iter()
+                .flat_map(|model| model.id.as_bytes().iter().copied().chain([0]))
+                .collect::<Vec<_>>(),
+        ));
+        Ok(ModelCatalog {
+            models,
+            source_revision: Some(revision),
+        })
+    }
+
     async fn ensure(
         &self,
         request: EnsureRequest,
@@ -427,5 +487,106 @@ impl GatewayProvisioner for LiteLlmProvisioner {
         )
         .await?;
         Ok(RevokeResponse { revoked: true })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        extract::Request, http::StatusCode, response::IntoResponse, routing::get, Json, Router,
+    };
+
+    async fn provisioner(router: Router) -> LiteLlmProvisioner {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        LiteLlmProvisioner {
+            base_url: format!("http://{address}"),
+            admin_key: "sk-test-admin".into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_discovery_authenticates_sorts_deduplicates_and_hashes() {
+        let provisioner = provisioner(Router::new().route(
+            "/v1/models",
+            get(|request: Request| async move {
+                assert_eq!(
+                    request.headers().get("authorization").unwrap(),
+                    "Bearer sk-test-admin"
+                );
+                Json(json!({
+                    "data": [
+                        {"id": "model-z"},
+                        {"id": " model-a "},
+                        {"id": "model-z"},
+                        {"missing": "id"},
+                        {"id": ""}
+                    ]
+                }))
+            }),
+        ))
+        .await;
+
+        let first = provisioner.list_models().await.unwrap();
+        let second = provisioner.list_models().await.unwrap();
+        assert_eq!(
+            first
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["model-a", "model-z"]
+        );
+        assert_eq!(first.source_revision, second.source_revision);
+        assert!(first.source_revision.is_some());
+    }
+
+    #[tokio::test]
+    async fn model_discovery_classifies_authentication_failures() {
+        let provisioner = provisioner(Router::new().route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": {"message": "bad sk-test-admin"}})),
+                )
+                    .into_response()
+            }),
+        ))
+        .await;
+
+        let error = provisioner.list_models().await.unwrap_err();
+        assert!(matches!(error, ProvisionerError::DiscoveryAuth(_)));
+        assert!(!error.to_string().contains("sk-test-admin"));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_rejects_malformed_catalogs() {
+        let provisioner = provisioner(
+            Router::new().route("/v1/models", get(|| async { Json(json!({"models": []})) })),
+        )
+        .await;
+        assert!(matches!(
+            provisioner.list_models().await.unwrap_err(),
+            ProvisionerError::DiscoveryResponse(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_classifies_upstream_failures() {
+        let provisioner = provisioner(Router::new().route(
+            "/v1/models",
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        ))
+        .await;
+        assert!(matches!(
+            provisioner.list_models().await.unwrap_err(),
+            ProvisionerError::Unavailable(_)
+        ));
     }
 }

@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import https from "node:https";
 import { loginAsAdmin } from "../support/dashboard.js";
+import { enableGateway } from "../support/governance.js";
 
 const dashboard = process.env.E2E_DASHBOARD_URL ?? "http://127.0.0.1:3000";
 const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
@@ -278,13 +279,7 @@ test.describe.serial("dashboard table filtering", () => {
     const config = await configResponse.json() as { revision: string; managed_yaml: string };
     if (!/^gateway:\s*$/m.test(config.managed_yaml)) {
       const managedConfig = YAML.parse(config.managed_yaml);
-      managedConfig.gateway = { type: "litellm" };
-      managedConfig.required_capabilities = Array.from(
-        new Set([
-          ...(managedConfig.required_capabilities ?? []),
-          "gateway_inference_jwt",
-        ]),
-      );
+      enableGateway(managedConfig);
       const managedYaml = YAML.stringify(managedConfig);
       const updateResponse = await adminPage.request.put(`${control}/admin/governance-config`, {
         data: { base_revision: config.revision, managed_yaml: managedYaml },

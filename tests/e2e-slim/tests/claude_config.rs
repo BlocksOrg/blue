@@ -9,7 +9,10 @@
 
 mod common;
 
-use common::{assert_example_skill_materialized, assert_governed_model, assert_mcp_registered};
+use common::{
+    assert_claude_catalog, assert_example_skill_materialized, assert_governed_model,
+    assert_mcp_registered,
+};
 use e2e_slim::AgentSelection;
 
 #[test]
@@ -28,6 +31,7 @@ fn claude_managed_config_is_written() {
     home.blue().args(["apply", "--yes"]).assert().success();
 
     assert_governed_model(&home, "claude", "claude-sonnet-5");
+    assert_claude_catalog(&home, &["claude-sonnet-5"]);
     assert_mcp_registered(&home, "claude");
     assert_example_skill_materialized(&home, "claude");
 }

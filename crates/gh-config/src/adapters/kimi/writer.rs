@@ -27,6 +27,7 @@ pub fn write(
     let runtime = crate::managed_runtime_dir(home).join("kimi");
     let path = runtime.join("config.toml");
     let mut table = plan.read_toml_table(&source_path)?;
+    let mut gateway_catalog = None;
 
     if let Some(model) = &policy.managed_config.model {
         table.insert("default_model".into(), Toml::String(model.clone()));
@@ -40,12 +41,30 @@ pub fn write(
         table.remove("default_yolo");
     }
     if let Some(w) = wiring {
-        let effective_model = policy.managed_config.model.clone().or_else(|| {
-            table
-                .get("default_model")
-                .and_then(Toml::as_str)
-                .map(str::to_owned)
-        });
+        let mut catalog = Vec::new();
+        for model in policy.gateway_models.iter().map(|model| model.trim()) {
+            if !model.is_empty() && !catalog.iter().any(|existing| existing == model) {
+                catalog.push(model.to_owned());
+            }
+        }
+        if catalog.is_empty() {
+            return Err(GhError::config(
+                "gateway-mode Kimi policy requires at least one gateway_models entry",
+            ));
+        }
+        let effective_model = policy
+            .managed_config
+            .model
+            .clone()
+            .or_else(|| catalog.first().cloned());
+        if effective_model
+            .as_ref()
+            .is_some_and(|selected| !catalog.iter().any(|model| model == selected))
+        {
+            return Err(GhError::config(
+                "Kimi selected model must be present in gateway_models",
+            ));
+        }
         // kimi-code resolves the wire transport from the provider `type`
         // (`openai` vs `openai_responses`). The model-alias `protocol` field
         // only accepts the literal "anthropic": kimi-code 0.20.x–0.31.x hard-
@@ -59,8 +78,10 @@ pub fn write(
             Some("responses" | "openai_responses") => "openai_responses",
             _ => "openai",
         };
-        // Point the selected model at the governed provider.
-        if let Some(model) = effective_model {
+        // Replace the native catalogs so the gateway picker exposes only the
+        // ordered policy assignment, all routed through the governed provider.
+        let mut models = toml::map::Map::new();
+        for model in &catalog {
             let mut model_entry = toml::map::Map::new();
             model_entry.insert("provider".into(), Toml::String(GOVERNED_PROVIDER.into()));
             model_entry.insert("model".into(), Toml::String(model.clone()));
@@ -72,19 +93,26 @@ pub fn write(
                 .filter(|value| *value > 0)
                 .unwrap_or(262_144);
             model_entry.insert("max_context_size".into(), Toml::Integer(max_context_size));
-            upsert_subtable(&mut table, "models", model, Toml::Table(model_entry));
+            models.insert(model.clone(), Toml::Table(model_entry));
         }
+        table.insert("models".into(), Toml::Table(models));
+        table.insert(
+            "default_model".into(),
+            Toml::String(effective_model.expect("non-empty catalog has a fallback")),
+        );
 
         let mut provider = toml::map::Map::new();
         provider.insert("type".into(), Toml::String(provider_type.into()));
         provider.insert("base_url".into(), Toml::String(w.base_url.clone()));
         provider.insert("api_key".into(), Toml::String(w.token.clone()));
-        upsert_subtable(
-            &mut table,
-            "providers",
-            GOVERNED_PROVIDER.into(),
-            Toml::Table(provider),
+        table.insert(
+            "providers".into(),
+            Toml::Table(singleton_table(
+                GOVERNED_PROVIDER.into(),
+                Toml::Table(provider),
+            )),
         );
+        gateway_catalog = Some(catalog);
     }
 
     let mut hooks = table
@@ -109,8 +137,7 @@ pub fn write(
     if !hooks.is_empty() {
         table.insert("hooks".into(), Toml::Array(hooks));
     }
-    let body =
-        toml::to_string_pretty(&Toml::Table(table)).map_err(|e| GhError::Serde(e.to_string()))?;
+    let body = serialize_config(table, gateway_catalog.as_deref())?;
     plan.write(&path, body)?;
 
     // MCP → the isolated KIMI_CODE_HOME, seeded from the user's native file.
@@ -256,19 +283,51 @@ fn migrate_legacy_hook(
     plan.write(path, body)
 }
 
-/// Insert `value` at `parent.key`, creating the parent table if needed.
-fn upsert_subtable(
-    table: &mut toml::map::Map<String, Toml>,
-    parent: &str,
-    key: String,
-    value: Toml,
-) {
-    let entry = table
-        .entry(parent.to_string())
-        .or_insert_with(|| Toml::Table(toml::map::Map::new()));
-    if let Toml::Table(t) = entry {
-        t.insert(key, value);
+fn serialize_config(
+    mut table: toml::map::Map<String, Toml>,
+    gateway_catalog: Option<&[String]>,
+) -> Result<String, GhError> {
+    let Some(catalog) = gateway_catalog else {
+        return toml::to_string_pretty(&Toml::Table(table))
+            .map_err(|error| GhError::Serde(error.to_string()));
+    };
+
+    let mut models = table
+        .remove("models")
+        .and_then(|value| value.as_table().cloned())
+        .unwrap_or_default();
+    let providers = table.remove("providers");
+    let mut body = toml::to_string_pretty(&Toml::Table(table))
+        .map_err(|error| GhError::Serde(error.to_string()))?;
+    for model in catalog {
+        let entry = models
+            .remove(model)
+            .expect("every gateway catalog model has a generated entry");
+        let fragment = Toml::Table(singleton_table(
+            "models".into(),
+            Toml::Table(singleton_table(model.clone(), entry)),
+        ));
+        body.push('\n');
+        body.push_str(
+            &toml::to_string_pretty(&fragment)
+                .map_err(|error| GhError::Serde(error.to_string()))?,
+        );
     }
+    if let Some(providers) = providers {
+        body.push('\n');
+        let providers = Toml::Table(singleton_table("providers".into(), providers));
+        body.push_str(
+            &toml::to_string_pretty(&providers)
+                .map_err(|error| GhError::Serde(error.to_string()))?,
+        );
+    }
+    Ok(body)
+}
+
+fn singleton_table(key: String, value: Toml) -> toml::map::Map<String, Toml> {
+    let mut table = toml::map::Map::new();
+    table.insert(key, value);
+    table
 }
 
 fn plan_skills(
@@ -320,7 +379,7 @@ mod tests {
         std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
         std::fs::write(
             home.join(".kimi-code/config.toml"),
-            "personal = true\nhooks = [{ event = \"SessionEnd\", command = \"my-hook\" }, { event = \"SessionEnd\", command = \"harness session-upload kimi\" }]\n[providers.personal]\ntype = \"openai\"\n",
+            "personal = true\nhooks = [{ event = \"SessionEnd\", command = \"my-hook\" }, { event = \"SessionEnd\", command = \"harness session-upload kimi\" }]\n[models.personal]\nprovider = \"personal\"\nmodel = \"personal\"\nmax_context_size = 4096\n[providers.personal]\ntype = \"openai\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -366,6 +425,10 @@ mod tests {
             config["providers"]["personal"]["type"].as_str(),
             Some("openai")
         );
+        assert_eq!(
+            config["models"]["personal"]["provider"].as_str(),
+            Some("personal")
+        );
         assert_eq!(config["default_model"].as_str(), Some("kimi-governed"));
         assert_eq!(config["default_permission_mode"].as_str(), Some("yolo"));
         assert!(config.get("default_yolo").is_none());
@@ -379,13 +442,13 @@ mod tests {
     }
 
     #[test]
-    fn global_gateway_preserves_an_unmanaged_default_model() {
+    fn gateway_replaces_native_catalog_preserves_assignment_order_and_uses_first_fallback() {
         let home =
             std::env::temp_dir().join(format!("gh-kimi-global-gateway-{}", std::process::id()));
         std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
         std::fs::write(
             home.join(".kimi-code/config.toml"),
-            "default_model = \"personal-default\"\n",
+            "default_model = \"personal-default\"\npersonal = true\n[models.native]\nprovider = \"personal\"\nmodel = \"native\"\nmax_context_size = 1000\n[providers.personal]\ntype = \"openai\"\nbase_url = \"https://native.example\"\napi_key = \"native-secret\"\n",
         )
         .unwrap();
         let wiring = GatewayWiring {
@@ -395,28 +458,49 @@ mod tests {
             auth: AuthPlacement::InFile,
         };
 
-        test_write(&home, &HarnessPolicy::default(), Some(&wiring), None).unwrap();
-        let config = std::fs::read_to_string(home.join(".config/blue/runtime/kimi/config.toml"))
-            .unwrap()
-            .parse::<Toml>()
-            .unwrap();
-        assert_eq!(config["default_model"].as_str(), Some("personal-default"));
+        let policy = HarnessPolicy {
+            gateway_models: vec![
+                "z-policy-first".into(),
+                "a-policy-second".into(),
+                "z-policy-first".into(),
+            ],
+            ..HarnessPolicy::default()
+        };
+        test_write(&home, &policy, Some(&wiring), None).unwrap();
+        let body =
+            std::fs::read_to_string(home.join(".config/blue/runtime/kimi/config.toml")).unwrap();
+        let config = body.parse::<Toml>().unwrap();
+        assert_eq!(config["default_model"].as_str(), Some("z-policy-first"));
+        assert_eq!(config["personal"].as_bool(), Some(true));
+        assert_eq!(config["models"].as_table().unwrap().len(), 2);
+        assert!(config["models"].get("native").is_none());
+        assert_eq!(config["providers"].as_table().unwrap().len(), 1);
+        assert!(config["providers"].get("personal").is_none());
         assert_eq!(
-            config["models"]["personal-default"]["provider"].as_str(),
+            config["models"]["z-policy-first"]["provider"].as_str(),
             Some("governed")
+        );
+        assert_eq!(
+            config["models"]["a-policy-second"]["provider"].as_str(),
+            Some("governed")
+        );
+        assert!(
+            body.find("[models.z-policy-first]").unwrap()
+                < body.find("[models.a-policy-second]").unwrap(),
+            "generated model tables must retain policy order"
         );
         // The model alias must NOT carry a `protocol` field: kimi-code's schema
         // only accepts `protocol = "anthropic"`, and 0.20.x–0.31.x salvage-drop
         // an alias that declares any other value. The wire transport is carried
         // by the provider `type` instead (asserted below).
         assert!(
-            config["models"]["personal-default"]
+            config["models"]["z-policy-first"]
                 .as_table()
                 .is_some_and(|entry| !entry.contains_key("protocol")),
             "model alias must not declare `protocol` (kimi-code only allows \"anthropic\")"
         );
         assert_eq!(
-            config["models"]["personal-default"]["max_context_size"].as_integer(),
+            config["models"]["z-policy-first"]["max_context_size"].as_integer(),
             Some(262_144)
         );
         assert_eq!(
@@ -427,6 +511,30 @@ mod tests {
             config["providers"]["governed"]["base_url"].as_str(),
             Some("https://inference.example")
         );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn gateway_rejects_empty_catalog_and_unassigned_explicit_default() {
+        let home = std::env::temp_dir().join(format!("gh-kimi-invalid-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
+        let wiring = GatewayWiring {
+            base_url: "https://inference.example".into(),
+            token: "test-inference-jwt".into(),
+            wire_api: None,
+            auth: AuthPlacement::InFile,
+        };
+
+        let empty = test_write(&home, &HarnessPolicy::default(), Some(&wiring), None).unwrap_err();
+        assert!(empty.to_string().contains("requires at least one gateway_models"));
+
+        let policy = HarnessPolicy {
+            gateway_models: vec!["assigned".into()],
+            managed_config: serde_json::from_value(json!({ "model": "unassigned" })).unwrap(),
+            ..HarnessPolicy::default()
+        };
+        let unassigned = test_write(&home, &policy, Some(&wiring), None).unwrap_err();
+        assert!(unassigned.to_string().contains("must be present in gateway_models"));
         let _ = std::fs::remove_dir_all(home);
     }
 }

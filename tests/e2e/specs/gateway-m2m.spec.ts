@@ -12,6 +12,7 @@ import https from "node:https";
 import YAML from "yaml";
 import { collect, prepareClient, readClientFile, runCli, spawnCli, waitForOutput } from "../support/cli.js";
 import { loginAsAdmin } from "../support/dashboard.js";
+import { enableGateway } from "../support/governance.js";
 
 // The inference proxy authenticates to the Control API's internal resolver with
 // a short-lived OAuth2 client-credentials (M2M) token that it caches and
@@ -105,9 +106,9 @@ async function mintInferenceToken(
   const config = await page.request.get(`${CONTROL}/governance-config`, {
     headers: {
       authorization: `Bearer ${session.token}`,
-      "x-blue-contract-version": "3",
+      "x-blue-contract-version": "4",
       "x-blue-capabilities":
-        "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,tenant_client_version_pin",
+        "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,gateway_model_catalog,tenant_client_version_pin",
     },
   });
   expect(config.status(), await config.text()).toBe(200);
@@ -220,13 +221,7 @@ test.describe.serial("Gateway M2M auth", () => {
     expect(currentResponse.status(), await currentResponse.text()).toBe(200);
     const current = await currentResponse.json();
     const managedConfig = YAML.parse(String(current.managed_yaml));
-    managedConfig.gateway = { type: "litellm" };
-    managedConfig.required_capabilities = Array.from(
-      new Set([
-        ...(managedConfig.required_capabilities ?? []),
-        "gateway_inference_jwt",
-      ]),
-    );
+    enableGateway(managedConfig);
     const managedYaml = YAML.stringify(managedConfig);
     const updateResponse = await page.request.put(`${CONTROL}/admin/governance-config`, {
       data: { base_revision: current.revision, managed_yaml: managedYaml },
@@ -263,9 +258,9 @@ test.describe.serial("Gateway M2M auth", () => {
       {
         headers: {
           authorization: `Bearer ${session.token}`,
-          "x-blue-contract-version": "3",
+          "x-blue-contract-version": "4",
           "x-blue-capabilities":
-            "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,tenant_client_version_pin",
+            "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,gateway_model_catalog,tenant_client_version_pin",
         },
       },
     );

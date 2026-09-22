@@ -72,9 +72,10 @@ gateway:
 
 governance:
   revision: "e2e-slim-gateway-1"
-  contract_version: 3
+  contract_version: 4
   required_capabilities:
     - gateway_inference_jwt
+    - gateway_model_catalog
     - adapter_intervals
     - compiled_harness_registry
     - transactional_reconcile
@@ -102,6 +103,7 @@ governance:
     presign_url: http://127.0.0.1:8080/session-uploads/presign
   harnesses:
     codex:
+      gateway_models: [gpt-5.6-terra]
       managed_config:
         model: gpt-5.6-terra
         reasoning_effort: low
@@ -112,17 +114,19 @@ governance:
           command: node
           args: ["/tmp/blue-e2e/mcp-server.mjs"]
     claude:
+      gateway_models: [claude-sonnet-5]
       version_requirement: ">=2.0.12, <2.1.253"
       managed_config:
         model: claude-sonnet-5
         auto_approve: true
       mcp: *e2e_mcp
     kimi:
+      gateway_models: [kimi-k2.6, kimi-catalog-secondary]
       managed_config:
-        model: kimi-k2.6
         auto_approve: true
       mcp: *e2e_mcp
     opencode:
+      gateway_models: [gpt-5.6-terra]
       managed_config:
         model: gpt-5.6-terra
       mcp: *e2e_mcp

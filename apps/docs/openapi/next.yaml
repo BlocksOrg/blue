@@ -603,6 +603,92 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ManagedPackage" }
 
+  /admin/gateway/models:
+    get:
+      operationId: listGatewayModels
+      tags: [Administration]
+      summary: Read discovered gateway models and per-harness assignments
+      responses:
+        "200":
+          description: Last-known catalog, discovery status, and revisioned assignments
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GatewayModelsResource" }
+        "404": { description: Gateway mode is disabled }
+
+  /admin/gateway/models/refresh:
+    post:
+      operationId: refreshGatewayModels
+      tags: [Administration]
+      summary: Refresh the gateway model catalog immediately
+      responses:
+        "200":
+          description: Refreshed model resource
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GatewayModelsResource" }
+        "409": { description: A refresh is already running }
+        "501": { description: The selected provisioner does not support discovery }
+        "502": { description: Gateway discovery failed; last-known state was retained }
+
+  /admin/gateway/models/acknowledge:
+    post:
+      operationId: acknowledgeGatewayModel
+      tags: [Administration]
+      summary: Acknowledge the current metadata fingerprint for a model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model_id, fingerprint]
+              properties:
+                model_id: { type: string }
+                fingerprint: { type: string }
+      responses:
+        "200": { description: Fingerprint acknowledged }
+        "409": { description: Model or fingerprint changed concurrently }
+
+  /admin/gateway/models/harnesses/{harness}:
+    put:
+      operationId: updateHarnessGatewayModels
+      tags: [Administration]
+      summary: Save one harness's assigned models and optional default
+      parameters:
+        - name: harness
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [base_revision, gateway_models]
+              properties:
+                base_revision: { type: string }
+                gateway_models:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: { type: string, minLength: 1 }
+                default_model: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Saved governance revision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revision, harness]
+                properties:
+                  revision: { type: string }
+                  harness: { type: string }
+        "400": { description: Assignment or default is invalid }
+        "409": { description: Base revision is stale }
+
   /admin/package-source/inspect:
     post:
       operationId: inspectManagedPackageSource
@@ -1549,6 +1635,57 @@ components:
             - $ref: "#/components/schemas/GatewayRuntimeChecks"
             - type: "null"
 
+    GatewayModelState:
+      type: string
+      enum: [available, changed, removed, unknown]
+
+    GatewayDiscoveredModel:
+      type: object
+      required: [id, metadata, state, assigned_to]
+      properties:
+        id: { type: string }
+        display_name: { type: [string, "null"] }
+        metadata: { type: object, additionalProperties: true }
+        fingerprint: { type: [string, "null"] }
+        state: { $ref: "#/components/schemas/GatewayModelState" }
+        assigned_to: { type: array, items: { type: string } }
+        first_seen_at: { type: [string, "null"], format: date-time }
+        last_seen_at: { type: [string, "null"], format: date-time }
+        unavailable_since: { type: [string, "null"], format: date-time }
+
+    GatewayHarnessModels:
+      type: object
+      required: [key, label, exposure, gateway_models]
+      properties:
+        key: { type: string }
+        label: { type: string }
+        exposure: { type: string, enum: [catalog, selected_only] }
+        gateway_models: { type: array, items: { type: string } }
+        default_model: { type: [string, "null"] }
+
+    GatewayModelSync:
+      type: object
+      required: [stale]
+      properties:
+        last_refresh_at: { type: [string, "null"], format: date-time }
+        last_successful_refresh_at: { type: [string, "null"], format: date-time }
+        source_revision: { type: [string, "null"] }
+        latest_error: { type: [string, "null"] }
+        latest_error_at: { type: [string, "null"], format: date-time }
+        discovery_supported: { type: [boolean, "null"] }
+        stale: { type: boolean }
+
+    GatewayModelsResource:
+      type: object
+      required: [revision, gateway_type, refresh_interval_seconds, sync, models, harnesses]
+      properties:
+        revision: { type: string }
+        gateway_type: { type: string }
+        refresh_interval_seconds: { type: integer, minimum: 30 }
+        sync: { $ref: "#/components/schemas/GatewayModelSync" }
+        models: { type: array, items: { $ref: "#/components/schemas/GatewayDiscoveredModel" } }
+        harnesses: { type: array, items: { $ref: "#/components/schemas/GatewayHarnessModels" } }
+
     GatewayProxyHealthResponse:
       type: object
       required: [status, checked_at, latency_ms]
@@ -1778,6 +1915,11 @@ components:
       properties:
         version_requirement: { type: string, description: Semver range required for the locally installed harness }
         allow_unverified_versions: { type: boolean, default: false, description: Permit matching releases beyond Blue's certified ceiling; requires version_requirement }
+        gateway_models:
+          type: array
+          uniqueItems: true
+          description: Exact gateway model IDs assigned to this harness; ignored in direct mode.
+          items: { type: string, minLength: 1 }
         managed_config: { $ref: "#/components/schemas/ManagedConfig" }
         mcp:
           type: array

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use gh_gateway_provisioner::{
-    EnsureRequest, GatewayProvisioner, ProvisionedCredential, ProvisionerError, RevokeRequest,
-    RevokeResponse,
+    EnsureRequest, GatewayProvisioner, ModelCatalog, ProvisionedCredential, ProvisionerError,
+    RevokeRequest, RevokeResponse,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -245,6 +245,9 @@ fn map_error(error: WireError) -> ProvisionerError {
         "credential_invalid" => ProvisionerError::CredentialInvalid(error.message),
         "unavailable" => ProvisionerError::Unavailable(error.message),
         "rejected" => ProvisionerError::Rejected(error.message),
+        "unsupported" | "discovery_unsupported" => ProvisionerError::DiscoveryUnsupported,
+        "discovery_auth" => ProvisionerError::DiscoveryAuth(error.message),
+        "discovery_response" => ProvisionerError::DiscoveryResponse(error.message),
         _ => unavailable("provisioner returned an unsupported error code"),
     }
 }
@@ -274,6 +277,9 @@ impl GatewayProvisioner for ExecutableGatewayProvisioner {
     }
     async fn revoke(&self, request: RevokeRequest) -> Result<RevokeResponse, ProvisionerError> {
         self.invoke("revoke", request).await
+    }
+    async fn list_models(&self) -> Result<ModelCatalog, ProvisionerError> {
+        self.invoke("list_models", serde_json::json!({})).await
     }
 }
 
@@ -359,6 +365,7 @@ mod tests {
             policy_revision: Some("v1".into()),
             timeout_seconds: 1,
             max_concurrency: 8,
+            model_catalog_refresh_seconds: 300,
         };
         assert!(ExecutableGatewayProvisioner::load(&config).await.is_ok());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -454,6 +461,9 @@ mod tests {
                     assert_eq!(message, "public");
                     502
                 }
+                ProvisionerError::DiscoveryUnsupported
+                | ProvisionerError::DiscoveryAuth(_)
+                | ProvisionerError::DiscoveryResponse(_) => 502,
             };
             assert_eq!(actual, expected_status);
         }

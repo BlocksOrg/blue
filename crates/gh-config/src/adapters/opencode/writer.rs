@@ -13,7 +13,6 @@ use crate::HarnessWrite;
 
 const GOVERNED_PROVIDER: &str = "governed";
 const GATEWAY_TOKEN_ENV: &str = "BLUE_OPENCODE_GATEWAY_TOKEN";
-const ADDITIONAL_GOVERNED_MODELS: &[&str] = &["openai/gpt-5.6-sol"];
 const SCHEMA: &str = "https://opencode.ai/config.json";
 
 pub fn write(
@@ -32,6 +31,22 @@ pub fn write(
     root.insert("$schema".to_string(), json!(SCHEMA));
 
     let catalog = governed_catalog(policy);
+    if wiring.is_some() && catalog.is_empty() {
+        return Err(GhError::config(
+            "gateway-mode OpenCode policy requires at least one gateway_models entry",
+        ));
+    }
+    if wiring.is_some()
+        && policy
+            .managed_config
+            .model
+            .as_ref()
+            .is_some_and(|selected| !catalog.iter().any(|model| model == selected))
+    {
+        return Err(GhError::config(
+            "OpenCode selected model must be present in gateway_models",
+        ));
+    }
     let mut warnings = Vec::new();
     // In gateway mode the model is always pinned: `OPENCODE_CONFIG_CONTENT`
     // merges over the user's global config, so leaving `model` unset lets a
@@ -140,33 +155,19 @@ pub fn write(
     })
 }
 
-/// Provider-local model IDs the governed provider advertises: an
-/// admin-supplied `managed_config.available_models` when present (the gateway
-/// is the only thing that knows what it actually serves), else the built-in
-/// default. Strip one optional `governed/` prefix and ignore empty IDs.
-/// Never empty, so the provider block is always renderable.
+/// Exact provider-local IDs assigned by the control plane. Strip one optional
+/// legacy `governed/` prefix and normalize duplicates defensively.
 fn governed_catalog(policy: &HarnessPolicy) -> Vec<String> {
-    let configured = policy
-        .managed_config
-        .extra
-        .get("available_models")
-        .and_then(Value::as_array)
-        .map(|models| {
-            models
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|model| model.strip_prefix("governed/").unwrap_or(model))
-                .filter(|model| !model.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .filter(|models| !models.is_empty());
-    configured.unwrap_or_else(|| {
-        ADDITIONAL_GOVERNED_MODELS
-            .iter()
-            .map(|model| (*model).to_owned())
-            .collect()
-    })
+    let mut models = policy
+        .gateway_models
+        .iter()
+        .map(|model| model.strip_prefix("governed/").unwrap_or(model).trim())
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::BTreeSet::new();
+    models.retain(|model| seen.insert(model.clone()));
+    models
 }
 
 /// The user's native model, but only when the gateway is known to serve it.
@@ -437,7 +438,8 @@ mod tests {
     fn gateway_provider_has_runtime_models_and_native_auth_shape() {
         let home = std::env::temp_dir().join(format!("gh-opencode-gateway-{}", std::process::id()));
         let policy: HarnessPolicy = serde_json::from_value(json!({
-            "managed_config": { "model": "e2e/model" }
+            "managed_config": { "model": "e2e/model" },
+            "gateway_models": ["e2e/model", "openai/gpt-5.6-sol"]
         }))
         .unwrap();
         let wiring = gh_gateway::GatewayWiring {
@@ -517,8 +519,16 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, serde_json::to_vec(&json!({ "model": model })).unwrap()).unwrap();
         }
-        let policy: HarnessPolicy =
-            serde_json::from_value(json!({ "managed_config": managed_config })).unwrap();
+        let mut managed_config = managed_config;
+        let gateway_models = managed_config
+            .as_object_mut()
+            .and_then(|config| config.remove("available_models"))
+            .unwrap_or_else(|| json!(["openai/gpt-5.6-sol"]));
+        let policy: HarnessPolicy = serde_json::from_value(json!({
+            "managed_config": managed_config,
+            "gateway_models": gateway_models
+        }))
+        .unwrap();
         let report = test_write(&home, &policy, Some(&gateway_wiring()), None).unwrap();
         let managed: Value = serde_json::from_slice(
             &std::fs::read(home.join(".config/blue/runtime/opencode/opencode.json")).unwrap(),
@@ -621,11 +631,11 @@ mod tests {
     }
 
     #[test]
-    fn policy_catalog_discards_empty_and_non_string_entries() {
+    fn policy_catalog_discards_empty_entries() {
         let (_, managed) = gateway_write(
             "gateway-mixed-catalog",
             None,
-            json!({ "available_models": ["", "governed/", null, 42, "governed/org/fast", "org/slow"] }),
+            json!({ "available_models": ["", "governed/", "governed/org/fast", "org/slow"] }),
         );
         assert_eq!(managed["model"], "governed/org/fast");
         assert_eq!(
@@ -635,30 +645,17 @@ mod tests {
                 "org/slow": { "name": "org/slow" }
             })
         );
-
-        let (_, fallback) = gateway_write(
-            "gateway-invalid-catalog",
-            None,
-            json!({ "available_models": ["", "governed/", null, 42] }),
-        );
-        assert_eq!(fallback["model"], "governed/openai/gpt-5.6-sol");
-        assert_eq!(
-            fallback["provider"]["governed"]["models"],
-            json!({ "openai/gpt-5.6-sol": { "name": "openai/gpt-5.6-sol" } })
-        );
     }
 
     #[test]
     fn policy_catalog_strips_one_prefix_and_preserves_order_and_duplicates() {
         let policy: HarnessPolicy = serde_json::from_value(json!({
-            "managed_config": {
-                "available_models": ["governed/org/first", "governed/governed/legacy", "org/first"]
-            }
+            "gateway_models": ["governed/org/first", "governed/governed/legacy", "org/first"]
         }))
         .unwrap();
         assert_eq!(
             governed_catalog(&policy),
-            ["org/first", "governed/legacy", "org/first"]
+            ["org/first", "governed/legacy"]
         );
     }
 
@@ -667,7 +664,7 @@ mod tests {
         let (report, managed) = gateway_write(
             "gateway-managed",
             Some("openai/gpt-5.6-sol"),
-            json!({ "model": "org/pinned", "available_models": ["org/fast"] }),
+            json!({ "model": "org/pinned", "available_models": ["org/fast", "org/pinned"] }),
         );
 
         assert_eq!(managed["model"], "governed/org/pinned");

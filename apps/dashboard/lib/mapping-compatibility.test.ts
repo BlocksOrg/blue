@@ -25,6 +25,7 @@ const claude: HarnessMetadata = {
   description: "",
   binary_names: ["claude"],
   install_command_template: "",
+  gateway_model_exposure: "catalog",
   capabilities: [],
   component_rules: openRules,
   generations: [
@@ -49,6 +50,19 @@ const claude: HarnessMetadata = {
     {
       profile: "claude-v2_0_12",
       introduced: "2.0.12",
+      before: "2.1.242",
+      verified_before: "2.1.242-0",
+      lifecycle: "supported",
+      capabilities: ["mcp", "packages", "skills", "plugins", "hooks", "helpers", "gateway"],
+      component_rules: {
+        agents_require_plugin: true,
+        hooks_require_plugin: true,
+        hooks_as_plugin_modules: false,
+      },
+    },
+    {
+      profile: "claude-v2_1_242",
+      introduced: "2.1.242",
       before: null,
       verified_before: "2.1.253-0",
       lifecycle: "supported",
