@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.1](https://github.com/BlocksOrg/blue/compare/v0.2.0...v0.2.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* **ci:** stabilize cross-platform e2e checks ([#170](https://github.com/BlocksOrg/blue/issues/170)) ([1a538aa](https://github.com/BlocksOrg/blue/commit/1a538aaf03639f41dce42873429ef67062460d9f))
+* **cli:** clarify connected tenant output ([#166](https://github.com/BlocksOrg/blue/issues/166)) ([13c5595](https://github.com/BlocksOrg/blue/commit/13c55958980c3e6c6e03cf648b3baca51b8cf37f))
+* **cli:** clear startup screen before agent handoff ([#164](https://github.com/BlocksOrg/blue/issues/164)) ([7690742](https://github.com/BlocksOrg/blue/commit/769074257be42f31052a50b234dc943594472220))
+* **dashboard:** redirect authenticated login visits ([#168](https://github.com/BlocksOrg/blue/issues/168)) ([a8ec252](https://github.com/BlocksOrg/blue/commit/a8ec252fa3f5d9e2238474426ef85f630287a9f4))
+
 ## [0.2.0](https://github.com/BlocksOrg/blue/compare/v0.1.0...v0.2.0) (2026-09-17)
 
 
