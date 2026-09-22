@@ -2225,6 +2225,13 @@ pub fn status(strict: bool) -> Result<()> {
     Ok(())
 }
 
+fn tenant_version_text(config: &GovernanceConfig) -> &str {
+    config
+        .required_client_version
+        .as_deref()
+        .unwrap_or("not reported")
+}
+
 pub(crate) fn status_text(strict: bool) -> Result<String> {
     let (cfg, client) = load_client()?;
     let session = session_for(&cfg)?;
@@ -2270,6 +2277,10 @@ pub(crate) fn status_text(strict: bool) -> Result<String> {
     )];
     if cfg.has_http_service() {
         lines.push(format!("Tenant URL     : {}", cfg.service.url));
+        lines.push(format!(
+            "Tenant version : {}",
+            tenant_version_text(&desired)
+        ));
     }
     lines.extend([
         format!("Desired config : {}", desired.revision),
@@ -5397,6 +5408,15 @@ mod tests {
             telemetry: None,
             required: false,
         }
+    }
+
+    #[test]
+    fn tenant_version_uses_the_remote_client_pin() {
+        let mut config = daemon_test_config("r1");
+        assert_eq!(tenant_version_text(&config), "not reported");
+
+        config.required_client_version = Some("1.2.3".to_owned());
+        assert_eq!(tenant_version_text(&config), "1.2.3");
     }
 
     fn test_inventory_entry(name: &str, path: PathBuf) -> HarnessInventoryEntry {

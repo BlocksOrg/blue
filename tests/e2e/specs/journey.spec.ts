@@ -541,6 +541,7 @@ esac
       expect(result.code, `${args.join(" ")}\n${result.stderr}`).toBe(0);
       if (args[0] === "status") {
         expect(result.stdout).toContain(`Tenant URL     : ${control}`);
+        expect(result.stdout).toContain("Tenant version : ");
       }
       if (args[0] === "doctor") {
         expect(result.stdout).toContain(`config source : ${control}/governance-config`);
