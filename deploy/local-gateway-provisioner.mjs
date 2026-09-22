@@ -189,13 +189,34 @@ async function revoke(request) {
   return { revoked: true };
 }
 
+async function listModels() {
+  const payload = await litellm("GET", "/v1/models");
+  if (!Array.isArray(payload?.data)) {
+    throw new ProvisionerError("discovery_response", "LiteLLM response has no data array");
+  }
+  const ids = [...new Set(
+    payload.data
+      .map((model) => typeof model?.id === "string" ? model.id.trim() : "")
+      .filter(Boolean),
+  )].sort();
+  const sourceRevision = createHash("sha256")
+    .update(ids.map((id) => `${id}\0`).join(""))
+    .digest("hex");
+  return {
+    models: ids.map((id) => ({ id })),
+    source_revision: sourceRevision,
+  };
+}
+
 try {
   const envelope = await readEnvelope();
   if (envelope.protocol_version !== PROTOCOL_VERSION) {
     throw new ProvisionerError("invalid_config", "unsupported protocol version");
   }
   const result =
-    envelope.operation === "ensure"
+    envelope.operation === "list_models"
+      ? await listModels()
+      : envelope.operation === "ensure"
       ? await ensure(envelope.request)
       : envelope.operation === "revoke"
         ? await revoke(envelope.request)

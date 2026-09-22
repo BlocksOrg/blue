@@ -7,11 +7,12 @@ import { gzipSync } from "node:zlib";
 import path from "node:path";
 import { collect, prepareClient, prepareEmptyClient, prepareRelocatedClient, readClientFile, relocatedEnv, runBareCliInPty, runCli, runCliWithInput, runCliWithoutHome, spawnCli, spawnCliInPty, stateRoot, waitForOutput } from "../support/cli.js";
 import { loginAsAdmin } from "../support/dashboard.js";
+import { enableGateway } from "../support/governance.js";
 import YAML from "yaml";
 
 const canonicalProfiles: Record<string, string> = {
   codex: "codex-v0_145_0",
-  claude: "claude-v2_0_12",
+  claude: "claude-v2_1_242",
   kimi: "kimi-v0_0_0",
   opencode: "opencode-v0_0_0",
 };
@@ -197,7 +198,7 @@ test.describe.serial("Blue deployment journey", () => {
     const original = await originalResponse.json();
     const gatewayConfig = YAML.parse(original.managed_yaml);
     gatewayConfig.harnesses.codex.managed_config.model = "gpt-e2e";
-    gatewayConfig.gateway = { type: "litellm" };
+    enableGateway(gatewayConfig);
     const gatewayResponse = await page.request.put(`${control}/admin/governance-config`, {
       data: {
         base_revision: original.revision,
@@ -1218,23 +1219,39 @@ esac
     const completion = collect(child);
     try {
       const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
-      const currentResponse = await page.request.get(`${control}/admin/harnesses/managed-configs`);
+      const currentResponse = await page.request.get(`${control}/admin/gateway/models`);
       expect(currentResponse.status()).toBe(200);
       const current = await currentResponse.json();
       const model = `gpt-daemon-${Date.now()}`;
-      const changed = String(current.configurations.claude).replace(/model:\s*[^\n]+/, `model: ${model}`);
-      const update = await page.request.put(`${control}/admin/harnesses/claude/managed-config`, {
+      const claude = current.harnesses.find((item: { key: string }) => item.key === "claude");
+      expect(claude.exposure).toBe("catalog");
+      const update = await page.request.put(`${control}/admin/gateway/models/harnesses/claude`, {
         data: {
           base_revision: current.revision,
-          managed_config_yaml: changed,
-          version_requirement: current.version_requirements.claude,
+          gateway_models: [...claude.gateway_models, model],
+          default_model: model,
         },
       });
       expect(update.status(), await update.text()).toBe(200);
-      await expect.poll(
-        () => readClientFile(home, ".config/blue/runtime/claude/settings.json"),
-        { timeout: 20_000 },
-      ).toContain(model);
+      await expect.poll(async () => {
+        const settings = JSON.parse(
+          await readClientFile(home, ".config/blue/runtime/claude/settings.json"),
+        );
+        return {
+          availableModels: settings.availableModels,
+          enforceAvailableModels: settings.enforceAvailableModels,
+          model: settings.model,
+          modelPicker: settings.modelPicker,
+        };
+      }, { timeout: 20_000 }).toEqual({
+        availableModels: [...claude.gateway_models, model],
+        enforceAvailableModels: true,
+        model,
+        modelPicker: {
+          options: [...claude.gateway_models, model].map((id: string) => ({ model: id, label: id })),
+          replaceBuiltInOptions: true,
+        },
+      });
     } finally {
       child.kill("SIGTERM");
     }
@@ -1252,21 +1269,19 @@ esac
     try {
       await waitForOutput(child, /Ctrl-\] Control/);
       const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
-      const currentResponse = await page.request.get(`${control}/admin/harnesses/managed-configs`);
+      const currentResponse = await page.request.get(`${control}/admin/gateway/models`);
       expect(currentResponse.status()).toBe(200);
       const current = await currentResponse.json();
-      const changed = String(current.configurations.codex).replace(
-        /model:\s*[^\n]+/,
-        `model: gpt-sse-${Date.now()}`,
-      );
+      const model = `gpt-sse-${Date.now()}`;
+      const codex = current.harnesses.find((item: { key: string }) => item.key === "codex");
       // Register before publishing the revision: the SSE event may arrive
       // before the mutation response on a fast local stack.
       const revisionNotice = waitForOutput(child, /New Blue policy/);
-      const update = await page.request.put(`${control}/admin/harnesses/codex/managed-config`, {
+      const update = await page.request.put(`${control}/admin/gateway/models/harnesses/codex`, {
         data: {
           base_revision: current.revision,
-          managed_config_yaml: changed,
-          version_requirement: current.version_requirements.codex,
+          gateway_models: [...codex.gateway_models, model],
+          default_model: model,
         },
       });
       expect(update.status(), await update.text()).toBe(200);
@@ -1339,7 +1354,9 @@ esac
     const historyBefore = await (await page.request.get(`${control}/admin/governance-config/revisions`)).json();
     const documents = ["conflict-a", "conflict-b"].map((suffix) => {
       const document = YAML.parse(original.managed_yaml);
-      document.harnesses.codex.managed_config.model = `gpt-${suffix}-${Date.now()}`;
+      const model = `gpt-${suffix}-${Date.now()}`;
+      document.harnesses.codex.managed_config.model = model;
+      document.harnesses.codex.gateway_models = [model];
       return YAML.stringify(document);
     });
 
@@ -1399,13 +1416,14 @@ esac
     await expect(page).toHaveURL(/\/harnesses$/);
     await page.getByRole("button", { name: "Actions for Codex" }).click();
     await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
-    const model = `gpt-dashboard-${Date.now()}`;
-    await page.getByLabel("Managed config YAML").fill(`model: ${model}\nreasoning_effort: low\napproval_policy: never\nsandbox_mode: workspace-write\n`);
+    const model = "gpt-e2e";
+    await page.getByLabel("Managed config YAML").fill(`model: ${model}\nreasoning_effort: high\napproval_policy: never\nsandbox_mode: workspace-write\n`);
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
     const launch = await runCli(home, ["codex", "--dashboard-check"]);
     expect(launch.code, launch.stderr).toBe(0);
     expect(await readClientFile(home, ".codex/blue.config.toml")).toContain(model);
+    expect(await readClientFile(home, ".codex/blue.config.toml")).toContain('model_reasoning_effort = "high"');
     expect(await readClientFile(home, "agent-log/codex.env")).toContain("check_for_update_on_startup=false");
 
     await page.getByRole("button", { name: "Actions for Codex" }).click();
@@ -1436,6 +1454,108 @@ esac
       },
     });
     expect(restoreResponse.status(), await restoreResponse.text()).toBe(200);
+  });
+
+  test("gateway model catalog assignments enforce editable catalogs and keep Codex read-only", async ({ page }) => {
+    await loginAsAdmin(page, { fresh: true });
+    const control = process.env.E2E_CONTROL_API_URL ?? "http://127.0.0.1:8080";
+    const snapshotResponse = await page.request.get(`${control}/admin/governance-config`);
+    expect(snapshotResponse.status(), await snapshotResponse.text()).toBe(200);
+    const snapshot = await snapshotResponse.json();
+
+    try {
+      const refreshed = await page.request.post(`${control}/admin/gateway/models/refresh`);
+      expect(refreshed.status(), await refreshed.text()).toBe(200);
+      const catalog = await refreshed.json();
+      expect(catalog.models.map((model: { id: string }) => model.id)).toEqual(expect.arrayContaining([
+        "e2e/model",
+        "e2e/alternate",
+        "gpt-e2e",
+      ]));
+      expect(catalog.sync.discovery_supported).toBe(true);
+
+      const kimiSaved = await page.request.put(`${control}/admin/gateway/models/harnesses/kimi`, {
+        data: {
+          base_revision: catalog.revision,
+          gateway_models: ["kimi-e2e", "kimi-e2e-secondary"],
+          default_model: null,
+        },
+      });
+      const kimiSavedBody = await kimiSaved.text();
+      expect(kimiSaved.status(), kimiSavedBody).toBe(200);
+      const kimiRevision = JSON.parse(kimiSavedBody).revision;
+
+      const saved = await page.request.put(`${control}/admin/gateway/models/harnesses/opencode`, {
+        data: {
+          base_revision: kimiRevision,
+          gateway_models: ["e2e/model", "e2e/alternate"],
+          default_model: "e2e/model",
+        },
+      });
+      expect(saved.status(), await saved.text()).toBe(200);
+
+      await page.goto("/gateway?tab=models");
+      await expect(page.getByRole("tab", { name: "Models" })).toBeVisible();
+      await expect(page.getByRole("tab", { name: "Discovery" })).toHaveAttribute("data-active", "");
+      await expect(page.getByText("Discovery status", { exact: true })).toBeVisible();
+
+      await page.getByRole("tab", { name: "Catalog" }).click();
+      await expect(page).toHaveURL(/tab=models.*models_tab=catalog/);
+      await expect(page.getByText("e2e/alternate", { exact: true }).first()).toBeVisible();
+
+      await page.getByRole("tab", { name: "Assignments" }).click();
+      await expect(page).toHaveURL(/tab=models.*models_tab=assignments/);
+      await page.setViewportSize({ width: 1280, height: 600 });
+      const codex = catalog.harnesses.find((item: { key: string }) => item.key === "codex");
+      const codexRow = page.getByRole("row").filter({ hasText: "Codex" });
+      await expect(codexRow).toContainText(String(codex.gateway_models.length));
+      await expect(codexRow).toContainText(codex.default_model ?? "Native fallback");
+      await expect(codexRow).toContainText("Selected only");
+      await expect(codexRow).toContainText("Full catalog assignment is unavailable for Codex.");
+      await expect(codexRow.getByRole("button", { name: "Edit Codex models" })).toBeDisabled();
+      for (const harness of ["Claude", "Kimi", "OpenCode"]) {
+        await expect(page.getByRole("button", { name: `Edit ${harness} models` })).toBeEnabled();
+      }
+      await page.getByRole("button", { name: "Edit OpenCode models" }).click();
+      await expect(page.getByRole("dialog")).toContainText("This agent exposes every assigned model");
+      await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Save assignments" })).toBeVisible();
+      const modelList = page.getByLabel("Available gateway models");
+      await expect(modelList).toHaveCSS("overflow-y", "auto");
+      expect(await modelList.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await page.getByRole("button", { name: "Cancel" }).click();
+
+      const launch = await runCli(home, ["opencode", "--catalog-check"]);
+      expect(launch.code, launch.stderr).toBe(0);
+      const opencode = JSON.parse(await readClientFile(home, ".config/blue/runtime/opencode/opencode.json"));
+      expect(Object.keys(opencode.provider.governed.models)).toEqual(expect.arrayContaining([
+        "e2e/model",
+        "e2e/alternate",
+      ]));
+
+      await mkdir(path.join(home, ".kimi-code"), { recursive: true });
+      await writeFile(
+        path.join(home, ".kimi-code", "config.toml"),
+        'default_model = "native-model"\n[models.native-model]\nprovider = "native-provider"\nmodel = "native-model"\nmax_context_size = 4096\n[providers.native-provider]\ntype = "openai"\nbase_url = "https://native.example"\napi_key = "native"\n',
+      );
+      const kimiLaunch = await runCli(home, ["kimi", "--catalog-check"]);
+      expect(kimiLaunch.code, kimiLaunch.stderr).toBe(0);
+      const kimi = await readClientFile(home, ".config/blue/runtime/kimi/config.toml");
+      expect(kimi).toContain('default_model = "kimi-e2e"');
+      expect(kimi).not.toContain("native-model");
+      expect(kimi).not.toContain("native-provider");
+      expect(kimi.match(/^\[models\./gm)).toHaveLength(2);
+      expect(kimi.match(/^\[providers\./gm)).toHaveLength(1);
+      expect(kimi.indexOf("[models.kimi-e2e]")).toBeLessThan(
+        kimi.indexOf("[models.kimi-e2e-secondary]"),
+      );
+    } finally {
+      const current = await (await page.request.get(`${control}/admin/governance-config`)).json();
+      const restored = await page.request.put(`${control}/admin/governance-config`, {
+        data: { base_revision: current.revision, managed_yaml: snapshot.managed_yaml },
+      });
+      expect(restored.status(), await restored.text()).toBe(200);
+    }
   });
 
   test("administrator API supports branding and invitation lifecycle", async ({ page }) => {
@@ -1651,8 +1771,8 @@ esac
       const memberConfig = await memberContext.request.get(`${control}/governance-config`, {
         headers: {
           authorization: `Bearer ${memberOauth.token}`,
-          "x-blue-contract-version": "3",
-          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,unverified_harness_versions,tenant_client_version_pin",
+          "x-blue-contract-version": "4",
+          "x-blue-capabilities": "adapter_intervals,compiled_harness_registry,transactional_reconcile,versioned_state,gateway_inference_jwt,gateway_model_catalog,unverified_harness_versions,tenant_client_version_pin",
         },
       });
       expect(memberConfig.status(), await memberConfig.text()).toBe(200);
@@ -1791,7 +1911,7 @@ esac
     const originalDocument = YAML.parse(original.managed_yaml);
     const enabledGatewayForTest = !originalDocument.gateway;
     if (enabledGatewayForTest) {
-      originalDocument.gateway = { type: "litellm" };
+      enableGateway(originalDocument);
       const enabled = await page.request.put(`${control}/admin/governance-config`, {
         data: { base_revision: original.revision, managed_yaml: YAML.stringify(originalDocument) },
       });

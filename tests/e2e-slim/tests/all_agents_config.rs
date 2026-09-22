@@ -49,7 +49,30 @@ fn codex_managed_config() {
 
 #[test]
 fn kimi_managed_config() {
-    assert_managed_config("kimi", "kimi-k2.6");
+    let Some(stack) = e2e_slim::env_or_skip() else {
+        return;
+    };
+    let home = stack.bootstrap_home();
+    std::fs::create_dir_all(home.path().join(".kimi-code")).unwrap();
+    std::fs::write(
+        home.path().join(".kimi-code/config.toml"),
+        "default_model = \"native-model\"\n[models.native-model]\nprovider = \"native-provider\"\nmodel = \"native-model\"\nmax_context_size = 4096\n[providers.native-provider]\ntype = \"openai\"\nbase_url = \"https://native.example\"\napi_key = \"native\"\n",
+    )
+    .unwrap();
+    let Some(home) = (match home.select_agent("kimi") {
+        AgentSelection::Selected => Some(home),
+        AgentSelection::NotEligible => None,
+    }) else {
+        eprintln!("kimi CLI not installed/eligible; skipping");
+        return;
+    };
+    home.blue().args(["apply", "--yes"]).assert().success();
+    assert_governed_model(&home, "kimi", "native-model");
+    let config = std::fs::read_to_string(home.data_path().join("runtime/kimi/config.toml")).unwrap();
+    assert!(config.contains("[models.native-model]"));
+    assert!(config.contains("[providers.native-provider]"));
+    assert_mcp_registered(&home, "kimi");
+    assert_example_skill_materialized(&home, "kimi");
 }
 
 #[test]

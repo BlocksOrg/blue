@@ -227,6 +227,15 @@ fn certify_cell(agent: &str, version: &str) {
 
     let home = gateway.bootstrap_gateway_home_pinned(bin_dir);
 
+    if agent == "kimi" {
+        std::fs::create_dir_all(home.path().join(".kimi-code")).unwrap();
+        std::fs::write(
+            home.path().join(".kimi-code/config.toml"),
+            "default_model = \"native-model\"\n[models.native-model]\nprovider = \"native-provider\"\nmodel = \"native-model\"\nmax_context_size = 4096\n[providers.native-provider]\ntype = \"openai\"\nbase_url = \"https://native.example\"\napi_key = \"native\"\n",
+        )
+        .unwrap();
+    }
+
     if home.select_agent(agent) == AgentSelection::NotEligible {
         eprintln!("{agent} {version} CLI not installed/eligible; skipping certification");
         return;
@@ -236,6 +245,9 @@ fn certify_cell(agent: &str, version: &str) {
     home.blue().args(["apply", "--yes"]).assert().success();
     common::assert_mcp_registered(&home, agent);
     common::assert_example_skill_materialized(&home, agent);
+    if agent == "kimi" {
+        common::assert_kimi_catalog(&home, &["kimi-k2.6", "kimi-catalog-secondary"]);
+    }
 
     // (2) Launch the real agent through the gateway and force the managed tool.
     let nonce = format!("BLUE_E2E_INVOCATION_{}", uuid::Uuid::new_v4());

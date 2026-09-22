@@ -16,6 +16,11 @@ import { RefreshButton } from "./refresh-button";
 import { GatewayTabs, type GatewayTab } from "./gateway-tabs";
 import { ProxyHealthRow } from "./proxy-health-row";
 import { GatewayKeyForm } from "./gateway-key-form";
+import { ModelCatalog } from "./model-catalog";
+import {
+  resolveGatewayModelsTab,
+  type GatewayModelsResource,
+} from "@/lib/gateway-models";
 
 type GatewayStatus = {
   enabled: boolean;
@@ -126,11 +131,12 @@ function resultBadge(result: RequestLog["result"]) {
 export default async function GatewayPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const [raw, me] = await Promise.all([searchParams, requireIdentity()]);
   const requestedTab = value(raw, "tab");
+  const activeModelsTab = resolveGatewayModelsTab(value(raw, "models_tab"));
   const hasLogQuery = ["q", "user_id", "profile_id", "model", "harness", "result", "occurred_from", "occurred_to", "sort", "page", "per_page"].some((key) => Boolean(value(raw, key)));
   if (me.role !== "admin" && ((requestedTab && requestedTab !== "keys") || hasLogQuery)) notFound();
   const activeTab: GatewayTab = me.role !== "admin"
     ? "keys"
-    : requestedTab === "keys" || requestedTab === "logs"
+    : requestedTab === "models" || requestedTab === "keys" || requestedTab === "logs"
       ? requestedTab
       : hasLogQuery
         ? "logs"
@@ -157,6 +163,13 @@ export default async function GatewayPage({ searchParams }: { searchParams: Prom
 
   const status = await api<GatewayStatus>("/gateway/status");
   if (!status.enabled) notFound();
+
+  let gatewayModels: GatewayModelsResource | undefined;
+  let gatewayModelsError: string | undefined;
+  if (me.role === "admin") {
+    try { gatewayModels = await api<GatewayModelsResource>("/admin/gateway/models"); }
+    catch (error) { gatewayModelsError = errorMessage(error, "Gateway models could not be loaded."); }
+  }
 
   let access: GatewayAccess | undefined;
   let accessError: string | undefined;
@@ -232,6 +245,9 @@ export default async function GatewayPage({ searchParams }: { searchParams: Prom
           </TableBody>
         </Table>
       </section>
+        )}
+        models={gatewayModels ? <ModelCatalog resource={gatewayModels} activeTab={activeModelsTab} /> : (
+          <Alert variant="destructive"><AlertCircle /><AlertTitle>Model catalog unavailable</AlertTitle><AlertDescription>{gatewayModelsError}</AlertDescription></Alert>
         )}
         keys={(
       <section aria-labelledby="gateway-keys" className="overflow-hidden rounded-xl border">

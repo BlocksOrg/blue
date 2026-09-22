@@ -21,8 +21,9 @@ gateway:
   provisioner:
     type: local-executable
     executable_path: /etc/blue/local-gateway-provisioner.mjs
-    executable_sha256: 7f6e3f4d26667418aa8f311b3a00f2eb775e954b073a1f1de947f706b26a8e28
+    executable_sha256: 95f8f55cb695615db465f5184a97933ad2e83811420f4baa979c03c95ba0f965
     policy_revision: local-executable-v4
     reconcile_ttl_seconds: 86400
+    model_catalog_refresh_seconds: 300
     timeout_seconds: 15
     max_concurrency: 8

@@ -489,3 +489,104 @@ impl GatewayProvisioner for LiteLlmProvisioner {
         Ok(RevokeResponse { revoked: true })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        extract::Request, http::StatusCode, response::IntoResponse, routing::get, Json, Router,
+    };
+
+    async fn provisioner(router: Router) -> LiteLlmProvisioner {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        LiteLlmProvisioner {
+            base_url: format!("http://{address}"),
+            admin_key: "sk-test-admin".into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_discovery_authenticates_sorts_deduplicates_and_hashes() {
+        let provisioner = provisioner(Router::new().route(
+            "/v1/models",
+            get(|request: Request| async move {
+                assert_eq!(
+                    request.headers().get("authorization").unwrap(),
+                    "Bearer sk-test-admin"
+                );
+                Json(json!({
+                    "data": [
+                        {"id": "model-z"},
+                        {"id": " model-a "},
+                        {"id": "model-z"},
+                        {"missing": "id"},
+                        {"id": ""}
+                    ]
+                }))
+            }),
+        ))
+        .await;
+
+        let first = provisioner.list_models().await.unwrap();
+        let second = provisioner.list_models().await.unwrap();
+        assert_eq!(
+            first
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["model-a", "model-z"]
+        );
+        assert_eq!(first.source_revision, second.source_revision);
+        assert!(first.source_revision.is_some());
+    }
+
+    #[tokio::test]
+    async fn model_discovery_classifies_authentication_failures() {
+        let provisioner = provisioner(Router::new().route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": {"message": "bad sk-test-admin"}})),
+                )
+                    .into_response()
+            }),
+        ))
+        .await;
+
+        let error = provisioner.list_models().await.unwrap_err();
+        assert!(matches!(error, ProvisionerError::DiscoveryAuth(_)));
+        assert!(!error.to_string().contains("sk-test-admin"));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_rejects_malformed_catalogs() {
+        let provisioner = provisioner(
+            Router::new().route("/v1/models", get(|| async { Json(json!({"models": []})) })),
+        )
+        .await;
+        assert!(matches!(
+            provisioner.list_models().await.unwrap_err(),
+            ProvisionerError::DiscoveryResponse(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_classifies_upstream_failures() {
+        let provisioner = provisioner(Router::new().route(
+            "/v1/models",
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        ))
+        .await;
+        assert!(matches!(
+            provisioner.list_models().await.unwrap_err(),
+            ProvisionerError::Unavailable(_)
+        ));
+    }
+}

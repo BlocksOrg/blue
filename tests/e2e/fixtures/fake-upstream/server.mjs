@@ -32,6 +32,15 @@ createServer(async (request, response) => {
   }
 
   if (request.headers.authorization === `Bearer ${adminKey}`) {
+    if (url.pathname === "/v1/models" && request.method === "GET") {
+      return json(response, 200, { data: [
+        { id: "gpt-e2e" },
+        { id: "claude-e2e" },
+        { id: "kimi-e2e" },
+        { id: "e2e/model" },
+        { id: "e2e/alternate" },
+      ] });
+    }
     if (url.pathname === "/user/list") {
       const email = url.searchParams.get("user_email")?.toLowerCase();
       return json(response, 200, { users: email && users.has(email) ? [users.get(email)] : [] });

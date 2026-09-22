@@ -222,7 +222,8 @@ adapters:
   `BLUE_SESSION_ID` → native-session mapping at start and uploads the transcript
   from `blue run`'s post-exit fallback rather than a `SessionEnd` hook. See the
   upstream [`SessionStart` hook documentation](https://github.com/openai/codex).
-- Claude: `1.0.38` introduces hooks and `2.0.12` introduces plugin packaging.
+- Claude: `1.0.38` introduces hooks, `2.0.12` introduces plugin packaging, and
+  `2.1.242` introduces the governed model picker and enforced assigned catalog.
   The hooks-only interval accepts hook components but rejects plugin packages,
   standalone skills, and agents. Automatic upload is conservatively disabled
   throughout that interval: `SessionEnd` arrived at `1.0.85`, so it is not

@@ -8,6 +8,7 @@ import { auth, authPool } from "../lib/auth";
 import { randomUUID } from "crypto";
 import { identityConfig } from "../lib/identity-config";
 import type { Branding } from "../lib/branding";
+import type { GatewayModelsResource } from "../lib/gateway-models";
 
 export async function logout() {
   await auth.api.signOut({ headers: await headers() });
@@ -187,6 +188,83 @@ export async function checkGatewayProxyHealth(
               .replace(/^\{"error":"(.*)"\}$/, "$1")
           : "Proxy health check failed.",
     };
+  }
+}
+
+export type GatewayModelsActionState = {
+  saved?: boolean;
+  error?: string;
+  revision?: string;
+  resource?: GatewayModelsResource;
+};
+
+function actionError(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+  const detail = error.message.replace(/^\d{3}:\s*/, "");
+  try {
+    const parsed = JSON.parse(detail) as { error?: string };
+    return parsed.error || fallback;
+  } catch {
+    return detail || fallback;
+  }
+}
+
+export async function refreshGatewayModels(
+  _: GatewayModelsActionState,
+): Promise<GatewayModelsActionState> {
+  try {
+    const resource = await api<GatewayModelsResource>("/admin/gateway/models/refresh", {
+      method: "POST",
+    });
+    revalidatePath("/gateway");
+    return { saved: true, resource, revision: resource.revision };
+  } catch (error) {
+    return { error: actionError(error, "Gateway models could not be refreshed.") };
+  }
+}
+
+export async function saveHarnessGatewayModels(
+  _: GatewayModelsActionState,
+  form: FormData,
+): Promise<GatewayModelsActionState> {
+  const harness = String(form.get("harness") ?? "");
+  try {
+    const saved = await api<{ revision: string }>(
+      `/admin/gateway/models/harnesses/${encodeURIComponent(harness)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          base_revision: String(form.get("revision") ?? ""),
+          gateway_models: JSON.parse(String(form.get("gateway_models") ?? "[]")),
+          default_model: String(form.get("default_model") ?? "") || null,
+        }),
+      },
+    );
+    revalidatePath("/gateway");
+    revalidatePath("/harnesses");
+    revalidatePath("/", "layout");
+    return { saved: true, revision: saved.revision };
+  } catch (error) {
+    return { error: actionError(error, "Gateway model assignments could not be saved.") };
+  }
+}
+
+export async function acknowledgeGatewayModel(
+  _: GatewayModelsActionState,
+  form: FormData,
+): Promise<GatewayModelsActionState> {
+  try {
+    await api("/admin/gateway/models/acknowledge", {
+      method: "POST",
+      body: JSON.stringify({
+        model_id: String(form.get("model_id") ?? ""),
+        fingerprint: String(form.get("fingerprint") ?? ""),
+      }),
+    });
+    revalidatePath("/gateway");
+    return { saved: true };
+  } catch (error) {
+    return { error: actionError(error, "Model change could not be acknowledged.") };
   }
 }
 

@@ -90,8 +90,14 @@ harnesses:
 
 `managed_config` contains the selected model and harness-specific settings. In
 gateway mode, `gateway_models` contains the exact upstream IDs assigned to that
-harness and the selected `managed_config.model` must be a member. OpenCode and
-Kimi receive the full catalog; Codex and Claude support only the selected model.
+harness and the selected `managed_config.model` must be a member. Kimi,
+OpenCode, and Claude Code 2.1.242 or newer receive an enforced launch catalog
+containing exactly the assigned models. Older Claude releases and Codex support
+only the selected model. For catalog-aware harnesses, the first assigned model
+is the enforced fallback when no explicit managed default is selected. Codex's
+upstream [`model_catalog_json`](https://github.com/openai/codex/blob/main/codex-rs/core/src/config/mod.rs)
+setting replaces model metadata but is not an enforced allowlist, so Blue does
+not present Codex assignments as catalog governance.
 The field is ignored in direct mode, so native model catalogs remain untouched.
 `mcp` is additive. `package_overrides` may enable or disable an organization
 package and provide adapter settings; it cannot replace the source, version, or
@@ -116,6 +122,14 @@ mappings are revisioned governance policy and are never silently renamed,
 substituted, or deleted when discovery reports drift. The former OpenCode-only
 `managed_config.available_models` escape hatch is deprecated; migrate those
 values to the typed harness `gateway_models` field.
+
+Administrators manage this from **Gateway → Models**, organized into
+**Discovery**, **Catalog**, and **Assignments** child tabs. Discovery runs
+periodically and can be refreshed on demand. Unknown and removed IDs remain
+assignable with a warning so an unavailable discovery service cannot erase an
+operator-authored mapping. A managed default is optional, but when present it
+must be assigned to the same harness. Material metadata changes keep routing
+active until an administrator acknowledges the new fingerprint.
 
 ## Managed packages
 

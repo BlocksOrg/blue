@@ -1,0 +1,52 @@
+{
+  "args": [
+    "--settings",
+    "$HOME/.config/blue/runtime/claude/settings.json",
+    "--mcp-config",
+    "$HOME/.config/blue/runtime/claude/mcp.json",
+    "--plugin-dir",
+    "$HOME/package/plugin",
+    "--plugin-dir",
+    "$HOME/.config/blue/runtime/claude/standalone-skills-plugin"
+  ],
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "HARNESS_PACKAGE_COMPONENTS_SETTINGS": "{\"color\":\"blue\"}",
+    "PATH": "$HOME/package/bin:$PATH"
+  },
+  "files": [
+    "$HOME/.config/blue/runtime/claude/mcp.json",
+    "$HOME/.config/blue/runtime/claude/settings.json",
+    "$HOME/.config/blue/runtime/claude/standalone-skills-plugin/.claude-plugin/plugin.json",
+    "$HOME/.config/blue/runtime/claude/standalone-skills-plugin/skills"
+  ],
+  "ownership": [
+    "$HOME/.config/blue/runtime/claude"
+  ],
+  "removals": [
+    "$HOME/.config/blue/runtime/claude/standalone-skills-plugin/skills"
+  ],
+  "warnings": [],
+  "writes": [
+    {
+      "body": "{\n  \"mcpServers\": {\n    \"fixture\": {\n      \"args\": [\n        \"--stdio\"\n      ],\n      \"command\": \"fixture-mcp\"\n    }\n  }\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/claude/mcp.json"
+    },
+    {
+      "body": "{\n  \"availableModels\": [\n    \"fixture-model\"\n  ],\n  \"enforceAvailableModels\": true,\n  \"env\": {\n    \"ANTHROPIC_AUTH_TOKEN\": \"fixture-token\",\n    \"ANTHROPIC_BASE_URL\": \"https://gateway.example\"\n  },\n  \"hooks\": {\n    \"SessionEnd\": [\n      {\n        \"hooks\": [\n          {\n            \"command\": \"'$BLUE' session-upload claude --profile 'claude-v2_1_242'\",\n            \"timeout\": 30,\n            \"type\": \"command\"\n          }\n        ]\n      }\n    ],\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"command\": \"'$BLUE' session-start claude --profile 'claude-v2_1_242'\",\n            \"timeout\": 30,\n            \"type\": \"command\"\n          }\n        ]\n      }\n    ]\n  },\n  \"modelPicker\": {\n    \"options\": [\n      {\n        \"label\": \"fixture-model\",\n        \"model\": \"fixture-model\"\n      }\n    ],\n    \"replaceBuiltInOptions\": true\n  }\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/claude/settings.json"
+    },
+    {
+      "body": "{\n  \"name\": \"blue-managed-standalone-skills\",\n  \"version\": \"1.0.0\"\n}\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/claude/standalone-skills-plugin/.claude-plugin/plugin.json"
+    },
+    {
+      "body": "# Example\n\nA managed skill.\n",
+      "mode": 384,
+      "path": "$HOME/.config/blue/runtime/claude/standalone-skills-plugin/skills/example/SKILL.md"
+    }
+  ]
+}

@@ -246,8 +246,8 @@ fn map_error(error: WireError) -> ProvisionerError {
         "unavailable" => ProvisionerError::Unavailable(error.message),
         "rejected" => ProvisionerError::Rejected(error.message),
         "unsupported" | "discovery_unsupported" => ProvisionerError::DiscoveryUnsupported,
-        "auth" | "discovery_auth" => ProvisionerError::DiscoveryAuth(error.message),
-        "response" | "discovery_response" => ProvisionerError::DiscoveryResponse(error.message),
+        "discovery_auth" => ProvisionerError::DiscoveryAuth(error.message),
+        "discovery_response" => ProvisionerError::DiscoveryResponse(error.message),
         _ => unavailable("provisioner returned an unsupported error code"),
     }
 }
@@ -365,6 +365,7 @@ mod tests {
             policy_revision: Some("v1".into()),
             timeout_seconds: 1,
             max_concurrency: 8,
+            model_catalog_refresh_seconds: 300,
         };
         assert!(ExecutableGatewayProvisioner::load(&config).await.is_ok());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();

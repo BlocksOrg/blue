@@ -58,6 +58,48 @@ pub fn assert_governed_model(home: &Home, agent: &str, expected: &str) {
     );
 }
 
+/// Claude 2.1.242+ must expose exactly Blue's ordered assignment and replace
+/// the native picker options, not merely set the selected model.
+pub fn assert_claude_catalog(home: &Home, expected: &[&str]) {
+    let settings = read_json(&home.data_path().join("runtime/claude/settings.json"));
+    assert_eq!(settings["availableModels"], serde_json::json!(expected));
+    assert_eq!(settings["enforceAvailableModels"], true);
+    assert_eq!(
+        settings["modelPicker"],
+        serde_json::json!({
+            "options": expected.iter().map(|model| serde_json::json!({
+                "model": model,
+                "label": model,
+            })).collect::<Vec<_>>(),
+            "replaceBuiltInOptions": true,
+        })
+    );
+}
+
+/// Kimi gateway launches must replace native model/provider definitions with
+/// exactly Blue's ordered assignment and select the first entry by default.
+pub fn assert_kimi_catalog(home: &Home, expected: &[&str]) {
+    let path = home.data_path().join("runtime/kimi/config.toml");
+    let body = std::fs::read_to_string(&path).expect("reading Kimi runtime config");
+    let config = read_toml(&path);
+    assert_eq!(config["default_model"].as_str(), expected.first().copied());
+    let models = config["models"].as_table().expect("Kimi models table");
+    assert_eq!(models.len(), expected.len());
+    for model in expected {
+        assert_eq!(models[*model]["provider"].as_str(), Some("governed"));
+    }
+    assert!(models.get("native-model").is_none());
+    let providers = config["providers"].as_table().expect("Kimi providers table");
+    assert_eq!(providers.len(), 1);
+    assert!(providers.get("governed").is_some());
+    assert!(providers.get("native-provider").is_none());
+    for pair in expected.windows(2) {
+        let first = body.find(&format!("[models.{}]", pair[0])).unwrap();
+        let second = body.find(&format!("[models.{}]", pair[1])).unwrap();
+        assert!(first < second, "Kimi model entries must retain assignment order");
+    }
+}
+
 /// Assert the managed `e2e-remote` MCP server was registered in `agent`'s config.
 /// The location and shape differ per agent, but every one must reference `node`.
 pub fn assert_mcp_registered(home: &Home, agent: &str) {

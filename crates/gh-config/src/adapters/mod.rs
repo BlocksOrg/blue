@@ -503,7 +503,7 @@ pub fn registry_metadata() -> Vec<PublicHarnessMetadata> {
                 binary_names: metadata.binary_names,
                 install_command_template: metadata.install_command_template,
                 gateway_model_exposure: match metadata.key {
-                    "opencode" | "kimi" => GatewayModelExposure::Catalog,
+                    "opencode" | "kimi" | "claude" => GatewayModelExposure::Catalog,
                     _ => GatewayModelExposure::SelectedOnly,
                 },
                 capabilities,

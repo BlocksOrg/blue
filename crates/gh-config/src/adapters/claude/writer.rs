@@ -20,6 +20,30 @@ pub fn write(
     session_start_hooks: Option<Value>,
     _enforced: bool,
 ) -> Result<HarnessWrite, GhError> {
+    write_with_catalog(plan, home, policy, wiring, session_upload_hooks, session_start_hooks, false)
+}
+
+pub fn write_catalog(
+    plan: &mut crate::adapters::ReconcilePlan,
+    home: &Path,
+    policy: &HarnessPolicy,
+    wiring: Option<&GatewayWiring>,
+    session_upload_hooks: Option<Value>,
+    session_start_hooks: Option<Value>,
+    _enforced: bool,
+) -> Result<HarnessWrite, GhError> {
+    write_with_catalog(plan, home, policy, wiring, session_upload_hooks, session_start_hooks, true)
+}
+
+fn write_with_catalog(
+    plan: &mut crate::adapters::ReconcilePlan,
+    home: &Path,
+    policy: &HarnessPolicy,
+    wiring: Option<&GatewayWiring>,
+    session_upload_hooks: Option<Value>,
+    session_start_hooks: Option<Value>,
+    catalog: bool,
+) -> Result<HarnessWrite, GhError> {
     if wiring.is_some()
         && (policy.gateway_models.is_empty()
             || policy.managed_config.model.as_ref().is_some_and(|selected| {
@@ -33,7 +57,7 @@ pub fn write(
     migrate_legacy_global_config(plan, home, policy)?;
     let runtime = crate::managed_runtime_dir(home).join("claude");
     let settings_path = runtime.join("settings.json");
-    let settings = build_settings(policy, wiring, session_upload_hooks, session_start_hooks)?;
+    let settings = build_settings(policy, wiring, session_upload_hooks, session_start_hooks, catalog)?;
     plan.write(&settings_path, json_pretty(&settings)?)?;
 
     let local = plan.read_json_object(&home.join(".claude.json"))?;
@@ -211,6 +235,7 @@ fn build_settings(
     wiring: Option<&GatewayWiring>,
     session_upload_hooks: Option<Value>,
     session_start_hooks: Option<Value>,
+    catalog: bool,
 ) -> Result<Value, GhError> {
     let mut settings = Map::new();
     if let Some(model) = &policy.managed_config.model {
@@ -231,6 +256,20 @@ fn build_settings(
                 "ANTHROPIC_AUTH_TOKEN": w.token,
             }),
         );
+        if catalog {
+            settings.insert("availableModels".into(), json!(policy.gateway_models));
+            settings.insert("enforceAvailableModels".into(), json!(true));
+            settings.insert(
+                "modelPicker".into(),
+                json!({
+                    "options": policy.gateway_models.iter().map(|model| json!({
+                        "model": model,
+                        "label": model,
+                    })).collect::<Vec<_>>(),
+                    "replaceBuiltInOptions": true,
+                }),
+            );
+        }
     }
     // Managed SessionEnd (upload) and SessionStart (identity) hooks share the
     // single `hooks` object Claude reads from the managed settings.json.
@@ -280,6 +319,99 @@ fn plan_skills(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rendered_settings(
+        policy: &HarnessPolicy,
+        wiring: Option<&GatewayWiring>,
+        catalog: bool,
+    ) -> Value {
+        build_settings(policy, wiring, None, None, catalog).unwrap()
+    }
+
+    fn gateway() -> GatewayWiring {
+        GatewayWiring {
+            base_url: "https://gateway.example".into(),
+            token: "fixture-token".into(),
+            wire_api: None,
+            auth: gh_gateway::AuthPlacement::InFile,
+        }
+    }
+
+    #[test]
+    fn catalog_settings_preserve_assignment_order_and_exact_labels() {
+        let policy: HarnessPolicy = serde_json::from_value(json!({
+            "gateway_models": ["model-b", "provider/model-a"],
+            "managed_config": { "model": "provider/model-a" }
+        }))
+        .unwrap();
+        let settings = rendered_settings(&policy, Some(&gateway()), true);
+
+        assert_eq!(settings["availableModels"], json!(["model-b", "provider/model-a"]));
+        assert_eq!(settings["enforceAvailableModels"], true);
+        assert_eq!(
+            settings["modelPicker"],
+            json!({
+                "options": [
+                    { "model": "model-b", "label": "model-b" },
+                    { "model": "provider/model-a", "label": "provider/model-a" }
+                ],
+                "replaceBuiltInOptions": true
+            })
+        );
+        assert_eq!(settings["model"], "provider/model-a");
+    }
+
+    #[test]
+    fn catalog_without_default_still_enforces_the_complete_assignment() {
+        let policy: HarnessPolicy = serde_json::from_value(json!({
+            "gateway_models": ["first", "second"]
+        }))
+        .unwrap();
+        let settings = rendered_settings(&policy, Some(&gateway()), true);
+
+        assert!(settings.get("model").is_none());
+        assert_eq!(settings["availableModels"], json!(["first", "second"]));
+        assert_eq!(settings["modelPicker"]["replaceBuiltInOptions"], true);
+    }
+
+    #[test]
+    fn direct_mode_and_legacy_generation_omit_catalog_controls() {
+        let policy: HarnessPolicy = serde_json::from_value(json!({
+            "gateway_models": ["first", "second"]
+        }))
+        .unwrap();
+        for settings in [
+            rendered_settings(&policy, None, true),
+            rendered_settings(&policy, Some(&gateway()), false),
+        ] {
+            assert!(settings.get("availableModels").is_none());
+            assert!(settings.get("enforceAvailableModels").is_none());
+            assert!(settings.get("modelPicker").is_none());
+        }
+    }
+
+    #[test]
+    fn catalog_writer_rejects_empty_or_unassigned_gateway_selection() {
+        let home = std::env::temp_dir().join(format!(
+            "gh-claude-catalog-validation-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        for policy in [
+            serde_json::from_value(json!({ "gateway_models": [] })).unwrap(),
+            serde_json::from_value(json!({
+                "gateway_models": ["assigned"],
+                "managed_config": { "model": "unassigned" }
+            }))
+            .unwrap(),
+        ] {
+            let mut plan = crate::adapters::ReconcilePlan::default();
+            assert!(write_catalog(&mut plan, &home, &policy, Some(&gateway()), None, None, false)
+                .is_err());
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     fn test_write(
         home: &Path,
         policy: &HarnessPolicy,

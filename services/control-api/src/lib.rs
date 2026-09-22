@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
-use gh_gateway_provisioner::{GatewayProvisioner, ProvisionerError};
+use gh_gateway_provisioner::{DiscoveredModel, GatewayProvisioner, ModelCatalog, ProvisionerError};
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
@@ -42,6 +42,9 @@ use secrets::{Envelope, SecretProtector};
 static INTERNAL_TLS_RELOAD_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static INTERNAL_TLS_RELOAD_ERRORS: AtomicU64 = AtomicU64::new(0);
 static WORKER_LAST_SUCCESS_UNIX: AtomicU64 = AtomicU64::new(0);
+static MODEL_CATALOG_REFRESH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static MODEL_CATALOG_REFRESH_ERRORS: AtomicU64 = AtomicU64::new(0);
+static MODEL_CATALOG_REFRESH_UNSUPPORTED: AtomicU64 = AtomicU64::new(0);
 
 fn record_worker_success() {
     let now = std::time::SystemTime::now()
@@ -109,6 +112,8 @@ pub struct GatewayProvisionerConfig {
     pub timeout_seconds: u64,
     #[serde(default = "default_provisioner_max_concurrency")]
     pub max_concurrency: usize,
+    #[serde(default = "default_model_catalog_refresh_seconds")]
+    pub model_catalog_refresh_seconds: u64,
 }
 
 fn default_reconcile_ttl() -> i64 {
@@ -119,6 +124,9 @@ fn default_provisioner_timeout() -> u64 {
 }
 fn default_provisioner_max_concurrency() -> usize {
     8
+}
+fn default_model_catalog_refresh_seconds() -> u64 {
+    300
 }
 #[derive(Clone, Debug, Deserialize)]
 pub struct GatewayEncryptionConfig {
@@ -609,6 +617,11 @@ fn gateway_provisioner(
         settings,
         &["gateway", "provisioner", "executable_sha256"],
     )?;
+    if let Ok(value) = std::env::var("HARNESS_GATEWAY_MODEL_CATALOG_REFRESH_SECONDS") {
+        config.model_catalog_refresh_seconds = value.parse().map_err(|_| {
+            ApiError::internal("HARNESS_GATEWAY_MODEL_CATALOG_REFRESH_SECONDS must be an integer")
+        })?;
+    }
     if config.kind.trim().is_empty() {
         return Err(ApiError::internal(
             "gateway.provisioner.type must not be empty",
@@ -627,6 +640,11 @@ fn gateway_provisioner(
     if config.max_concurrency == 0 {
         return Err(ApiError::internal(
             "gateway.provisioner.max_concurrency must be greater than zero",
+        ));
+    }
+    if config.model_catalog_refresh_seconds < 30 {
+        return Err(ApiError::internal(
+            "gateway.provisioner.model_catalog_refresh_seconds must be at least 30",
         ));
     }
     Ok(Some(config))
@@ -1550,6 +1568,9 @@ async fn build_app_inner(
     if state.config.run_background_jobs {
         tokio::spawn(cleanup_gateway_request_logs(state.gateway_log_pool.clone()));
         tokio::spawn(process_gateway_revocations(state.clone()));
+        if state.gateway_provisioner.is_some() && state.config.gateway_kind.is_some() {
+            tokio::spawn(refresh_gateway_model_catalogs(state.clone()));
+        }
     }
 
     let public_routes = Router::new()
@@ -1634,6 +1655,19 @@ async fn build_app_inner(
         .route("/admin/blue-config/export", get(export_blue_config))
         .route("/admin/branding", axum::routing::put(update_branding))
         .route("/admin/package-catalog", get(package_catalog))
+        .route("/admin/gateway/models", get(admin_gateway_models))
+        .route(
+            "/admin/gateway/models/refresh",
+            post(refresh_admin_gateway_models),
+        )
+        .route(
+            "/admin/gateway/models/acknowledge",
+            post(acknowledge_gateway_model),
+        )
+        .route(
+            "/admin/gateway/models/harnesses/:harness",
+            axum::routing::put(update_harness_gateway_models),
+        )
         .route(
             "/admin/package-source/connections",
             get(package_source_connections_api),
@@ -1802,7 +1836,10 @@ async fn control_metrics(State(state): State<Arc<AppState>>) -> String {
             "gateway_control_log_pool_idle {}\n",
             "gateway_control_kms_permits_available {}\n",
             "gateway_control_tls_reload_successes_total {}\n",
-            "gateway_control_tls_reload_errors_total {}\n"
+            "gateway_control_tls_reload_errors_total {}\n",
+            "gateway_control_model_catalog_refresh_successes_total {}\n",
+            "gateway_control_model_catalog_refresh_errors_total {}\n",
+            "gateway_control_model_catalog_refresh_unsupported_total {}\n"
         ),
         state.pool.size(),
         state.pool.num_idle(),
@@ -1811,6 +1848,9 @@ async fn control_metrics(State(state): State<Arc<AppState>>) -> String {
         state.gateway_kms_permits.available_permits(),
         INTERNAL_TLS_RELOAD_SUCCESSES.load(Ordering::Relaxed),
         INTERNAL_TLS_RELOAD_ERRORS.load(Ordering::Relaxed),
+        MODEL_CATALOG_REFRESH_SUCCESSES.load(Ordering::Relaxed),
+        MODEL_CATALOG_REFRESH_ERRORS.load(Ordering::Relaxed),
+        MODEL_CATALOG_REFRESH_UNSUPPORTED.load(Ordering::Relaxed),
     )
 }
 
@@ -3644,6 +3684,542 @@ async fn gateway_status(
         harnesses: (who.role == "admin").then_some(harnesses),
         runtime_checks,
     }))
+}
+
+#[derive(Debug, FromRow)]
+struct GatewayModelCatalogRow {
+    model_id: String,
+    display_name: Option<String>,
+    metadata: serde_json::Value,
+    fingerprint: String,
+    acknowledged_fingerprint: String,
+    first_seen_at: OffsetDateTime,
+    last_seen_at: OffsetDateTime,
+    unavailable_since: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct GatewayModelSyncRow {
+    last_refresh_at: Option<OffsetDateTime>,
+    last_successful_refresh_at: Option<OffsetDateTime>,
+    last_successful_source_revision: Option<String>,
+    latest_error: Option<String>,
+    latest_error_at: Option<OffsetDateTime>,
+    discovery_supported: Option<bool>,
+}
+
+fn timestamp(value: Option<OffsetDateTime>) -> Option<String> {
+    value.and_then(|value| value.format(&Rfc3339).ok())
+}
+
+fn discovered_model_fingerprint(model: &DiscoveredModel) -> Result<String, ApiError> {
+    let canonical = serde_json::to_vec(&json!({
+        "id": model.id,
+        "display_name": model.display_name,
+        "metadata": model.metadata,
+    }))
+    .map_err(|error| ApiError::internal(format!("serializing discovered model: {error}")))?;
+    Ok(hex::encode(Sha256::digest(canonical)))
+}
+
+fn normalize_model_catalog(catalog: ModelCatalog) -> Result<ModelCatalog, ProvisionerError> {
+    let mut seen = BTreeSet::new();
+    let mut models = Vec::with_capacity(catalog.models.len());
+    for mut model in catalog.models {
+        let trimmed = model.id.trim();
+        if trimmed.is_empty() || trimmed != model.id {
+            return Err(ProvisionerError::DiscoveryResponse(
+                "gateway returned an empty or untrimmed model ID".into(),
+            ));
+        }
+        if !seen.insert(model.id.clone()) {
+            return Err(ProvisionerError::DiscoveryResponse(format!(
+                "gateway returned duplicate model `{}`",
+                model.id
+            )));
+        }
+        model.display_name = model
+            .display_name
+            .take()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        models.push(model);
+    }
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(ModelCatalog {
+        models,
+        source_revision: catalog.source_revision,
+    })
+}
+
+async fn record_catalog_failure(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    gateway_type: &str,
+    supported: bool,
+    message: Option<&str>,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO public.gateway_model_catalog_sync_state \
+         (organization_id,gateway_type,last_refresh_at,latest_error,latest_error_at,discovery_supported) \
+         VALUES ($1,$2,now(),$3,CASE WHEN $3::text IS NULL THEN NULL ELSE now() END,$4) \
+         ON CONFLICT (organization_id,gateway_type) DO UPDATE SET \
+         last_refresh_at=now(),latest_error=EXCLUDED.latest_error,latest_error_at=EXCLUDED.latest_error_at,discovery_supported=$4",
+    )
+    .bind(organization_id)
+    .bind(gateway_type)
+    .bind(message)
+    .bind(supported)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn persist_model_catalog(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    gateway_type: &str,
+    catalog: ModelCatalog,
+) -> Result<usize, ApiError> {
+    let model_ids = catalog
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    for model in &catalog.models {
+        let fingerprint = discovered_model_fingerprint(model)?;
+        let metadata = serde_json::to_value(&model.metadata).map_err(|error| {
+            ApiError::internal(format!("serializing discovered model metadata: {error}"))
+        })?;
+        sqlx::query(
+            "INSERT INTO public.gateway_model_catalog \
+             (organization_id,gateway_type,model_id,display_name,metadata,fingerprint,first_seen_at,last_seen_at,unavailable_since,acknowledged_fingerprint,acknowledged_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,now(),now(),NULL,$6,now()) \
+             ON CONFLICT (organization_id,gateway_type,model_id) DO UPDATE SET \
+             display_name=EXCLUDED.display_name,metadata=EXCLUDED.metadata,fingerprint=EXCLUDED.fingerprint,last_seen_at=now(),unavailable_since=NULL",
+        )
+        .bind(organization_id)
+        .bind(gateway_type)
+        .bind(&model.id)
+        .bind(&model.display_name)
+        .bind(metadata)
+        .bind(fingerprint)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE public.gateway_model_catalog SET unavailable_since=coalesce(unavailable_since,now()) \
+         WHERE organization_id=$1 AND gateway_type=$2 AND NOT(model_id = ANY($3))",
+    )
+    .bind(organization_id)
+    .bind(gateway_type)
+    .bind(&model_ids)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.gateway_model_catalog_sync_state \
+         (organization_id,gateway_type,last_refresh_at,last_successful_refresh_at,last_successful_source_revision,latest_error,latest_error_at,discovery_supported) \
+         VALUES ($1,$2,now(),now(),$3,NULL,NULL,true) \
+         ON CONFLICT (organization_id,gateway_type) DO UPDATE SET \
+         last_refresh_at=now(),last_successful_refresh_at=now(),last_successful_source_revision=$3,latest_error=NULL,latest_error_at=NULL,discovery_supported=true",
+    )
+    .bind(organization_id)
+    .bind(gateway_type)
+    .bind(catalog.source_revision)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(model_ids.len())
+}
+
+async fn refresh_gateway_model_catalog(
+    state: &AppState,
+    organization_id: Uuid,
+    manual: bool,
+) -> Result<(), ApiError> {
+    let provisioner = state
+        .gateway_provisioner
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("gateway model discovery is not configured"))?;
+    let gateway_type = state
+        .config
+        .gateway_kind
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("gateway mode is disabled"))?;
+
+    if !manual {
+        let unsupported = sqlx::query_scalar::<_, Option<bool>>(
+            "SELECT discovery_supported FROM public.gateway_model_catalog_sync_state WHERE organization_id=$1 AND gateway_type=$2",
+        )
+        .bind(organization_id)
+        .bind(gateway_type)
+        .fetch_optional(&state.pool)
+        .await?
+        .flatten()
+        == Some(false);
+        if unsupported {
+            return Ok(());
+        }
+    }
+
+    let mut transaction = state.pool.begin().await?;
+    let locked = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 928452))",
+    )
+    .bind(format!("gateway-model-catalog:{organization_id}"))
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !locked {
+        return if manual {
+            Err(ApiError::conflict(
+                "gateway model catalog refresh is already running",
+            ))
+        } else {
+            Ok(())
+        };
+    }
+
+    let started = Instant::now();
+    match provisioner.list_models().await {
+        Ok(catalog) => {
+            let catalog = match normalize_model_catalog(catalog) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    let message = error.to_string();
+                    record_catalog_failure(
+                        &mut transaction,
+                        organization_id,
+                        gateway_type,
+                        true,
+                        Some(&message),
+                    )
+                    .await?;
+                    transaction.commit().await?;
+                    MODEL_CATALOG_REFRESH_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    return Err(provisioner_api_error(error));
+                }
+            };
+            let count =
+                persist_model_catalog(&mut transaction, organization_id, gateway_type, catalog)
+                    .await?;
+            transaction.commit().await?;
+            MODEL_CATALOG_REFRESH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            tracing::info!(
+                organization_id = %organization_id,
+                gateway_type,
+                model_count = count,
+                elapsed_ms = started.elapsed().as_millis(),
+                "refreshed gateway model catalog"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            let unsupported = matches!(error, ProvisionerError::DiscoveryUnsupported);
+            let message = (!unsupported).then(|| error.to_string());
+            record_catalog_failure(
+                &mut transaction,
+                organization_id,
+                gateway_type,
+                !unsupported,
+                message.as_deref(),
+            )
+            .await?;
+            transaction.commit().await?;
+            if unsupported {
+                MODEL_CATALOG_REFRESH_UNSUPPORTED.fetch_add(1, Ordering::Relaxed);
+            } else {
+                MODEL_CATALOG_REFRESH_ERRORS.fetch_add(1, Ordering::Relaxed);
+            }
+            tracing::warn!(
+                organization_id = %organization_id,
+                gateway_type,
+                %error,
+                elapsed_ms = started.elapsed().as_millis(),
+                "gateway model catalog refresh failed"
+            );
+            Err(provisioner_api_error(error))
+        }
+    }
+}
+
+async fn gateway_models_resource(
+    state: &AppState,
+    organization_id: Uuid,
+) -> Result<serde_json::Value, ApiError> {
+    let gateway_type = state
+        .config
+        .gateway_kind
+        .as_deref()
+        .ok_or_else(|| ApiError::not_found("gateway mode is disabled"))?;
+    let current = current_config(&state.pool, organization_id).await?;
+    let config: gh_service::GovernanceConfig = serde_json::from_value(current.document)
+        .map_err(|error| ApiError::internal(format!("decoding stored config: {error}")))?;
+    let rows = sqlx::query_as::<_, GatewayModelCatalogRow>(
+        "SELECT model_id,display_name,metadata,fingerprint,acknowledged_fingerprint,first_seen_at,last_seen_at,unavailable_since \
+         FROM public.gateway_model_catalog WHERE organization_id=$1 AND gateway_type=$2 ORDER BY model_id",
+    )
+    .bind(organization_id)
+    .bind(gateway_type)
+    .fetch_all(&state.pool)
+    .await?;
+    let sync = sqlx::query_as::<_, GatewayModelSyncRow>(
+        "SELECT last_refresh_at,last_successful_refresh_at,last_successful_source_revision,latest_error,latest_error_at,discovery_supported \
+         FROM public.gateway_model_catalog_sync_state WHERE organization_id=$1 AND gateway_type=$2",
+    )
+    .bind(organization_id)
+    .bind(gateway_type)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let metadata = gh_config::implementations::registry_metadata();
+    let harnesses = metadata
+        .iter()
+        .filter(|item| config.allowed_harnesses.iter().any(|key| key == item.key))
+        .map(|item| {
+            let policy = config.harnesses.get(item.key);
+            json!({
+                "key": item.key,
+                "label": item.label,
+                "exposure": item.gateway_model_exposure,
+                "gateway_models": policy.map(|policy| policy.gateway_models.clone()).unwrap_or_default(),
+                "default_model": policy.and_then(|policy| policy.managed_config.model.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let assignments = config
+        .harnesses
+        .values()
+        .flat_map(|policy| policy.gateway_models.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let by_id = rows
+        .iter()
+        .map(|row| (row.model_id.clone(), row))
+        .collect::<BTreeMap<_, _>>();
+    let all_ids = rows
+        .iter()
+        .map(|row| row.model_id.clone())
+        .chain(assignments)
+        .collect::<BTreeSet<_>>();
+    let models = all_ids
+        .into_iter()
+        .map(|model_id| {
+            let row = by_id.get(&model_id).copied();
+            let state = match row {
+                None => "unknown",
+                Some(row) if row.unavailable_since.is_some() => "removed",
+                Some(row) if row.fingerprint != row.acknowledged_fingerprint => "changed",
+                Some(_) => "available",
+            };
+            let assigned_to = config
+                .harnesses
+                .iter()
+                .filter(|(_, policy)| policy.gateway_models.iter().any(|id| id == &model_id))
+                .map(|(harness, _)| harness.clone())
+                .collect::<Vec<_>>();
+            json!({
+                "id": model_id,
+                "display_name": row.and_then(|row| row.display_name.clone()),
+                "metadata": row.map(|row| row.metadata.clone()).unwrap_or_else(|| json!({})),
+                "fingerprint": row.map(|row| row.fingerprint.clone()),
+                "state": state,
+                "assigned_to": assigned_to,
+                "first_seen_at": timestamp(row.map(|row| row.first_seen_at)),
+                "last_seen_at": timestamp(row.map(|row| row.last_seen_at)),
+                "unavailable_since": timestamp(row.and_then(|row| row.unavailable_since)),
+            })
+        })
+        .collect::<Vec<_>>();
+    let refresh_seconds = state
+        .config
+        .gateway_provisioner
+        .as_ref()
+        .map(|value| value.model_catalog_refresh_seconds)
+        .unwrap_or_else(default_model_catalog_refresh_seconds);
+    let last_success = sync.as_ref().and_then(|row| row.last_successful_refresh_at);
+    let stale = last_success.is_some_and(|last| {
+        OffsetDateTime::now_utc() - last > Duration::seconds((refresh_seconds * 2) as i64)
+    });
+    Ok(json!({
+        "revision": current.revision,
+        "gateway_type": gateway_type,
+        "refresh_interval_seconds": refresh_seconds,
+        "sync": {
+            "last_refresh_at": timestamp(sync.as_ref().and_then(|row| row.last_refresh_at)),
+            "last_successful_refresh_at": timestamp(last_success),
+            "source_revision": sync.as_ref().and_then(|row| row.last_successful_source_revision.clone()),
+            "latest_error": sync.as_ref().and_then(|row| row.latest_error.clone()),
+            "latest_error_at": timestamp(sync.as_ref().and_then(|row| row.latest_error_at)),
+            "discovery_supported": sync.as_ref().and_then(|row| row.discovery_supported),
+            "stale": stale,
+        },
+        "models": models,
+        "harnesses": harnesses,
+    }))
+}
+
+async fn admin_gateway_models(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        gateway_models_resource(&state, who.organization_id).await?,
+    ))
+}
+
+async fn refresh_admin_gateway_models(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Principal>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    refresh_gateway_model_catalog(&state, who.organization_id, true).await?;
+    admin_gateway_models(State(state), Extension(who)).await
+}
+
+#[derive(Deserialize)]
+struct UpdateHarnessGatewayModelsRequest {
+    base_revision: String,
+    gateway_models: Vec<String>,
+    #[serde(default)]
+    default_model: Option<String>,
+}
+
+async fn update_harness_gateway_models(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Principal>,
+    Path(harness): Path<String>,
+    Json(input): Json<UpdateHarnessGatewayModelsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if state.config.gateway_kind.is_none() {
+        return Err(ApiError::not_found("gateway mode is disabled"));
+    }
+    if !supported_harness(&harness) {
+        return Err(ApiError::bad_request(format!(
+            "unsupported gateway-model harness `{harness}`"
+        )));
+    }
+    let mut unique = BTreeSet::new();
+    for model in &input.gateway_models {
+        if model.trim().is_empty() || model.trim() != model {
+            return Err(ApiError::bad_request(
+                "gateway model IDs must be non-empty and trimmed",
+            ));
+        }
+        if !unique.insert(model.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "duplicate gateway model `{model}`"
+            )));
+        }
+    }
+    if input.gateway_models.is_empty() {
+        return Err(ApiError::bad_request(
+            "gateway mode requires at least one model assigned to each harness",
+        ));
+    }
+    let default_model = input.default_model.filter(|value| !value.trim().is_empty());
+    if default_model
+        .as_ref()
+        .is_some_and(|model| !input.gateway_models.contains(model))
+    {
+        return Err(ApiError::bad_request(
+            "default model must be assigned to the harness",
+        ));
+    }
+    let current = current_config(&state.pool, who.organization_id).await?;
+    if current.revision != input.base_revision {
+        return Err(ApiError::conflict(
+            "governance configuration changed; reload before saving",
+        ));
+    }
+    let mut config: gh_service::GovernanceConfig = serde_json::from_value(current.document)
+        .map_err(|error| ApiError::internal(format!("decoding stored config: {error}")))?;
+    if !config
+        .allowed_harnesses
+        .iter()
+        .any(|allowed| allowed == &harness)
+    {
+        return Err(ApiError::bad_request(format!(
+            "harness `{harness}` is not enabled by governance"
+        )));
+    }
+    let policy = config.harnesses.entry(harness.clone()).or_default();
+    policy.gateway_models = input.gateway_models;
+    policy.managed_config.model = default_model;
+    stamp_version_aware_client_floor(&mut config);
+    validate_complete_governance(&config).map_err(ApiError::bad_request)?;
+    let yaml = serde_yaml::to_string(&config)
+        .map_err(|error| ApiError::internal(format!("serializing governance config: {error}")))?;
+    let row = insert_governance_revision(
+        &state.pool,
+        who.organization_id,
+        Some(who.user_id),
+        &yaml,
+        "dashboard",
+        Some(&input.base_revision),
+        None,
+    )
+    .await?;
+    Ok(Json(
+        json!({ "revision": row.revision, "harness": harness }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct AcknowledgeGatewayModelRequest {
+    model_id: String,
+    fingerprint: String,
+}
+
+async fn acknowledge_gateway_model(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Principal>,
+    Json(input): Json<AcknowledgeGatewayModelRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let gateway_type = state
+        .config
+        .gateway_kind
+        .as_deref()
+        .ok_or_else(|| ApiError::not_found("gateway mode is disabled"))?;
+    let result = sqlx::query(
+        "UPDATE public.gateway_model_catalog SET acknowledged_fingerprint=fingerprint,acknowledged_at=now(),acknowledged_by=$1 \
+         WHERE organization_id=$2 AND gateway_type=$3 AND model_id=$4 AND fingerprint=$5",
+    )
+    .bind(who.user_id)
+    .bind(who.organization_id)
+    .bind(gateway_type)
+    .bind(&input.model_id)
+    .bind(&input.fingerprint)
+    .execute(&state.pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(ApiError::conflict(
+            "model fingerprint changed; refresh before acknowledging",
+        ));
+    }
+    Ok(Json(json!({ "acknowledged": true })))
+}
+
+async fn refresh_gateway_model_catalogs(state: Arc<AppState>) {
+    let seconds = state
+        .config
+        .gateway_provisioner
+        .as_ref()
+        .map(|value| value.model_catalog_refresh_seconds)
+        .unwrap_or_else(default_model_catalog_refresh_seconds);
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(seconds));
+    loop {
+        interval.tick().await;
+        let organizations = match sqlx::query_scalar::<_, Uuid>("SELECT id FROM organizations")
+            .fetch_all(&state.pool)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error, "listing organizations for model catalog refresh failed");
+                continue;
+            }
+        };
+        for organization_id in organizations {
+            let _ = refresh_gateway_model_catalog(&state, organization_id, false).await;
+        }
+    }
 }
 
 #[derive(Clone, FromRow)]
@@ -6672,6 +7248,16 @@ fn validate_complete_governance(config: &gh_service::GovernanceConfig) -> Result
     for harness in &config.allowed_harnesses {
         if !supported_harness(harness) {
             return Err(format!("unsupported allowed harness `{harness}`"));
+        }
+        if config.gateway.is_some()
+            && config
+                .harnesses
+                .get(harness)
+                .is_none_or(|policy| policy.gateway_models.is_empty())
+        {
+            return Err(format!(
+                "gateway-mode harness `{harness}` requires at least one gateway model"
+            ));
         }
     }
     for (harness, policy) in &config.harnesses {
@@ -10287,6 +10873,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn model_catalog_normalization_is_deterministic_and_strict() {
+        let catalog = normalize_model_catalog(ModelCatalog {
+            models: vec![
+                DiscoveredModel {
+                    id: "vendor/z".into(),
+                    display_name: Some("  Zed  ".into()),
+                    metadata: BTreeMap::new(),
+                },
+                DiscoveredModel {
+                    id: "vendor/a".into(),
+                    display_name: None,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            source_revision: Some("r1".into()),
+        })
+        .unwrap();
+        assert_eq!(catalog.models[0].id, "vendor/a");
+        assert_eq!(catalog.models[1].display_name.as_deref(), Some("Zed"));
+
+        let duplicate = normalize_model_catalog(ModelCatalog {
+            models: vec![
+                DiscoveredModel {
+                    id: "same".into(),
+                    display_name: None,
+                    metadata: BTreeMap::new(),
+                },
+                DiscoveredModel {
+                    id: "same".into(),
+                    display_name: None,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            source_revision: None,
+        });
+        assert!(matches!(
+            duplicate,
+            Err(ProvisionerError::DiscoveryResponse(_))
+        ));
+    }
+
+    #[test]
+    fn model_fingerprints_change_only_with_material_model_data() {
+        let first = DiscoveredModel {
+            id: "vendor/model".into(),
+            display_name: Some("Model".into()),
+            metadata: BTreeMap::from([("context".into(), json!(128_000))]),
+        };
+        let mut changed = first.clone();
+        changed.metadata.insert("context".into(), json!(256_000));
+        assert_eq!(
+            discovered_model_fingerprint(&first).unwrap(),
+            discovered_model_fingerprint(&first).unwrap()
+        );
+        assert_ne!(
+            discovered_model_fingerprint(&first).unwrap(),
+            discovered_model_fingerprint(&changed).unwrap()
+        );
+    }
+
     #[async_trait::async_trait]
     impl GatewayProvisioner for TestProvisioner {
         fn kind(&self) -> &'static str {
@@ -10321,6 +10968,7 @@ mod tests {
             policy_revision: None,
             timeout_seconds: default_provisioner_timeout(),
             max_concurrency: default_provisioner_max_concurrency(),
+            model_catalog_refresh_seconds: default_model_catalog_refresh_seconds(),
         };
         assert!(validate_linked_provisioner(Some(&matching), &linked).is_ok());
 
@@ -10332,6 +10980,7 @@ mod tests {
             policy_revision: None,
             timeout_seconds: default_provisioner_timeout(),
             max_concurrency: default_provisioner_max_concurrency(),
+            model_catalog_refresh_seconds: default_model_catalog_refresh_seconds(),
         };
         assert!(validate_linked_provisioner(Some(&mismatched), &linked).is_err());
 
@@ -10373,6 +11022,7 @@ mod tests {
         let provisioner = gateway_provisioner(&Some(selected)).unwrap().unwrap();
         assert_eq!(provisioner.kind, "company-litellm");
         assert_eq!(provisioner.reconcile_ttl_seconds, 3600);
+        assert_eq!(provisioner.model_catalog_refresh_seconds, 300);
 
         let runtime_module: serde_yaml::Value = serde_yaml::from_str(
             "gateway:\n  provisioner:\n    type: company-runtime\n    executable_path: /etc/blue/provisioner\n    executable_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n    policy_revision: v1\n    timeout_seconds: 7\n",
@@ -10391,6 +11041,12 @@ mod tests {
         )
         .unwrap();
         assert!(gateway_provisioner(&Some(invalid_ttl)).is_err());
+
+        let invalid_catalog_ttl: serde_yaml::Value = serde_yaml::from_str(
+            "gateway:\n  provisioner:\n    type: company-runtime\n    model_catalog_refresh_seconds: 29\n",
+        )
+        .unwrap();
+        assert!(gateway_provisioner(&Some(invalid_catalog_ttl)).is_err());
 
         let gateway_policy: serde_yaml::Value = serde_yaml::from_str(
             "gateway:\n  provisioner:\n    type: company-litellm\n    config:\n      max_budget: 100\n",
@@ -10865,6 +11521,49 @@ mod tests {
     }
 
     #[test]
+    fn gateway_model_assignment_validation_rejects_empty_duplicate_and_unassigned_defaults() {
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../deploy/blue.yaml")).unwrap();
+        let mut baseline: gh_service::GovernanceConfig =
+            serde_yaml::from_value(document["governance"].clone()).unwrap();
+        baseline.gateway = Some(
+            serde_json::from_value(json!({ "type": "litellm", "auth_style": "bearer" })).unwrap(),
+        );
+        for (harness, policy) in &mut baseline.harnesses {
+            policy.gateway_models = vec![format!("{harness}-test")];
+        }
+
+        let mut empty = baseline.clone();
+        empty
+            .harnesses
+            .get_mut("claude")
+            .unwrap()
+            .gateway_models
+            .clear();
+        assert!(validate_complete_governance(&empty)
+            .unwrap_err()
+            .contains("requires at least one gateway model"));
+
+        let mut duplicate = baseline.clone();
+        duplicate
+            .harnesses
+            .get_mut("claude")
+            .unwrap()
+            .gateway_models = vec!["claude-test".into(), "claude-test".into()];
+        assert!(validate_complete_governance(&duplicate)
+            .unwrap_err()
+            .contains("duplicate gateway model"));
+
+        let mut unassigned = baseline;
+        let claude = unassigned.harnesses.get_mut("claude").unwrap();
+        claude.gateway_models = vec!["claude-test".into()];
+        claude.managed_config.model = Some("not-assigned".into());
+        assert!(validate_complete_governance(&unassigned)
+            .unwrap_err()
+            .contains("selected gateway model is not assigned"));
+    }
+
+    #[test]
     fn package_validation_rejects_duplicates_and_mutable_digests() {
         let package = gh_service::ManagedPackage {
             id: "review-kit".into(),
@@ -11056,8 +11755,7 @@ mod tests {
         // A `managed_yaml` round-trip as the dashboard/CLI sends it: the client
         // echoes back a document whose stored revision was written without the
         // gateway capability (a governance-only control-api reconciled it away).
-        let managed_yaml =
-            "revision: r1\nallowed_harnesses:\n  - codex\ngateway:\n  type: litellm\n";
+        let managed_yaml = "revision: r1\nallowed_harnesses:\n  - codex\nharnesses:\n  codex:\n    gateway_models: [gpt-test]\ngateway:\n  type: litellm\n";
         let mut config =
             gh_service::source::parse_config(std::path::Path::new("config.yaml"), managed_yaml)
                 .unwrap();
