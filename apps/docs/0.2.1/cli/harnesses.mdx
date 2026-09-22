@@ -1,0 +1,37 @@
+---
+title: "Supported harnesses"
+description: "See how Codex, Claude Code, Kimi Code, and OpenCode receive governed launch overlays."
+icon: "code"
+---
+
+Blue detects supported agents from `PATH`. It keeps the configured default agent reconciled and configures another allowed, installed agent just in time when you launch it through Blue.
+
+| Harness | Governed configuration strategy |
+| --- | --- |
+| Codex | A dedicated governed profile and managed configuration file; the native default profile is untouched. |
+| Claude Code | Additional settings and MCP files passed only to the governed process. |
+| Kimi Code | An isolated `KIMI_CODE_HOME` containing the governed overlay. |
+| OpenCode | Explicit configuration and authentication overlay environment variables. |
+
+See [Managed configuration](/0.2.1/concepts/managed-configuration) for the exact files on each side of that split and for what a governed launch inherits from your own configuration.
+
+## Direct and governed launches
+
+```bash
+codex           # native configuration only
+blue codex   # organization overlay for this launch
+```
+
+Installing shims makes the familiar agent command resolve through `blue`. Remove the shims to restore direct resolution.
+
+## Managed Codex policy
+
+The example policy pins Codex to `gpt-5.6-sol`, sets reasoning effort to `low`, and disables Fast mode. When Fast mode is disabled, the overlay also selects the default service tier.
+
+## MCP reconciliation
+
+Remote MCP entries are suggestions keyed by name. The CLI adds a missing enabled entry but preserves all local entries. A local name collision wins, even when its command or URL differs from the remote suggestion.
+
+## Session hooks
+
+Each selected compatibility interval receives a session-upload hook when the global policy contains `session_upload` and that interval supports the required lifecycle event. Unsupported historical intervals still reconcile other policy and report that capture is inactive. Removing the top-level block removes Blue's managed hooks without touching unrelated hooks.
