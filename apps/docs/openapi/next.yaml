@@ -1689,11 +1689,17 @@ components:
       type: object
       required: [revision, allowed_harnesses]
       properties:
+        effective_verified_ceilings:
+          type: object
+          description: Server-validated exclusive certification ceilings keyed by harness then compiled profile; omitted entries use compiled ceilings.
+          additionalProperties:
+            type: object
+            additionalProperties: { type: string }
         revision: { type: string, description: "Reconcile key; daemon acts on change", example: 251e6087-98cf-4861-9668-f09f537d5e4d }
         contract_version: { type: integer, default: 1, description: Governance wire contract version }
         required_capabilities:
           type: array
-          items: { type: string, enum: [adapter_intervals, compiled_harness_registry, tenant_client_version_pin, transactional_reconcile, unverified_harness_versions, versioned_state] }
+          items: { type: string, enum: [adapter_intervals, compiled_harness_registry, dynamic_verified_ceilings, tenant_client_version_pin, transactional_reconcile, unverified_harness_versions, versioned_state] }
         minimum_client_version: { type: string, description: Operator-visible rollout floor; required capabilities enforce compatibility }
         required_client_version:
           type: string
