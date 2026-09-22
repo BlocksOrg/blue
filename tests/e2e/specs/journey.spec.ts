@@ -161,6 +161,18 @@ test.describe.serial("Blue deployment journey", () => {
     expect(refreshedClaims.aud).toBeTruthy();
   });
 
+  test("@smoke authenticated users are redirected away from login", async ({ page }) => {
+    await loginAsAdmin(page);
+
+    await page.goto("/login", { waitUntil: "commit" });
+    await expect(page).toHaveURL(/\/sessions$/);
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+
+    await page.goto("/login?callbackURL=%2Fgateway", { waitUntil: "commit" });
+    await expect(page).toHaveURL(/\/gateway$/);
+    await expect(page.getByLabel("Email")).toHaveCount(0);
+  });
+
   test("@smoke executable provisioner creates managed gateway access", async () => {
     const result = await runCli(home, ["gateway"]);
     expect(result.code, result.stderr).toBe(0);
@@ -184,6 +196,7 @@ test.describe.serial("Blue deployment journey", () => {
     expect(originalResponse.status(), await originalResponse.text()).toBe(200);
     const original = await originalResponse.json();
     const gatewayConfig = YAML.parse(original.managed_yaml);
+    gatewayConfig.harnesses.codex.managed_config.model = "gpt-e2e";
     gatewayConfig.gateway = { type: "litellm" };
     const gatewayResponse = await page.request.put(`${control}/admin/governance-config`, {
       data: {
@@ -1576,11 +1589,11 @@ esac
       );
       await memberPage.getByRole("button", { name: "Provision key" }).click();
       expect((await posted).status()).toBe(200);
-      await expect(memberPage.getByRole("alert")).toContainText("gateway account is not provisioned: member has no upstream account");
+      await expect(memberPage.getByText("gateway account is not provisioned: member has no upstream account", { exact: true })).toBeVisible();
       await expect(memberPage.getByRole("tab", { name: "Key" })).toBeVisible();
 
       await memberPage.reload();
-      await expect(memberPage.getByRole("alert")).toContainText("gateway account is not provisioned: member has no upstream account");
+      await expect(memberPage.getByText("gateway account is not provisioned: member has no upstream account", { exact: true })).toBeVisible();
       const access = await memberContext.request.get(`${control}/gateway/key`);
       expect(access.status(), await access.text()).toBe(200);
       expect(await access.json()).toMatchObject({ status: "error", error: "gateway account is not provisioned: member has no upstream account" });
