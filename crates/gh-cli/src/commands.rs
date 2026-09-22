@@ -5323,6 +5323,7 @@ mod tests {
             revision: revision.to_owned(),
             contract_version: GovernanceConfig::CONTRACT_VERSION,
             required_capabilities: Vec::new(),
+            effective_verified_ceilings: Default::default(),
             minimum_client_version: None,
             required_client_version: None,
             ttl_seconds: None,

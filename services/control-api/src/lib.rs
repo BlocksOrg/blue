@@ -167,6 +167,8 @@ pub struct AppConfig {
     pub gateway_kms_max_concurrency: usize,
     pub gateway_kms_timeout_seconds: u64,
     pub run_background_jobs: bool,
+    pub known_versions_url: Option<String>,
+    pub known_versions_refresh_seconds: u64,
     pub blue_config_file: PathBuf,
     pub blue_config_overlay_files: Vec<PathBuf>,
     pub bootstrap_org: String,
@@ -277,6 +279,17 @@ impl AppConfig {
                 &["control_api", "run_background_jobs"],
                 "true",
             )?)?,
+            known_versions_url: {
+                let enabled = parse_bool_setting(&setting_or("HARNESS_KNOWN_VERSIONS_ENABLED", &settings, &["control_api", "known_versions", "enabled"], "true")?)?;
+                if enabled {
+                    let value = setting_or("HARNESS_KNOWN_VERSIONS_URL", &settings, &["control_api", "known_versions", "url"], "https://raw.githubusercontent.com/BlocksOrg/blue/main/known-agent-versions.json")?;
+                    let url = reqwest::Url::parse(&value).map_err(|error| ApiError::internal(format!("invalid known versions URL: {error}")))?;
+                    let loopback_http = url.scheme() == "http" && url.host_str().is_some_and(|host| host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+                    if url.scheme() != "https" && !loopback_http { return Err(ApiError::internal("known versions URL must use HTTPS (HTTP is allowed only for loopback tests)")); }
+                    Some(value)
+                } else { None }
+            },
+            known_versions_refresh_seconds: positive_setting("HARNESS_KNOWN_VERSIONS_REFRESH_SECONDS", &settings, &["control_api", "known_versions", "refresh_seconds"], 3600)? as u64,
             blue_config_file,
             blue_config_overlay_files,
             bootstrap_org: setting_or(
@@ -1075,6 +1088,7 @@ pub struct AppState {
     package_blob: BlobStore,
     config: AppConfig,
     http: reqwest::Client,
+    known_versions: KnownVersionsProvider,
     secret_protector: Option<SecretProtector>,
     gateway_provisioner: Option<Arc<dyn GatewayProvisioner>>,
     jwks: tokio::sync::RwLock<Option<CachedJwks>>,
@@ -1082,6 +1096,83 @@ pub struct AppState {
     revision_events: tokio::sync::broadcast::Sender<RevisionSignal>,
     gateway_kms_permits: Arc<tokio::sync::Semaphore>,
     gateway_provisioning_permits: Arc<tokio::sync::Semaphore>,
+}
+
+#[derive(Clone, Default)]
+struct KnownVersionsSnapshot {
+    ceilings: gh_config::EffectiveVerifiedCeilings,
+    etag: Option<String>,
+    refreshed_at: Option<OffsetDateTime>,
+}
+
+struct KnownVersionsProvider {
+    url: Option<String>,
+    http: reqwest::Client,
+    snapshot: tokio::sync::RwLock<KnownVersionsSnapshot>,
+}
+
+impl KnownVersionsProvider {
+    fn new(url: Option<String>) -> Result<Self, ApiError> {
+        Ok(Self {
+            url,
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|error| {
+                    ApiError::internal(format!("building known versions client: {error}"))
+                })?,
+            snapshot: tokio::sync::RwLock::new(KnownVersionsSnapshot::default()),
+        })
+    }
+
+    async fn refresh(&self) -> Result<bool, String> {
+        let Some(url) = &self.url else {
+            return Ok(false);
+        };
+        let etag = self.snapshot.read().await.etag.clone();
+        let mut request = self.http.get(url);
+        if let Some(etag) = etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("request failed: {error}"))?;
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            return Err(format!("HTTP {}", response.status()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > 64 * 1024)
+        {
+            return Err("response exceeds 64 KiB".into());
+        }
+        let next_etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| format!("reading response failed: {error}"))?;
+        if bytes.len() > 64 * 1024 {
+            return Err("response exceeds 64 KiB".into());
+        }
+        let ceilings = gh_config::KnownVersionsManifest::parse_and_validate(&bytes)?;
+        let mut snapshot = self.snapshot.write().await;
+        let changed = snapshot.ceilings != ceilings;
+        *snapshot = KnownVersionsSnapshot {
+            ceilings,
+            etag: next_etag,
+            refreshed_at: Some(OffsetDateTime::now_utc()),
+        };
+        Ok(changed)
+    }
 }
 
 struct GatewayJwtKeyRing {
@@ -1523,6 +1614,7 @@ async fn build_app_inner(
         .map(|value| value.max_concurrency)
         .unwrap_or_else(default_provisioner_max_concurrency)
         .min((config.database_max_connections as usize / 2).max(1));
+    let known_versions = KnownVersionsProvider::new(config.known_versions_url.clone())?;
     let state = Arc::new(AppState {
         pool,
         gateway_log_pool,
@@ -1533,6 +1625,7 @@ async fn build_app_inner(
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .map_err(|error| ApiError::internal(format!("building auth client: {error}")))?,
+        known_versions,
         secret_protector,
         gateway_provisioner,
         jwks: tokio::sync::RwLock::new(None),
@@ -1547,9 +1640,34 @@ async fn build_app_inner(
         state.pool.clone(),
         revision_events,
     ));
+    match state.known_versions.refresh().await {
+        Ok(changed) => tracing::info!(changed, "known agent versions refreshed"),
+        Err(reason) => {
+            tracing::warn!(%reason, "known agent versions unavailable; using compiled ceilings")
+        }
+    }
     if state.config.run_background_jobs {
         tokio::spawn(cleanup_gateway_request_logs(state.gateway_log_pool.clone()));
         tokio::spawn(process_gateway_revocations(state.clone()));
+        let refresh_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                refresh_state.config.known_versions_refresh_seconds,
+            ));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match refresh_state.known_versions.refresh().await {
+                    Ok(true) => {
+                        let _ = refresh_state.revision_events.send(RevisionSignal::Resync);
+                    }
+                    Ok(false) => {}
+                    Err(reason) => {
+                        tracing::warn!(%reason, "known agent versions refresh failed; retaining last valid snapshot")
+                    }
+                }
+            }
+        });
     }
 
     let public_routes = Router::new()
@@ -2068,10 +2186,16 @@ async fn update_branding(
     Ok(Json(value))
 }
 
-async fn harness_metadata() -> Result<Json<serde_json::Value>, ApiError> {
+async fn harness_metadata(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let snapshot = state.known_versions.snapshot.read().await;
     Ok(Json(json!({
         "contract_version": gh_service::GovernanceConfig::CONTRACT_VERSION,
         "harnesses": gh_config::implementations::registry_metadata(),
+        "effective_verified_ceilings": snapshot.ceilings.0,
+        "known_versions_source": if state.known_versions.url.is_some() { "public_manifest" } else { "compiled" },
+        "known_versions_refreshed_at": snapshot.refreshed_at.and_then(|value| value.format(&Rfc3339).ok()),
     })))
 }
 
@@ -5086,8 +5210,23 @@ async fn governance_config(
 ) -> Result<Response, ApiError> {
     let row = current_config(&state.pool, who.organization_id).await?;
     let revision = row.revision;
-    let mut config = serde_json::from_value(row.document)
+    let mut config: gh_service::GovernanceConfig = serde_json::from_value(row.document)
         .map_err(|error| ApiError::internal(format!("decoding stored config: {error}")))?;
+    let effective = state.known_versions.snapshot.read().await.ceilings.clone();
+    if !effective.0.is_empty() {
+        let extends_compiled = effective.extends_compiled_registry();
+        config.effective_verified_ceilings = effective.0;
+        if extends_compiled
+            && !config
+                .required_capabilities
+                .iter()
+                .any(|value| value == "dynamic_verified_ceilings")
+        {
+            config
+                .required_capabilities
+                .push("dynamic_verified_ceilings".into());
+        }
+    }
     let runtime_version = std::env::var("BLUE_DEPLOYMENT_VERSION").ok();
     let deployment_version = default_client_version(runtime_version.as_deref());
     let pin_headers = prepare_client_version_pin(&mut config, &deployment_version)?;
@@ -5347,7 +5486,7 @@ fn reconciliation_scope(
 }
 
 async fn classify_client_revision(
-    pool: &PgPool,
+    state: &AppState,
     organization_id: Uuid,
     user_id: Uuid,
     input: &ClientStatusRequest,
@@ -5368,7 +5507,7 @@ async fn classify_client_revision(
         organization_id,
         revision
     )
-    .fetch_optional(pool)
+    .fetch_optional(&state.pool)
     .await?;
     let Some(document) = document else {
         return Ok(RevisionHealth {
@@ -5378,7 +5517,8 @@ async fn classify_client_revision(
     };
     let mut config: gh_service::GovernanceConfig = serde_json::from_value(document)
         .map_err(|error| ApiError::internal(format!("decoding stored config: {error}")))?;
-    personalize_package_config(pool, revision, user_id, &mut config).await?;
+    personalize_package_config(&state.pool, revision, user_id, &mut config).await?;
+    let effective = state.known_versions.snapshot.read().await.ceilings.clone();
 
     let mut reasons = Vec::new();
     let applied_for_revision = input.applied && input.config_revision.as_deref() == Some(revision);
@@ -5433,9 +5573,13 @@ async fn classify_client_revision(
             let (version, raw_version) = reported_version(entry);
             let default_policy = gh_service::HarnessPolicy::default();
             let policy = config.policy(name).unwrap_or(&default_policy);
-            if let Err(error) =
-                gh_config::resolve_compatibility(harness, version.as_ref(), raw_version, policy)
-            {
+            if let Err(error) = gh_config::resolve_compatibility_with_effective(
+                harness,
+                version.as_ref(),
+                raw_version,
+                policy,
+                &effective,
+            ) {
                 reasons.push(format!("{name}: {error}"));
             }
         }
@@ -5585,8 +5729,7 @@ async fn report_client_status(
             ));
         }
     }
-    let health =
-        classify_client_revision(&state.pool, who.organization_id, who.user_id, &input).await?;
+    let health = classify_client_revision(&state, who.organization_id, who.user_id, &input).await?;
     sqlx::query!("insert into public.client_status (id,organization_id,user_id,instance_id,hostname,client_version,platform,architecture,config_revision,applied,files_ok,harnesses,packages,error,revision_matches,status_reasons) \
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
          on conflict (user_id,instance_id) do update set hostname=excluded.hostname,client_version=excluded.client_version, \
@@ -10377,6 +10520,8 @@ mod tests {
             gateway_kms_max_concurrency: 4,
             gateway_kms_timeout_seconds: 5,
             run_background_jobs: false,
+            known_versions_url: None,
+            known_versions_refresh_seconds: 3600,
             blue_config_file: PathBuf::from("/etc/blue/blue.yaml"),
             blue_config_overlay_files: Vec::new(),
             bootstrap_org: "org".into(),

@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use gh_common::{GhError, Harness};
 use gh_config::{
     acquire_revision_locks, preflight_packages, preflight_packages_with_fetcher,
-    resolve_compatibility, teardown_inactive_packages, write_harness_with_package_fetcher,
-    write_harness_with_packages, AuthenticatedPackageFetcher, HarnessWrite, PackageFetcher,
-    ProfileStatus, WriteOptions,
+    resolve_compatibility_with_effective, teardown_inactive_packages,
+    write_harness_with_package_fetcher, write_harness_with_packages, AuthenticatedPackageFetcher,
+    HarnessWrite, PackageFetcher, ProfileStatus, WriteOptions,
 };
 use gh_harness::HarnessInventory;
 use gh_service::{GovernanceConfig, HarnessPolicy, ServiceClient, Session};
@@ -27,6 +27,7 @@ pub struct HarnessReconcile {
 /// Annotate a PATH inventory with the exact compatibility decision that will
 /// be used by reconciliation and launch.
 pub fn evaluate_inventory(config: &GovernanceConfig, inventory: &mut HarnessInventory) {
+    let ceilings = gh_config::EffectiveVerifiedCeilings(config.effective_verified_ceilings.clone());
     let empty = HarnessPolicy::default();
     for entry in &mut inventory.entries {
         if !(entry.api_allowed && entry.client_supported && entry.installed) {
@@ -36,11 +37,12 @@ pub fn evaluate_inventory(config: &GovernanceConfig, inventory: &mut HarnessInve
             continue;
         };
         let policy = config.policy(&entry.name).unwrap_or(&empty);
-        match resolve_compatibility(
+        match resolve_compatibility_with_effective(
             harness,
             entry.version.as_ref(),
             entry.raw_version.as_deref(),
             policy,
+            &ceilings,
         ) {
             Ok(context) => {
                 entry.compatibility_profile = Some(context.profile.id.to_owned());
@@ -100,6 +102,7 @@ fn apply_once_with_inventory_and_optional_fetcher(
     let mut opts = opts;
     opts.session_upload_enabled = config.session_upload.is_some();
     let empty = HarnessPolicy::default();
+    let ceilings = gh_config::EffectiveVerifiedCeilings(config.effective_verified_ceilings.clone());
 
     // Compatibility is a revision-wide preflight. Never begin mutating one
     // harness if another required, installed harness cannot be planned.
@@ -121,11 +124,12 @@ fn apply_once_with_inventory_and_optional_fetcher(
             continue;
         };
         let policy = config.policy(&entry.name).unwrap_or(&empty);
-        match resolve_compatibility(
+        match resolve_compatibility_with_effective(
             harness,
             entry.version.as_ref(),
             entry.raw_version.as_deref(),
             policy,
+            &ceilings,
         ) {
             Err(error) => {
                 preflight_failures.push((harness, error.with_install_hint(policy)));
@@ -474,6 +478,7 @@ mod tests {
             revision: "r1".into(),
             contract_version: GovernanceConfig::CONTRACT_VERSION,
             required_capabilities: Vec::new(),
+            effective_verified_ceilings: Default::default(),
             minimum_client_version: None,
             required_client_version: None,
             ttl_seconds: None,

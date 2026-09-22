@@ -357,7 +357,7 @@ export function HarnessConfigEditor({
           <TableHeader className="bg-background/35 text-muted-foreground">
             <TableRow>
               <TableHead>Harness</TableHead>
-              <TableHead>Supported versions</TableHead>
+              <TableHead>Adapter interval / verified ceiling</TableHead>
               <TableHead>Allowed versions</TableHead>
               <TableHead>Managed config</TableHead>
               <TableHead className="text-right">Actions</TableHead>

@@ -9,6 +9,7 @@ pub mod implementations {
     pub use super::adapters::*;
 }
 mod compat;
+pub mod known_versions;
 mod package_archive;
 mod packages;
 mod plan;
@@ -40,9 +41,12 @@ pub(crate) fn managed_runtime_dir(home: &std::path::Path) -> PathBuf {
 }
 
 pub use compat::{
-    resolve as resolve_compatibility, supported_install, validate_package_adapter_for_policy,
+    resolve as resolve_compatibility,
+    resolve_with_effective as resolve_compatibility_with_effective, supported_install,
+    supported_install_with_effective, validate_package_adapter_for_policy,
     validate_package_adapters_for_policy, CompatibilityFailure, HarnessContext, ProfileStatus,
 };
+pub use known_versions::{EffectiveVerifiedCeilings, KnownVersionsManifest};
 pub use packages::PackageFetcher;
 
 pub struct AuthenticatedPackageFetcher<'a> {

@@ -6,6 +6,7 @@
 //! renderer until its announced deprecation.
 
 use crate::adapters::{self, HarnessImplementation, ImplementationLifecycle, VersionInterval};
+use crate::known_versions::EffectiveVerifiedCeilings;
 use gh_common::{GhError, Harness, InstallInvocation};
 use gh_service::HarnessPolicy;
 use semver::{Version, VersionReq};
@@ -88,7 +89,7 @@ pub enum CompatibilityFailure {
         harness: Harness,
         installed: Version,
         profile: &'static str,
-        verified_before: &'static str,
+        verified_before: String,
     },
 }
 
@@ -156,6 +157,18 @@ pub fn supported_install(
     harness: Harness,
     harness_policy: &HarnessPolicy,
 ) -> Result<InstallInvocation, GhError> {
+    supported_install_with_effective(
+        harness,
+        harness_policy,
+        &EffectiveVerifiedCeilings::default(),
+    )
+}
+
+pub fn supported_install_with_effective(
+    harness: Harness,
+    harness_policy: &HarnessPolicy,
+    ceilings: &EffectiveVerifiedCeilings,
+) -> Result<InstallInvocation, GhError> {
     if harness_policy.allow_unverified_versions
         && harness_policy
             .version_requirement
@@ -181,10 +194,15 @@ pub fn supported_install(
         .iter()
         .rev()
         .find(|registration| {
-            interval_intersects(
+            interval_intersects_with_effective(
                 &registration.interval,
                 policy.as_ref(),
                 harness_policy.allow_unverified_versions,
+                ceilings.effective(
+                    harness.key(),
+                    registration.interval.profile,
+                    registration.interval.verified_before,
+                ),
             )
         })
         .ok_or_else(|| {
@@ -201,14 +219,16 @@ pub fn supported_install(
     let upper = if harness_policy.allow_unverified_versions {
         interval.before
     } else {
+        let effective =
+            ceilings.effective(harness.key(), interval.profile, interval.verified_before);
         match interval.before {
             Some(before)
                 if Version::parse(before).expect("compiled interval")
-                    < Version::parse(interval.verified_before).expect("compiled ceiling") =>
+                    < Version::parse(effective).expect("validated ceiling") =>
             {
                 Some(before)
             }
-            _ => Some(interval.verified_before),
+            _ => Some(effective),
         }
     };
     if let Some(upper) = upper {
@@ -227,12 +247,27 @@ pub(crate) fn interval_intersects(
     requirement: Option<&VersionReq>,
     allow_unverified: bool,
 ) -> bool {
+    interval_intersects_with_effective(
+        interval,
+        requirement,
+        allow_unverified,
+        interval.verified_before,
+    )
+}
+
+fn interval_intersects_with_effective(
+    interval: &VersionInterval,
+    requirement: Option<&VersionReq>,
+    allow_unverified: bool,
+    effective_verified_before: &str,
+) -> bool {
     let lower = Version::parse(interval.introduced).expect("compiled interval");
     let mut upper = interval
         .before
         .map(|value| Version::parse(value).expect("compiled interval"));
     if !allow_unverified {
-        let verified = Version::parse(interval.verified_before).expect("compiled verified ceiling");
+        let verified =
+            Version::parse(effective_verified_before).expect("validated verified ceiling");
         if upper.as_ref().is_none_or(|value| verified < *value) {
             upper = Some(verified);
         }
@@ -469,14 +504,53 @@ pub fn resolve(
     raw_version: Option<&str>,
     policy: &HarnessPolicy,
 ) -> Result<HarnessContext, CompatibilityFailure> {
-    resolve_for_definition(adapters::definition(harness), version, raw_version, policy)
+    resolve_with_effective(
+        harness,
+        version,
+        raw_version,
+        policy,
+        &EffectiveVerifiedCeilings::default(),
+    )
 }
 
+pub fn resolve_with_effective(
+    harness: Harness,
+    version: Option<&Version>,
+    raw_version: Option<&str>,
+    policy: &HarnessPolicy,
+    ceilings: &EffectiveVerifiedCeilings,
+) -> Result<HarnessContext, CompatibilityFailure> {
+    resolve_for_definition_with_effective(
+        adapters::definition(harness),
+        version,
+        raw_version,
+        policy,
+        ceilings,
+    )
+}
+
+#[cfg(test)]
 pub fn resolve_for_definition(
     definition: &'static adapters::HarnessDefinition,
     version: Option<&Version>,
     raw_version: Option<&str>,
     policy: &HarnessPolicy,
+) -> Result<HarnessContext, CompatibilityFailure> {
+    resolve_for_definition_with_effective(
+        definition,
+        version,
+        raw_version,
+        policy,
+        &EffectiveVerifiedCeilings::default(),
+    )
+}
+
+fn resolve_for_definition_with_effective(
+    definition: &'static adapters::HarnessDefinition,
+    version: Option<&Version>,
+    raw_version: Option<&str>,
+    policy: &HarnessPolicy,
+    ceilings: &EffectiveVerifiedCeilings,
 ) -> Result<HarnessContext, CompatibilityFailure> {
     let harness = definition.harness;
     let raw = raw_version.unwrap_or("unknown");
@@ -518,18 +592,19 @@ pub fn resolve_for_definition(
             installed: version.clone(),
         }
     })?;
-    let verified_before =
-        Version::parse(profile.interval.verified_before).expect("compiled verified ceiling");
+    let effective_ceiling =
+        ceilings.effective(harness.key(), profile.id, profile.interval.verified_before);
+    let verified_before = Version::parse(effective_ceiling).expect("validated verified ceiling");
     let unverified = version >= &verified_before;
     if unverified && !policy.allow_unverified_versions {
         return Err(CompatibilityFailure::UnverifiedGeneration {
             harness,
             installed: version.clone(),
             profile: profile.id,
-            verified_before: profile.interval.verified_before,
+            verified_before: effective_ceiling.to_owned(),
         });
     }
-    let unverified_warning = unverified.then(|| format!("{harness} {version} is at or beyond Blue's exclusive certified ceiling {} for {}; continuing because allow_unverified_versions is enabled. Vendor breaking changes may produce invalid configuration", profile.interval.verified_before, profile.id));
+    let unverified_warning = unverified.then(|| format!("{harness} {version} is at or beyond Blue's exclusive certified ceiling {} for {}; continuing because allow_unverified_versions is enabled. Vendor breaking changes may produce invalid configuration", effective_ceiling, profile.id));
     Ok(HarnessContext {
         definition,
         harness,

@@ -1,6 +1,6 @@
 import { api, requireAdminIdentity } from "@/lib/api";
 import { HarnessConfigEditor } from "./harness-config-editor";
-import type { HarnessMetadataResponse } from "@/lib/harness-metadata";
+import { effectiveHarnesses, type HarnessMetadataResponse } from "@/lib/harness-metadata";
 
 type HarnessManagedConfigs = {
   revision: string;
@@ -22,7 +22,7 @@ export default async function Harnesses() {
       configurations={value.configurations}
       versionRequirements={value.version_requirements}
       unverifiedOverrides={value.allow_unverified_versions}
-      harnesses={metadata.harnesses}
+      harnesses={effectiveHarnesses(metadata)}
     />
   );
 }

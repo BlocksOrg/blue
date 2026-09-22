@@ -4,6 +4,10 @@
 control_api:
   listen: 0.0.0.0:8080
   database_url: os.environ/HARNESS_DATABASE_URL
+  known_versions:
+    enabled: true
+    url: https://raw.githubusercontent.com/BlocksOrg/blue/main/known-agent-versions.json
+    refresh_seconds: 3600
 
   bootstrap:
     organization_slug: dev
