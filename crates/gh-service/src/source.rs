@@ -79,22 +79,21 @@ fn session_rejection(status: reqwest::StatusCode, detail: Option<&str>) -> GhErr
 /// Fetches from `GET {base_url}/governance-config` with a bearer token.
 pub struct HttpConfigSource {
     base_url: String,
+    client_version: String,
     client: reqwest::blocking::Client,
 }
 
 impl HttpConfigSource {
-    pub fn new(base_url: impl Into<String>) -> Result<Self, GhError> {
+    pub fn new(base_url: impl Into<String>, client_version: &str) -> Result<Self, GhError> {
         let client = reqwest::blocking::Client::builder()
-            // `format!`, not `concat!`: `concat!` needs a literal, and the
-            // version is only a literal for a release build. A candidate has
-            // to identify itself as one here too.
-            .user_agent(format!("blue/{}", gh_common::blue_version()))
+            .user_agent(format!("blue/{client_version}"))
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(|e| GhError::service(format!("building http client: {e}")))?;
         Ok(HttpConfigSource {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             client,
+            client_version: client_version.into(),
         })
     }
 
@@ -130,6 +129,31 @@ impl ConfigSource for HttpConfigSource {
             let detail = server_error_detail(&resp.text().unwrap_or_default());
             return Err(session_rejection(status, detail.as_deref()));
         }
+        let pin = if status.is_success() || status == reqwest::StatusCode::UPGRADE_REQUIRED {
+            if resp
+                .headers()
+                .get_all("x-blue-required-client-version")
+                .iter()
+                .count()
+                > 1
+            {
+                return Err(GhError::config("multiple required client version headers"));
+            }
+            resp.headers()
+                .get("x-blue-required-client-version")
+                .map(|value| {
+                    value
+                        .to_str()
+                        .map(str::to_owned)
+                        .map_err(|_| GhError::config("invalid required client version header"))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if let Some(required) = &pin {
+            GovernanceConfig::check_client_version(required, &self.client_version)?;
+        }
         if status == reqwest::StatusCode::UPGRADE_REQUIRED {
             let body = bounded_detail(&resp.text().unwrap_or_default())
                 .unwrap_or_else(|| "no error detail".to_owned());
@@ -153,8 +177,15 @@ impl ConfigSource for HttpConfigSource {
         }
         let config = resp
             .json::<GovernanceConfig>()
-            .map_err(|e| GhError::service(format!("decoding governance-config: {e}")))?;
-        config.ensure_client_compatible().map_err(GhError::config)?;
+            .map_err(|e| GhError::Serde(format!("decoding governance-config: {e}")))?;
+        if let Some(required) = pin {
+            if config.required_client_version.as_deref() != Some(required.as_str()) {
+                return Err(GhError::config(
+                    "required client version header and document disagree",
+                ));
+            }
+        }
+        config.ensure_client_compatible(&self.client_version)?;
         Ok(config)
     }
 
@@ -167,11 +198,15 @@ impl ConfigSource for HttpConfigSource {
 /// the minimal self-host (Control API over a static file uses the same shape).
 pub struct FileConfigSource {
     path: PathBuf,
+    client_version: String,
 }
 
 impl FileConfigSource {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        FileConfigSource { path: path.into() }
+    pub fn new(path: impl Into<PathBuf>, client_version: &str) -> Self {
+        FileConfigSource {
+            path: path.into(),
+            client_version: client_version.into(),
+        }
     }
 }
 
@@ -182,7 +217,7 @@ impl ConfigSource for FileConfigSource {
             source: e,
         })?;
         let config = parse_config(&self.path, &text)?;
-        config.ensure_client_compatible().map_err(GhError::config)?;
+        config.ensure_client_compatible(&self.client_version)?;
         Ok(config)
     }
 
@@ -218,10 +253,10 @@ mod tests {
 
     #[test]
     fn source_descriptions_distinguish_http_endpoints_from_local_files() {
-        let http = HttpConfigSource::new("https://api.bluee.sh/").unwrap();
+        let http = HttpConfigSource::new("https://api.bluee.sh/", "1.2.3").unwrap();
         assert_eq!(http.describe(), "https://api.bluee.sh/governance-config");
 
-        let file = FileConfigSource::new("/tmp/blue-governance.yaml");
+        let file = FileConfigSource::new("/tmp/blue-governance.yaml", "1.2.3");
         assert_eq!(file.describe(), "file(/tmp/blue-governance.yaml)");
     }
 
@@ -311,5 +346,111 @@ governance:
 "#;
         let cfg = parse_config(std::path::Path::new("blue.yaml"), yaml).unwrap();
         assert!(cfg.is_allowed("codex"));
+    }
+}
+
+#[cfg(test)]
+mod client_version_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    fn fetch_response(
+        status: &str,
+        headers: &str,
+        body: &str,
+    ) -> Result<GovernanceConfig, GhError> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut request = [0; 8192];
+            let _ = stream.read(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let result = HttpConfigSource::new(format!("http://{address}"), "7.8.9")
+            .unwrap()
+            .fetch(&Session::bearer("fixture"));
+        thread.join().unwrap();
+        result
+    }
+    #[test]
+    fn http_header_enforces_pin_on_success_and_426_but_auth_has_priority() {
+        for status in ["200 OK", "426 Upgrade Required"] {
+            assert!(matches!(
+                fetch_response(
+                    status,
+                    "X-Blue-Required-Client-Version: 8.0.0\r\n",
+                    "not a document"
+                ),
+                Err(GhError::ClientVersionMismatch { .. })
+            ));
+        }
+        assert!(matches!(
+            fetch_response(
+                "401 Unauthorized",
+                "X-Blue-Required-Client-Version: 8.0.0\r\n",
+                ""
+            ),
+            Err(GhError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            fetch_response(
+                "426 Upgrade Required",
+                "X-Blue-Required-Client-Version: 7.9.0\r\n",
+                "unsupported capability"
+            ),
+            Err(GhError::Config(_))
+        ));
+    }
+    #[test]
+    fn http_rejects_malformed_and_conflicting_pins_and_supports_old_servers() {
+        let body = r#"{"revision":"r1", "required_client_version":"7.8.9"}"#;
+        assert!(
+            fetch_response("200 OK", "X-Blue-Required-Client-Version: 7.8.9\r\n", body).is_ok()
+        );
+        assert!(fetch_response(
+            "200 OK",
+            "X-Blue-Required-Client-Version: 7.9.0\r\n",
+            r#"{"revision":"r1", "required_client_version":"7.9.0"}"#
+        )
+        .is_ok());
+        assert!(fetch_response("200 OK", "", body).is_ok());
+        assert!(matches!(
+            fetch_response("200 OK", "X-Blue-Required-Client-Version: ^7.8.9\r\n", body),
+            Err(GhError::Config(_))
+        ));
+        assert!(matches!(
+            fetch_response(
+                "200 OK",
+                "X-Blue-Required-Client-Version: 7.8.9\r\n",
+                r#"{"revision":"r1","required_client_version":"7.8.10"}"#
+            ),
+            Err(GhError::Config(_))
+        ));
+    }
+    #[test]
+    fn file_source_uses_executing_cli_version() {
+        let _guard = crate::cache::test_support::with_cache_home("version-file");
+        let path = gh_common::paths::blue_config_dir()
+            .unwrap()
+            .join("pin.yaml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "revision: r1\nrequired_client_version: 7.8.9\n").unwrap();
+        assert!(FileConfigSource::new(&path, "7.8.9")
+            .fetch(&Session::bearer("fixture"))
+            .is_ok());
+        assert!(matches!(
+            FileConfigSource::new(&path, "8.0.0").fetch(&Session::bearer("fixture")),
+            Err(GhError::ClientVersionMismatch { .. })
+        ));
+        assert!(FileConfigSource::new(&path, "7.8.10")
+            .fetch(&Session::bearer("fixture"))
+            .is_ok());
     }
 }

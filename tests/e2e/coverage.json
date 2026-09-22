@@ -37,7 +37,16 @@
     "test": "journey.spec.ts",
     "behavioral_tests": [
       "same-base concurrent updates produce one revision and one conflict",
-      "invalid YAML, runtime gateway fields, and unsupported harnesses do not publish revisions"
+      "invalid YAML, runtime gateway fields, and unsupported harnesses do not publish revisions",
+      "tenant client-version recommendations allow same-major drift while cross-major pins reject without managed-state mutation"
+    ]
+  },
+  "client_version": {
+    "test": "client-version.spec.ts",
+    "behavioral_tests": [
+      "matching pins are exposed in governance headers and documents",
+      "missing tenant_client_version_pin capability returns 426 with the required version header",
+      "noncanonical pins are rejected atomically and exact mismatches block apply and launch while reset remains available"
     ]
   }
 }

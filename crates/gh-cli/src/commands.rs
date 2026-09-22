@@ -25,7 +25,8 @@ use similar::{ChangeTag, TextDiff};
 /// Build the service client and load the (possibly default) client config.
 fn load_client() -> Result<(BlueToml, ServiceClient)> {
     let cfg = BlueToml::load().context("loading blue.toml")?;
-    let client = ServiceClient::from_config(&cfg).context("building service client")?;
+    let client = ServiceClient::from_config(&cfg, gh_common::blue_version())
+        .context("building service client")?;
     Ok((cfg, client))
 }
 
@@ -610,6 +611,7 @@ fn prepare_launch(
                 .context("fetching governance config")?
         }
     };
+    crate::client_version::warn_if_recommended(&config, true)?;
     let mut inventory = discover_inventory_cached(&config.allowed_harnesses, applied.as_ref());
     gh_agent::evaluate_inventory(&config, &mut inventory);
     Ok(PreparedLaunch {
@@ -722,6 +724,7 @@ fn agent_context() -> Result<AgentContext> {
     let config = client
         .fetch_or_cached(&session, now_unix())
         .context("fetching governance config")?;
+    crate::client_version::warn_if_recommended(&config, true)?;
     let applied = load_applied_state()?;
     let mut inventory = discover_inventory_cached(&config.allowed_harnesses, applied.as_ref());
     gh_agent::evaluate_inventory(&config, &mut inventory);
@@ -913,7 +916,8 @@ pub fn start() -> Result<()> {
         activate_discovered(discover_configuration(&prompt_control_api_url()?)?)?
     };
     let session = ensure_session_for_start(&cfg)?;
-    let client = ServiceClient::from_config(&cfg).context("building service client")?;
+    let client = ServiceClient::from_config(&cfg, gh_common::blue_version())
+        .context("building service client")?;
     let prepared = prepare_launch(cfg, client, session)?;
     // Keep installed-but-incompatible agents in the picker. `run_prepared`
     // persists the selection only after its authoritative version check, so a
@@ -999,11 +1003,18 @@ pub fn login(force: bool) -> Result<()> {
             // asking, and never `/auth/me`, which never reaches the code that
             // fails.
             let probe = if cfg.has_http_service() {
-                let client = ServiceClient::from_config(&cfg).context("building service client")?;
+                let client = ServiceClient::from_config(&cfg, gh_common::blue_version())
+                    .context("building service client")?;
                 Some(client.fetch(&session, now_unix()))
             } else {
                 None
             };
+            if matches!(
+                &probe,
+                Some(Err(gh_common::GhError::ClientVersionMismatch { .. }))
+            ) {
+                return Err(probe.unwrap().unwrap_err().into());
+            }
             let decision = match &probe {
                 Some(probe) => login_decision(is_oidc(&cfg), probe),
                 // A `file` source has no session for a service to reject.
@@ -1011,6 +1022,9 @@ pub fn login(force: bool) -> Result<()> {
             };
             match decision {
                 LoginDecision::Valid => {
+                    if let Some(Ok(config)) = &probe {
+                        crate::client_version::warn_if_recommended(config, true)?;
+                    }
                     println!("{}", describe_session(&session, "Already logged in"));
                     println!("Run `blue logout` before signing in with a different account.");
                     return Ok(());
@@ -1055,6 +1069,13 @@ pub fn login(force: bool) -> Result<()> {
         None => gh_service::login(&cfg).context("login")?,
     };
     println!("{}", describe_session(&session, "Logged in"));
+    let client = ServiceClient::from_config(&cfg, gh_common::blue_version())
+        .context("building service client")?;
+    match client.fetch(&session, now_unix()) {
+        Ok(config) => crate::client_version::warn_if_recommended(&config, true)?,
+        Err(error @ gh_common::GhError::ClientVersionMismatch { .. }) => return Err(error.into()),
+        Err(_) => {}
+    }
     Ok(())
 }
 
@@ -1424,6 +1445,12 @@ pub(crate) fn doctor_text() -> Result<String> {
     // the backing browser session is gone. Ask the service instead, live —
     // never through the cache, which cannot tell us anything about auth.
     let live = session_for(&cfg).map(|session| client.fetch(&session, now_unix()));
+    if matches!(
+        &live,
+        Ok(Err(gh_common::GhError::ClientVersionMismatch { .. }))
+    ) {
+        return Err(live.unwrap().unwrap_err().into());
+    }
     match (Session::load()?, cfg.has_http_service(), &live) {
         (None, true, _) => lines.push("  session       : MISSING (run `blue login`)".into()),
         (None, false, _) => lines.push("  session       : n/a (local file source)".into()),
@@ -1467,6 +1494,8 @@ pub(crate) fn doctor_text() -> Result<String> {
             .map(|cached| cached.config),
     };
     if let Some(c) = &allowed {
+        c.ensure_client_compatible(gh_common::blue_version())?;
+        crate::client_version::warn_if_recommended(c, true)?;
         lines.push(format!("  revision      : {}", c.revision));
         lines.push(format!(
             "  allowed       : {}",
@@ -2196,6 +2225,13 @@ pub fn status(strict: bool) -> Result<()> {
     Ok(())
 }
 
+fn tenant_version_text(config: &GovernanceConfig) -> &str {
+    config
+        .required_client_version
+        .as_deref()
+        .unwrap_or("not reported")
+}
+
 pub(crate) fn status_text(strict: bool) -> Result<String> {
     let (cfg, client) = load_client()?;
     let session = session_for(&cfg)?;
@@ -2203,6 +2239,7 @@ pub(crate) fn status_text(strict: bool) -> Result<String> {
     let desired = client
         .fetch_or_cached(&session, now_unix())
         .context("fetching desired configuration")?;
+    crate::client_version::warn_if_recommended(&desired, true)?;
     let applied = load_applied_state()?;
     let revision_ok = applied
         .as_ref()
@@ -2240,6 +2277,10 @@ pub(crate) fn status_text(strict: bool) -> Result<String> {
     )];
     if cfg.has_http_service() {
         lines.push(format!("Tenant URL     : {}", cfg.service.url));
+        lines.push(format!(
+            "Tenant version : {}",
+            tenant_version_text(&desired)
+        ));
     }
     lines.extend([
         format!("Desired config : {}", desired.revision),
@@ -2310,6 +2351,7 @@ pub fn config() -> Result<()> {
     let config = client
         .fetch_or_cached(&session, now_unix())
         .context("fetching governance config")?;
+    crate::client_version::warn_if_recommended(&config, true)?;
     println!("# source: {}", client.describe_source());
     println!("{}", serde_json::to_string_pretty(&config)?);
     Ok(())
@@ -2470,7 +2512,8 @@ pub fn run(name: &str, args: &[String]) -> Result<()> {
             );
         }
         let cfg = activate_discovered(discover_configuration(&prompt_control_api_url()?)?)?;
-        let client = ServiceClient::from_config(&cfg).context("building service client")?;
+        let client = ServiceClient::from_config(&cfg, gh_common::blue_version())
+            .context("building service client")?;
         (cfg, client)
     } else {
         load_client()?
@@ -2777,7 +2820,7 @@ fn run_prepared(
             startup.handoff()?;
         }
         let gateway_state = if config.gateway.is_some() && !cfg.mode.force_governance_only {
-            "managed"
+            "gateway"
         } else {
             "direct"
         };
@@ -2900,7 +2943,7 @@ fn start_revision_watcher(
     let pending_for_thread = notices.revision.clone();
     let auth_for_thread = notices.auth.clone();
     std::thread::spawn(move || {
-        let client = match ServiceClient::from_config(&cfg) {
+        let client = match ServiceClient::from_config(&cfg, gh_common::blue_version()) {
             Ok(client) => client,
             Err(error) => {
                 tracing::debug!(%error, "revision watcher could not start");
@@ -2952,13 +2995,16 @@ fn start_revision_watcher(
             // it the one place a dead session reliably surfaces: the OAuth
             // refresh above still succeeds after the browser session is gone.
             match client.fetch(&session, now_unix()) {
-                Ok(config) => handle_revision_notice(
-                    &active_revision,
-                    harness,
-                    config.revision,
-                    &mut seen,
-                    &pending_for_thread,
-                ),
+                Ok(config) => {
+                    trace_version_recommendation(&config, &mut seen);
+                    handle_revision_notice(
+                        &active_revision,
+                        harness,
+                        config.revision,
+                        &mut seen,
+                        &pending_for_thread,
+                    )
+                }
                 Err(error) => record_auth_notice(&error, &auth_for_thread),
             }
             std::thread::sleep(std::time::Duration::from_secs(reconnect_seconds));
@@ -2982,6 +3028,7 @@ fn poll_for_revisions(
         match session.refresh_if_needed(now_unix()) {
             Ok(()) => match client.fetch(session, now_unix()) {
                 Ok(config) => {
+                    trace_version_recommendation(&config, seen);
                     handle_revision_notice(active_revision, harness, config.revision, seen, pending)
                 }
                 Err(error) => record_auth_notice(&error, auth),
@@ -2992,10 +3039,35 @@ fn poll_for_revisions(
     }
 }
 
+fn trace_version_recommendation(config: &GovernanceConfig, seen: &mut BTreeSet<String>) {
+    let Some(required) = config.required_client_version.as_deref() else {
+        return;
+    };
+    if let Ok(gh_service::ClientVersionCompatibility::SameMajorRecommendation {
+        installed,
+        recommended,
+    }) = GovernanceConfig::client_version_compatibility(required, gh_common::blue_version())
+    {
+        let key = format!("client-version:{installed}:{recommended}");
+        if seen.insert(key) {
+            tracing::info!(%installed, %recommended, "tenant recommends a different compatible Blue release");
+        }
+    }
+}
+
 /// Records a notice for errors only the user can clear, and clears it when the
 /// service starts answering again.
 fn record_auth_notice(error: &gh_common::GhError, auth: &Arc<Mutex<Option<String>>>) {
     let message = match error {
+        gh_common::GhError::ClientVersionMismatch {
+            installed,
+            required,
+        } => crate::client_version::remedy(
+            installed,
+            required,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        ),
         gh_common::GhError::Unauthorized(message)
         | gh_common::GhError::Forbidden(message)
         | gh_common::GhError::ActionRequired(message) => message.clone(),
@@ -3354,6 +3426,7 @@ fn apply_internal(assume_yes: bool, quiet: bool, target_override: Option<Harness
     let config = client
         .fetch_or_cached(&session, now_unix())
         .context("fetching governance config")?;
+    crate::client_version::warn_if_recommended(&config, !assume_yes && !quiet)?;
     let applied = load_applied_state()?;
     let mut inventory = discover_inventory_cached(&config.allowed_harnesses, applied.as_ref());
     gh_agent::evaluate_inventory(&config, &mut inventory);
@@ -4569,6 +4642,7 @@ fn remote_session_client() -> Result<(Session, reqwest::Url, reqwest::blocking::
     let governance = client
         .fetch_or_cached(&session, now_unix())
         .context("loading session policy")?;
+    crate::client_version::warn_if_recommended(&governance, false)?;
     let Some(upload) = governance.session_upload else {
         bail!("remote resume is unavailable because session upload is not configured");
     };
@@ -5334,6 +5408,15 @@ mod tests {
             telemetry: None,
             required: false,
         }
+    }
+
+    #[test]
+    fn tenant_version_uses_the_remote_client_pin() {
+        let mut config = daemon_test_config("r1");
+        assert_eq!(tenant_version_text(&config), "not reported");
+
+        config.required_client_version = Some("1.2.3".to_owned());
+        assert_eq!(tenant_version_text(&config), "1.2.3");
     }
 
     fn test_inventory_entry(name: &str, path: PathBuf) -> HarnessInventoryEntry {

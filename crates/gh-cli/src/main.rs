@@ -4,6 +4,7 @@
 // governance config, and transparently wrap the chosen harness. See the plan
 // and each crate's docs for the design.
 
+mod client_version;
 mod commands;
 mod repair;
 mod supervisor;
@@ -13,7 +14,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "blue",
-    version,
+    version = gh_common::blue_version(),
     about = "Governance wrapper for supported coding-agent CLIs",
     long_about = None,
 )]
@@ -131,6 +132,25 @@ enum ShimAction {
     },
 }
 
+fn foreground_command(command: &Option<Command>) -> bool {
+    matches!(
+        command,
+        None | Some(
+            Command::Setup
+                | Command::Login { .. }
+                | Command::Doctor
+                | Command::Agent { .. }
+                | Command::Status
+                | Command::Verify
+                | Command::Run { .. }
+                | Command::Config
+                | Command::Gateway
+                | Command::Apply { yes: false }
+                | Command::External(_)
+        )
+    )
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -142,6 +162,7 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
+    let foreground = foreground_command(&cli.command);
     let result = match cli.command {
         None => commands::start(),
         Some(Command::Version) => commands::version(),
@@ -176,7 +197,9 @@ fn main() {
     };
 
     if let Err(e) = result {
-        print_error(&e);
+        if !client_version::handle(&e, foreground) {
+            print_error(&e);
+        }
         std::process::exit(1);
     }
 }
@@ -248,6 +271,15 @@ mod tests {
             cli.command,
             Some(Command::Agent { name: Some(name) }) if name == "claude"
         ));
+    }
+
+    #[test]
+    fn apply_yes_is_not_an_interactive_client_repair_command() {
+        let interactive = Cli::try_parse_from(["blue", "apply"]).unwrap();
+        assert!(foreground_command(&interactive.command));
+
+        let unattended = Cli::try_parse_from(["blue", "apply", "--yes"]).unwrap();
+        assert!(!foreground_command(&unattended.command));
     }
 
     #[test]
