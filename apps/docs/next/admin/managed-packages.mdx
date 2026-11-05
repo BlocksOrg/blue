@@ -163,7 +163,7 @@ A deployment operator must first configure a GitHub or Bitbucket connection and 
     | OpenCode plugin module | `toolkit/plugins/index.js` |
     | Helper | `toolkit/bin/review` |
 
-    A skill path can point directly to a skill folder containing `SKILL.md`, regardless of where it lives in the repository. A folder containing several skill folders remains supported for compatibility. Codex and Claude subagents and hooks still require a native plugin mapping; OpenCode hooks are plugin modules. For a helper, also enter its command name and platform key.
+    A skill path can point directly to a skill folder containing `SKILL.md`, regardless of where it lives in the repository. A folder containing several skill folders remains supported for compatibility. Codex and Claude subagents and hooks still require a native plugin mapping; OpenCode hooks are plugin modules. OpenCode 2.x only loads modules written for its new plugin API, so map 1.x and 2.x modules with a version variant. For a helper, also enter its command name and platform key.
   </Step>
   <Step title="Publish the change">
     Select **Add to pending changes**, review the inventory on the Extensions page, and then select **Publish extension changes**. Publishing validates the full configuration and creates a new immutable governance revision for clients to reconcile.
@@ -330,7 +330,7 @@ Each package declares an immutable `source_ref`, a SHA-256 digest, and adapters 
 | `skills_dir` | Skills loaded for the target harness. |
 | `agents_dir` | Managed subagent definitions. |
 | `hooks_file` | Hook configuration supported by that harness. |
-| `plugins` | OpenCode plugin modules. |
+| `plugins` | OpenCode plugin modules. OpenCode 1.x and 2.x use different plugin APIs; use a `variants` entry with `introduced: 2.0.0` for 2.x modules. |
 | `helpers` | Platform-specific executables added to the governed launch `PATH`. |
 
 See [Governance configuration](/next/reference/governance-config#managed-packages) for the complete YAML schema and adapter example. Maintainers can use [Local development with Docker Compose](/next/development/local-compose) to test package-catalog mounting.

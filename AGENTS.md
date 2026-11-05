@@ -20,7 +20,7 @@ tracks:
 | Codex | `codex` | `@openai/codex` | [openai/codex](https://github.com/openai/codex) |
 | Claude | `claude` | `@anthropic-ai/claude-code` | [anthropics/claude-code](https://github.com/anthropics/claude-code) |
 | Kimi | `kimi` | `@moonshot-ai/kimi-code` | [MoonshotAI/kimi-code](https://github.com/MoonshotAI/kimi-code) |
-| OpenCode | `opencode` | `opencode-ai` | [sst/opencode](https://github.com/sst/opencode) |
+| OpenCode | `opencode` | `@opencode/cli` (2.x), `opencode-ai` (1.x) | [anomalyco/opencode](https://github.com/anomalyco/opencode) |
 
 ## Repo map
 
