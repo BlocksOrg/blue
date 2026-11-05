@@ -1,7 +1,10 @@
 //! Installation-aware repair. Plans contain argv, never executable shell strings.
 use anyhow::{anyhow, bail, Context, Result};
 use gh_common::{Harness, InstallInvocation};
-use gh_config::{resolve_compatibility, supported_install, CompatibilityFailure, HarnessContext};
+use gh_config::{
+    resolve_compatibility, supported_install, supported_repair_install, CompatibilityFailure,
+    HarnessContext,
+};
 use gh_harness::{Detected, InstallMethod, Installation};
 use gh_service::HarnessPolicy;
 use semver::Version;
@@ -160,6 +163,52 @@ fn guidance(installation: &Installation) -> String {
     )
 }
 
+/// A repair whose policy-compatible release is published under a different
+/// package than the active installation (OpenCode 1.x `opencode-ai` versus
+/// 2.x `@opencode/cli`). Upstream requires removing one before installing the
+/// other, so Blue never performs the switch itself.
+#[derive(Debug)]
+struct PackageSwitch {
+    current: String,
+    target: InstallInvocation,
+}
+
+fn package_switch(
+    harness: Harness,
+    installation: &Installation,
+    installed: Option<&Version>,
+    policy: &HarnessPolicy,
+) -> Option<PackageSwitch> {
+    let target = supported_repair_install(harness, policy, installed).ok()?;
+    let target_package = gh_config::install_package(&target)?;
+    let current = match &installation.method {
+        InstallMethod::NpmGlobal { package, .. } => package.clone(),
+        InstallMethod::OpenCodeStandalone => gh_config::generation_package(harness, installed?)?,
+        _ => return None,
+    };
+    (current != target_package).then_some(PackageSwitch { current, target })
+}
+
+fn switch_remedy(harness: Harness, installation: &Installation, switch: &PackageSwitch) -> String {
+    let selector = switch
+        .target
+        .args
+        .last()
+        .map(String::as_str)
+        .unwrap_or_default();
+    match &installation.method {
+        InstallMethod::NpmGlobal { prefix, .. } => format!(
+            "To switch manually (POSIX shell or PowerShell):\n  npm uninstall -g --prefix {prefix:?} {}\n  npm install -g --prefix {prefix:?} '{}'\nThen retry Blue.",
+            switch.current,
+            selector.replace('\'', "'\\''"),
+        ),
+        _ => format!(
+            "To switch manually, remove this {harness} installation using its installer, then run:\n  {}\nEnsure npm's executable directory is on PATH, then retry Blue.",
+            switch.target.display
+        ),
+    }
+}
+
 /// Keeps operational details available without flattening them into the terminal message.
 #[derive(Debug)]
 pub(crate) struct ManualRepairRequired {
@@ -225,7 +274,11 @@ impl ManualRepairRequired {
         harness: Harness,
         policy: &HarnessPolicy,
     ) -> Self {
+        let switch = package_switch(harness, &installation, failure.installed(), policy);
         let reason = match &installation.method {
+            _ if switch.is_some() => {
+                "The supported release is published under a different package, and Blue does not switch packages automatically."
+            }
             InstallMethod::Homebrew { .. } => {
                 "Blue cannot automatically install a specific version with Homebrew."
             }
@@ -237,7 +290,9 @@ impl ManualRepairRequired {
             }
             _ => "Automatic repair requires an interactive terminal.",
         };
-        let remedy = if refusal(&installation.method).is_none() {
+        let remedy = if let Some(switch) = &switch {
+            switch_remedy(harness, &installation, switch)
+        } else if refusal(&installation.method).is_none() {
             format!(
                 "To repair manually:\n  {}\nThen retry Blue.",
                 manual_action(&installation)
@@ -491,11 +546,15 @@ pub(crate) fn ensure_compatible_version(
         Err(error) => error,
     };
     let installation = runtime.installation(&detected);
-    if !interactive || refusal(&installation.method).is_some() {
+    if !interactive
+        || refusal(&installation.method).is_some()
+        || package_switch(harness, &installation, detected.version.as_ref(), policy).is_some()
+    {
         return Err(ManualRepairRequired::new(error, installation, harness, policy).into());
     }
     let manual = guidance(&installation);
-    let invocation = supported_install(harness, policy)?;
+    // Stay within the installed generation's release line when the policy allows it.
+    let invocation = supported_repair_install(harness, policy, detected.version.as_ref())?;
     let version = runtime.lookup(harness, &invocation)?;
     // A registry response is not authority to bypass the original policy.
     resolve_compatibility(harness, Some(&version), Some(&version.to_string()), policy)
@@ -729,7 +788,7 @@ mod tests {
             (Harness::Codex, "0.145.0"),
             (Harness::Claude, "2.1.252"),
             (Harness::Kimi, "0.0.0"),
-            (Harness::Opencode, "1.0.0"),
+            (Harness::Opencode, "2.2.5"),
         ] {
             let mut winner = detected("/new/bin/agent", version);
             winner.harness = harness;
@@ -751,7 +810,13 @@ mod tests {
                     args: vec![
                         "install".into(),
                         "-g".into(),
-                        format!("{}@{version}", gh_harness::install::npm_package(harness))
+                        format!(
+                            "{}@{version}",
+                            gh_config::install_package(
+                                &supported_install(harness, &HarnessPolicy::default()).unwrap()
+                            )
+                            .unwrap()
+                        )
                     ]
                 }]
             );
@@ -854,6 +919,108 @@ mod tests {
         assert!(fake.calls.contains(&"ownership"));
     }
 
+    fn opencode(
+        fake: &mut Fake,
+        version: &str,
+        requirement: Option<&str>,
+    ) -> Result<(Detected, HarnessContext, bool)> {
+        let mut installed = detected("/prefix/bin/opencode", version);
+        installed.harness = Harness::Opencode;
+        let policy = HarnessPolicy {
+            version_requirement: requirement.map(str::to_owned),
+            ..HarnessPolicy::default()
+        };
+        ensure_compatible_version(Harness::Opencode, installed, &policy, true, fake)
+    }
+
+    fn opencode_npm(package: &str) -> InstallMethod {
+        InstallMethod::NpmGlobal {
+            prefix: "/prefix".into(),
+            package: package.into(),
+        }
+    }
+
+    #[test]
+    fn opencode_repairs_stay_inside_the_installed_release_line() {
+        for (package, installed, release, profile) in [
+            ("opencode-ai", "1.99.0", "1.18.25", "opencode-v0_0_0"),
+            ("@opencode/cli", "2.99.0", "2.2.5", "opencode-v2_0_0"),
+        ] {
+            let mut fake = Fake {
+                method: opencode_npm(package),
+                release: Ok(Version::parse(release).unwrap()),
+                winner: Some(Detected {
+                    harness: Harness::Opencode,
+                    ..detected("/prefix/bin/opencode", release)
+                }),
+                ..Fake::default()
+            };
+            let (_, context, changed) = opencode(&mut fake, installed, None).unwrap();
+            assert!(changed);
+            assert_eq!(context.profile.id, profile);
+            assert_eq!(
+                fake.executed,
+                vec![RepairPlan::Command {
+                    program: "npm".into(),
+                    args: vec![
+                        "install".into(),
+                        "-g".into(),
+                        "--prefix".into(),
+                        "/prefix".into(),
+                        format!("{package}@{release}")
+                    ]
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_never_switches_packages_automatically() {
+        for (method, installed, requirement, current, target) in [
+            (
+                opencode_npm("opencode-ai"),
+                "1.18.25",
+                ">=2",
+                "opencode-ai",
+                "@opencode/cli",
+            ),
+            (
+                opencode_npm("@opencode/cli"),
+                "2.2.5",
+                "<2",
+                "@opencode/cli",
+                "opencode-ai",
+            ),
+            (
+                InstallMethod::OpenCodeStandalone,
+                "1.18.25",
+                ">=2",
+                "opencode-ai",
+                "@opencode/cli",
+            ),
+        ] {
+            let mut fake = Fake {
+                method: method.clone(),
+                ..Fake::default()
+            };
+            let error = opencode(&mut fake, installed, Some(requirement)).unwrap_err();
+            let message = error
+                .downcast_ref::<ManualRepairRequired>()
+                .expect("manual repair")
+                .to_string();
+            assert!(message.contains("different package"), "{message}");
+            assert!(message.contains(target), "{message}");
+            if matches!(method, InstallMethod::NpmGlobal { .. }) {
+                assert!(
+                    message.contains(&format!("npm uninstall -g --prefix \"/prefix\" {current}")),
+                    "{message}"
+                );
+            }
+            assert_eq!(fake.calls, vec!["ownership"]);
+            assert!(fake.executed.is_empty());
+        }
+    }
+
     #[test]
     fn plans_preserve_exact_argv_and_installation_owner() {
         let version = Version::new(2, 1, 252);
@@ -864,8 +1031,10 @@ mod tests {
                 args: vec!["install".into(), version.to_string()]
             }
         );
-        for harness in Harness::ALL {
-            let package = gh_harness::install::npm_package(harness);
+        for package in Harness::ALL
+            .into_iter()
+            .flat_map(|harness| gh_harness::npm_packages(harness).iter().copied())
+        {
             let prefix = PathBuf::from("/custom npm prefix");
             assert_eq!(
                 plan(

@@ -65,6 +65,50 @@ pub(crate) fn opencode_current(_: &HarnessPolicy, files: &[PathBuf]) -> BTreeMap
     values
 }
 
+/// OpenCode 2.x: the managed overlay uses the native v2 shape, while a user's
+/// global file may still be in either shape.
+pub(crate) fn opencode_current_v2(
+    _: &HarnessPolicy,
+    files: &[PathBuf],
+) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    if let Some(config) = find(files, "runtime/opencode/opencode.json")
+        .or_else(|| find(files, ".config/opencode/opencode.json"))
+        .and_then(json)
+    {
+        if let Some(value) = config.get("model").and_then(serde_json::Value::as_str) {
+            values.insert("model".into(), value.into());
+        }
+        let mcp = config.get("mcp").and_then(serde_json::Value::as_object);
+        let servers = mcp
+            .and_then(|mcp| mcp.get("servers"))
+            .and_then(serde_json::Value::as_object);
+        values.insert("mcp".into(), names(servers.or(mcp)));
+        if let Some(value) = config
+            .get("providers")
+            .and_then(|providers| providers.get("governed"))
+            .and_then(|governed| governed.get("settings"))
+            .or_else(|| {
+                config
+                    .get("provider")
+                    .and_then(|provider| provider.get("governed"))
+                    .and_then(|governed| governed.get("options"))
+            })
+            .and_then(|settings| settings.get("baseURL"))
+            .and_then(serde_json::Value::as_str)
+        {
+            values.insert("gateway".into(), value.into());
+        }
+    }
+    if files.iter().any(|path| {
+        path.ends_with("blue-session-upload/index.js")
+            && std::fs::read_to_string(path).is_ok_and(|body| body.contains("session-upload"))
+    }) {
+        values.insert("session_upload_hook".into(), "enabled".into());
+    }
+    values
+}
+
 pub(crate) fn opencode_proposed(
     mut values: BTreeMap<String, String>,
     policy: &HarnessPolicy,

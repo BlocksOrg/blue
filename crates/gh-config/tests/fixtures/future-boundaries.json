@@ -9,10 +9,10 @@
   },
   {
     "harness": "opencode",
-    "candidate": "configuration, skills, and plugin directory transitions",
+    "candidate": "2.x package, plugin API, background service, and configuration transitions",
     "paths_to_test": [".config/opencode/opencode.json", ".config/opencode/skills", ".config/opencode/plugins"],
     "source": "https://github.com/anomalyco/opencode/releases",
-    "production_boundary": null,
-    "required_evidence": "Pin schema and discovery fixtures before defining another production interval. Release chronology alone does not establish a Blue output boundary."
+    "production_boundary": "2.0.0",
+    "required_evidence": "Established by opencode-v2_0_0: 2.x ships as @opencode/cli, loads only the v2 plugin API, attaches to a shared background service unless --standalone, replaces (rather than layers) OPENCODE_CONFIG_DIR, and imports through `session import`. Later 2.x releases need fresh schema and discovery fixtures before another interval."
   }
 ]

@@ -113,9 +113,22 @@ impl CompatibilityFailure {
         }
     }
 
+    /// The installed version the failure was raised for, when it was readable.
+    pub fn installed(&self) -> Option<&Version> {
+        match self {
+            Self::PolicyMismatch { installed, .. }
+            | Self::UnsupportedGeneration { installed, .. }
+            | Self::UnverifiedGeneration { installed, .. } => Some(installed),
+            Self::UnparseableVersion { .. } | Self::InvalidPolicy { .. } => None,
+        }
+    }
+
     pub fn with_install_hint(&self, policy: &HarnessPolicy) -> String {
         if self.is_installable() {
-            format!("{self}; {}", install_hint(self.harness(), policy))
+            format!(
+                "{self}; {}",
+                install_hint(self.harness(), policy, self.installed())
+            )
         } else {
             self.to_string()
         }
@@ -156,6 +169,51 @@ pub fn supported_install(
     harness: Harness,
     harness_policy: &HarnessPolicy,
 ) -> Result<InstallInvocation, GhError> {
+    install_for(harness, harness_policy, None)
+}
+
+/// The install plan for repairing an existing installation. Prefer the
+/// generation that already owns `installed` so a repair stays inside its
+/// release line (and npm package); fall back to the newest generation the
+/// policy admits, which callers must compare against [`generation_package`]
+/// before replacing anything.
+pub fn supported_repair_install(
+    harness: Harness,
+    harness_policy: &HarnessPolicy,
+    installed: Option<&Version>,
+) -> Result<InstallInvocation, GhError> {
+    install_for(harness, harness_policy, installed)
+}
+
+/// The npm package that installs the generation owning `version`.
+pub fn generation_package(harness: Harness, version: &Version) -> Option<String> {
+    let registration = adapters::definition(harness).select(version)?;
+    let invocation = registration
+        .implementation
+        .install_plan(&registration.interval, None);
+    install_package(&invocation).map(str::to_owned)
+}
+
+/// The package named by an `npm install -g <package>@<selector>` plan.
+pub fn install_package(invocation: &InstallInvocation) -> Option<&str> {
+    match invocation.args.as_slice() {
+        [install, global, selector]
+            if invocation.program == "npm" && install == "install" && global == "-g" =>
+        {
+            selector
+                .rsplit_once('@')
+                .map(|(package, _)| package)
+                .filter(|package| !package.is_empty())
+        }
+        _ => None,
+    }
+}
+
+fn install_for(
+    harness: Harness,
+    harness_policy: &HarnessPolicy,
+    installed: Option<&Version>,
+) -> Result<InstallInvocation, GhError> {
     if harness_policy.allow_unverified_versions
         && harness_policy
             .version_requirement
@@ -176,17 +234,18 @@ pub fn supported_install(
         .map_err(|error| {
             GhError::config(format!("invalid {harness} install requirement: {error}"))
         })?;
-    let registration = adapters::definition(harness)
-        .implementations
-        .iter()
-        .rev()
-        .find(|registration| {
-            interval_intersects(
-                &registration.interval,
-                policy.as_ref(),
-                harness_policy.allow_unverified_versions,
-            )
-        })
+    let admitted = |registration: &&adapters::ImplementationRegistration| {
+        interval_intersects(
+            &registration.interval,
+            policy.as_ref(),
+            harness_policy.allow_unverified_versions,
+        )
+    };
+    let definition = adapters::definition(harness);
+    let registration = installed
+        .and_then(|version| definition.select(version))
+        .filter(admitted)
+        .or_else(|| definition.implementations.iter().rev().find(admitted))
         .ok_or_else(|| {
             GhError::config(format!(
                 "no supported {harness} implementation intersects the install requirement"
@@ -286,9 +345,18 @@ fn boundary_candidates(endpoint: &Version) -> Vec<Version> {
     candidates
 }
 
-fn install_hint(harness: Harness, policy: &HarnessPolicy) -> String {
-    match supported_install(harness, policy) {
-        Ok(invocation) => format!("install a supported version with `{}`", invocation.display),
+fn install_hint(harness: Harness, policy: &HarnessPolicy, installed: Option<&Version>) -> String {
+    match supported_repair_install(harness, policy, installed) {
+        Ok(invocation) => {
+            let current = installed.and_then(|version| generation_package(harness, version));
+            match (current, install_package(&invocation)) {
+                (Some(current), Some(target)) if current != target => format!(
+                    "uninstall `{current}`, then install a supported version with `{}`",
+                    invocation.display
+                ),
+                _ => format!("install a supported version with `{}`", invocation.display),
+            }
+        }
         Err(error) => error.to_string(),
     }
 }

@@ -182,6 +182,21 @@ pub(crate) fn apply_session_upload_disposition(
     }
 }
 
+/// Restoration through the harness's own CLI rather than restored files. The
+/// commands are versioned with the implementation because vendors move them
+/// (OpenCode 1.x `import <file>`, 2.x `session import <file>`).
+#[derive(Debug)]
+pub struct NativeSessionImport {
+    /// Arguments printing every local session as a JSON array of `{ "id" }` objects.
+    pub list_args: &'static [&'static str],
+    /// Arguments importing a portable export into `directory`.
+    pub import_args: fn(&Path, Option<&Path>) -> Vec<std::ffi::OsString>,
+    /// Stdout line prefix that precedes the imported native session ID.
+    pub imported_prefix: &'static str,
+    /// Stderr text reported when the session already exists locally.
+    pub collision_marker: Option<&'static str>,
+}
+
 /// Filesystem authority for a single compatibility implementation.
 #[derive(Debug, Default)]
 pub struct ImplementationPaths {
@@ -273,6 +288,10 @@ pub trait HarnessImplementation: std::fmt::Debug + Sync {
         Feature::Unsupported(
             "this compatibility profile does not support native session restoration",
         )
+    }
+    /// Native CLI import used to restore a portable session export.
+    fn session_import(&self) -> Option<&'static NativeSessionImport> {
+        None
     }
     fn gateway_wiring(&self, gateway: &GatewayConfig) -> Result<GatewayWiring, GhError>;
     fn validate_components(&self, adapter: &PackageAdapter) -> Result<(), GhError>;
@@ -847,6 +866,18 @@ mod tests {
         assert!(format!("{kimi_start:?}").contains("session-start kimi"));
         assert!(format!("{kimi_start:?}").contains("--profile 'kimi-v1'"));
 
+        // The 2.x plugin uses the v2 API and the finished-turn events 2.2 emits,
+        // and owns its own profile.
+        let opencode_v2 = opencode::v2_0_0::session_upload_plugin_v2("opencode-v2_0_0").unwrap();
+        assert!(opencode_v2.contains("export default {"));
+        assert!(opencode_v2.contains("ctx.event.subscribe"));
+        assert!(opencode_v2.contains("session.execution.succeeded"));
+        assert!(opencode_v2.contains("\"session\", \"export\""));
+        assert!(opencode_v2.contains("\"--profile\", \"opencode-v2_0_0\""));
+        assert!(opencode_v2.contains("\"session-start\", \"opencode\""));
+        assert!(!opencode_v2.contains("Bun."));
+        assert!(!opencode.contains("ctx.event"));
+
         // The opencode plugin carries session-start inline (no separate renderer).
         assert!(opencode.contains("session-start"));
         assert!(opencode.contains("\"session-start\", \"opencode\""));
@@ -895,6 +926,7 @@ mod tests {
             claude::v2_0_12::SPEC.session_resume,
             kimi::v0_0_0::SPEC.session_resume,
             opencode::v0_0_0::SPEC.session_resume,
+            opencode::v2_0_0::SPEC.session_resume,
         ] {
             assert!(matches!(capability, Feature::Supported(())));
         }
@@ -932,6 +964,23 @@ mod tests {
         assert!(matches!(
             opencode::v0_0_0::SPEC.session_start,
             Feature::Supported(())
+        ));
+        assert!(matches!(
+            opencode::v2_0_0::SPEC.session_start,
+            Feature::Supported(())
+        ));
+        assert!(matches!(
+            opencode::v2_0_0::SPEC.session_upload,
+            Feature::Supported(_)
+        ));
+        // 1.x keeps its frozen operation set; 2.x selects its own.
+        assert!(std::ptr::eq(
+            opencode::v0_0_0::SPEC.operations,
+            &opencode::V1_OPERATIONS
+        ));
+        assert!(std::ptr::eq(
+            opencode::v2_0_0::SPEC.operations,
+            &opencode::V2_OPERATIONS
         ));
 
         assert!(!std::ptr::eq(
@@ -1017,6 +1066,8 @@ mod tests {
             (Harness::Claude, "2.1.247 (Claude Code)", "2.1.247"),
             (Harness::Kimi, "kimi v0.37.1", "0.37.1"),
             (Harness::Opencode, "opencode 1.18.7", "1.18.7"),
+            (Harness::Opencode, "1.18.25", "1.18.25"),
+            (Harness::Opencode, "opencode v2.2.5", "2.2.5"),
             (Harness::Claude, "claude v2.1.0-beta.2", "2.1.0-beta.2"),
         ] {
             assert_eq!(

@@ -40,7 +40,8 @@ pub(crate) fn managed_runtime_dir(home: &std::path::Path) -> PathBuf {
 }
 
 pub use compat::{
-    resolve as resolve_compatibility, supported_install, validate_package_adapter_for_policy,
+    generation_package, install_package, resolve as resolve_compatibility, supported_install,
+    supported_repair_install, validate_package_adapter_for_policy,
     validate_package_adapters_for_policy, CompatibilityFailure, HarnessContext, ProfileStatus,
 };
 pub use packages::PackageFetcher;

@@ -34,12 +34,14 @@ pub enum InstallMethod {
     },
 }
 
-pub fn npm_package(harness: Harness) -> &'static str {
+/// Every npm package that publishes a harness release line. OpenCode 1.x ships
+/// as `opencode-ai` and 2.x as `@opencode/cli`; both install an `opencode` bin.
+pub fn npm_packages(harness: Harness) -> &'static [&'static str] {
     match harness {
-        Harness::Codex => "@openai/codex",
-        Harness::Claude => "@anthropic-ai/claude-code",
-        Harness::Kimi => "@moonshot-ai/kimi-code",
-        Harness::Opencode => "opencode-ai",
+        Harness::Codex => &["@openai/codex"],
+        Harness::Claude => &["@anthropic-ai/claude-code"],
+        Harness::Kimi => &["@moonshot-ai/kimi-code"],
+        Harness::Opencode => &["opencode-ai", "@opencode/cli"],
     }
 }
 
@@ -114,7 +116,6 @@ fn inspect(detected: &Detected, home: Option<&Path>) -> Installation {
 
 fn classify(detected: &Detected, canonical: &Path, home: Option<&Path>) -> InstallMethod {
     let harness = detected.harness;
-    let package = npm_package(harness);
     // Recognize npm-compatible layouts, including manually copied packages.
     // The bin entry and canonical package root must share a prefix; package
     // symlinks into pnpm's store (or npm link) are unsupported.
@@ -125,8 +126,11 @@ fn classify(detected: &Detected, canonical: &Path, home: Option<&Path>) -> Insta
     {
         if let Some(prefix) = bin.parent() {
             let root = prefix.join("lib/node_modules");
-            let package_dir = root.join(package);
-            if canonical.starts_with(&package_dir) {
+            for &package in npm_packages(harness) {
+                let package_dir = root.join(package);
+                if !canonical.starts_with(&package_dir) {
+                    continue;
+                }
                 let metadata = small_text(&package_dir.join("package.json"))
                     .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
                 if let Some(metadata) = metadata {
@@ -291,12 +295,17 @@ mod tests {
     fn npm_compatible_manual_layouts_preserve_prefix_for_every_harness() {
         let f = Fixture::new();
         // Assemble files and symlinks manually: npm is neither run nor required.
-        for harness in Harness::ALL {
+        for (harness, package) in Harness::ALL.into_iter().flat_map(|harness| {
+            npm_packages(harness)
+                .iter()
+                .map(move |package| (harness, *package))
+        }) {
             for prefix in ["nvm/versions/node/v24", "custom prefix"] {
-                let prefix = format!("{prefix}/{}", harness.key());
-                let package_dir = format!("{prefix}/lib/node_modules/{}", npm_package(harness));
+                let prefix = format!("{prefix}/{}/{}", harness.key(), package.replace('/', "-"));
+                let package_dir = format!("{prefix}/lib/node_modules/{package}");
                 let target = f.file(&format!("{package_dir}/cli.js"), "#!/usr/bin/env node");
-                let metadata = serde_json::json!({"name": npm_package(harness), "bin": { harness.key(): "cli.js" }});
+                let metadata =
+                    serde_json::json!({"name": package, "bin": { harness.key(): "cli.js" }});
                 let metadata_path =
                     f.file(&format!("{package_dir}/package.json"), metadata.to_string());
                 let path = f.link(&format!("{prefix}/bin/{}", harness.key()), &target);
@@ -311,7 +320,7 @@ mod tests {
                     installation.method,
                     InstallMethod::NpmGlobal {
                         prefix: f.0.join(&prefix),
-                        package: npm_package(harness).into()
+                        package: package.into()
                     }
                 );
                 for (label, invalid_metadata) in [
@@ -334,6 +343,46 @@ mod tests {
                 std::fs::write(&metadata_path, metadata.to_string()).unwrap();
             }
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn opencode_layouts_report_the_package_that_owns_the_binary() {
+        let f = Fixture::new();
+        for (prefix, package) in [("v1", "opencode-ai"), ("v2", "@opencode/cli")] {
+            let package_dir = format!("{prefix}/lib/node_modules/{package}");
+            let target = f.file(&format!("{package_dir}/bin/opencode.exe"), b"\x7fELFbinary");
+            f.file(
+                &format!("{package_dir}/package.json"),
+                serde_json::json!({
+                    "name": package,
+                    "bin": { "opencode": "./bin/opencode.exe", "opencode2": "./bin/opencode.exe" }
+                })
+                .to_string(),
+            );
+            let path = f.link(&format!("{prefix}/bin/opencode"), &target);
+            assert_eq!(
+                f.inspect(Harness::Opencode, path).method,
+                InstallMethod::NpmGlobal {
+                    prefix: f.0.join(prefix),
+                    package: package.into()
+                }
+            );
+        }
+        // A package directory claiming the other release line's name is not trusted.
+        let target = f.file(
+            "mixed/lib/node_modules/@opencode/cli/bin/opencode.exe",
+            b"\x7fELF",
+        );
+        f.file(
+            "mixed/lib/node_modules/@opencode/cli/package.json",
+            r#"{"name":"opencode-ai","bin":{"opencode":"./bin/opencode.exe"}}"#,
+        );
+        let path = f.link("mixed/bin/opencode", &target);
+        assert!(matches!(
+            f.inspect(Harness::Opencode, path).method,
+            InstallMethod::Unknown { .. }
+        ));
     }
 
     #[test]

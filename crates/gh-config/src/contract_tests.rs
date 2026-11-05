@@ -204,7 +204,18 @@ fn assert_wrapped_update_controls(
         Harness::Opencode => {
             let config: serde_json::Value =
                 serde_json::from_str(env.get("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
-            assert_eq!(config.get("autoupdate").is_some(), expected);
+            // 1.x spells the managed key `autoupdate`; 2.x uses native `update`.
+            let key = if config.get("permissions").is_some() {
+                "update"
+            } else {
+                "autoupdate"
+            };
+            assert_eq!(config.get(key).is_some(), expected);
+            // 2.x launches always use a private server that inherits the env.
+            assert_eq!(
+                config.get("permissions").is_some(),
+                args.iter().any(|arg| arg == "--standalone")
+            );
             // The config key alone does not reach OpenCode's updater; only the
             // env var does.
             assert_eq!(env.get("OPENCODE_DISABLE_AUTOUPDATE").is_some(), expected);
@@ -556,8 +567,58 @@ fn boundaries_aliases_and_unsupported_packages_are_explicit() {
         (Harness::Claude, "1.0.38", "claude-v1_0_38"),
         (Harness::Claude, "2.0.11", "claude-v1_0_38"),
         (Harness::Claude, "2.0.12", "claude-v2_0_12"),
+        (Harness::Opencode, "1.18.25", "opencode-v0_0_0"),
+        (Harness::Opencode, "2.0.0", "opencode-v2_0_0"),
+        (Harness::Opencode, "2.2.5", "opencode-v2_0_0"),
     ] {
         assert_eq!(context(harness, version).profile.id, expected);
+    }
+    // Above the 1.x ceiling but below 2.0.0 stays a 1.x generation.
+    assert_eq!(
+        adapters::definition(Harness::Opencode)
+            .select(&semver::Version::parse("1.19.5").unwrap())
+            .unwrap()
+            .interval
+            .profile,
+        "opencode-v0_0_0"
+    );
+    // Each generation installs from its own package.
+    for (requirement, package) in [
+        (None, "@opencode/cli@"),
+        (Some("<2"), "opencode-ai@"),
+        (Some(">=1.18, <1.19"), "opencode-ai@"),
+        (Some(">=2"), "@opencode/cli@"),
+    ] {
+        let install = supported_install(
+            Harness::Opencode,
+            &HarnessPolicy {
+                version_requirement: requirement.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            install.args.last().unwrap().starts_with(package),
+            "{requirement:?}: {}",
+            install.display
+        );
+    }
+    // Repair stays inside the installed generation unless policy excludes it.
+    for (installed, requirement, package) in [
+        ("1.19.5", None, "opencode-ai"),
+        ("2.99.0", None, "@opencode/cli"),
+        ("1.18.25", Some(">=2"), "@opencode/cli"),
+    ] {
+        let install = crate::compat::supported_repair_install(
+            Harness::Opencode,
+            &HarnessPolicy {
+                version_requirement: requirement.map(str::to_owned),
+                ..Default::default()
+            },
+            Some(&semver::Version::parse(installed).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(crate::compat::install_package(&install), Some(package));
     }
     for harness in Harness::ALL {
         let alias = format!("{}-v1", harness.key());
@@ -973,6 +1034,7 @@ fn production_boundary_transitions_preserve_v4_and_roll_back_activation_failure(
             Harness::Claude,
             vec!["1.0.37", "1.0.38", "2.0.12", "2.0.11", "1.0.37"],
         ),
+        (Harness::Opencode, vec!["1.18.25", "2.0.0", "1.18.25"]),
     ] {
         let home = home("transition");
         let policy = HarnessPolicy::default();
@@ -1020,6 +1082,14 @@ fn production_boundary_transitions_preserve_v4_and_roll_back_activation_failure(
                 .collect::<Vec<_>>()
                 .join("\n");
             assert_eq!(bodies.contains("session-upload"), supported);
+            if harness == Harness::Opencode {
+                // Each generation's plugin layout replaces the other's, so 2.x
+                // never discovers a v1 module and 1.x never sees a v2 directory.
+                let plugins = home.join(".config/blue/runtime/opencode/plugins");
+                let v2 = context.profile.id == "opencode-v2_0_0";
+                assert_eq!(plugins.join("blue-session-upload.js").exists(), !v2);
+                assert_eq!(plugins.join("blue-session-upload/index.js").exists(), v2);
+            }
         }
         std::fs::remove_dir_all(home).unwrap();
     }
