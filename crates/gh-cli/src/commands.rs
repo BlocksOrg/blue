@@ -75,25 +75,6 @@ pub fn version() -> Result<()> {
     Ok(())
 }
 
-fn prompt_control_api_url() -> Result<String> {
-    if !interactive_terminal() {
-        bail!(
-            "Blue setup requires an interactive terminal; run `blue setup` in a terminal or provision blue.toml"
-        );
-    }
-    cliclack::intro(console::style(" Welcome to Blue ").cyan().bold())?;
-    println!("Connect once; policy, login, and your preferred coding agent are handled here.");
-    let value: String = cliclack::input("Control API URL")
-        .placeholder("https://harness.example.com")
-        .validate(|value: &String| {
-            gh_service::validate_deployment_url(value, "Control API URL")
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-        .interact()?;
-    Ok(value)
-}
-
 fn discover_configuration(url: &str) -> Result<BlueToml> {
     let spinner = cliclack::spinner();
     spinner.start("Discovering deployment…");
@@ -113,6 +94,116 @@ fn discover_configuration(url: &str) -> Result<BlueToml> {
     };
     spinner.stop("Deployment connected");
     Ok(cfg)
+}
+
+/// Maximum number of Control API discovery attempts in one setup flow. Once the
+/// last attempt fails, the error is returned without another confirm prompt.
+const MAX_DISCOVERY_ATTEMPTS: usize = 5;
+
+/// Runs once per command, before the Control API URL loop: rejects a
+/// non-interactive terminal with the existing setup message, then prints the
+/// `cliclack::intro` banner and the welcome line.
+fn begin_control_api_setup() -> Result<()> {
+    if !interactive_terminal() {
+        bail!(
+            "Blue setup requires an interactive terminal; run `blue setup` in a terminal or provision blue.toml"
+        );
+    }
+    cliclack::intro(console::style(" Welcome to Blue ").cyan().bold())?;
+    println!("Connect once; policy, login, and your preferred coding agent are handled here.");
+    Ok(())
+}
+
+/// Prompts for the Control API URL. The input is validated inline with
+/// `gh_service::validate_deployment_url`, so malformed URLs never reach
+/// discovery. When `previous` is `Some`, it is pre-filled so the user can
+/// correct a typo instead of typing the URL again. Esc/Ctrl-C comes back as the
+/// cliclack interrupt error.
+fn prompt_control_api_url_input(previous: Option<&str>) -> Result<String> {
+    let mut input = cliclack::input("Control API URL").placeholder("https://harness.example.com");
+    if let Some(previous) = previous {
+        input = input.default_input(previous);
+    }
+    let value: String = input
+        .validate(|value: &String| {
+            gh_service::validate_deployment_url(value, "Control API URL")
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .interact()?;
+    Ok(value)
+}
+
+/// The prompt/discover/retry loop, with no TTY or network access of its own.
+///
+/// Each iteration calls `prompt(last_url)` (errors, including interrupts,
+/// propagate unchanged), then `discover(&url)`:
+/// - `Ok(cfg)` returns `Ok(Some(cfg))`.
+/// - `Err(e)` is passed to `report`. If `max_attempts` discovery attempts have
+///   now been made, it returns `e` with context saying attempts were exhausted,
+///   without asking to retry. Otherwise `confirm_retry()` is called: `false`
+///   returns `Ok(None)` (the user cancelled), `true` re-prompts.
+fn discover_with_retry<P, D, C, R>(
+    mut prompt: P,
+    mut discover: D,
+    mut confirm_retry: C,
+    mut report: R,
+    max_attempts: usize,
+) -> Result<Option<BlueToml>>
+where
+    P: FnMut(Option<&str>) -> Result<String>,
+    D: FnMut(&str) -> Result<BlueToml>,
+    C: FnMut() -> Result<bool>,
+    R: FnMut(&anyhow::Error) -> Result<()>,
+{
+    let mut last_url: Option<String> = None;
+    let mut attempts = 0usize;
+    loop {
+        let url = prompt(last_url.as_deref())?;
+        attempts += 1;
+        match discover(&url) {
+            Ok(cfg) => return Ok(Some(cfg)),
+            Err(error) => {
+                report(&error)?;
+                if attempts >= max_attempts {
+                    return Err(error.context(format!(
+                        "Control API discovery failed after {attempts} attempts"
+                    )));
+                }
+                if !confirm_retry()? {
+                    return Ok(None);
+                }
+            }
+        }
+        last_url = Some(url);
+    }
+}
+
+/// Production entry point shared by `setup`, `start` (first run) and `run`
+/// (newly configured). Calls [`begin_control_api_setup`], then
+/// [`discover_with_retry`] with the cliclack prompt, [`discover_configuration`],
+/// a "Try a different Control API URL?" confirm, `cliclack::log::error`
+/// reporting, and [`MAX_DISCOVERY_ATTEMPTS`]. Returns `Ok(None)` after
+/// `cliclack::outro_cancel` when the user declines a retry. In that case nothing
+/// has been written yet.
+fn discover_control_api() -> Result<Option<BlueToml>> {
+    begin_control_api_setup()?;
+    let discovered = discover_with_retry(
+        prompt_control_api_url_input,
+        discover_configuration,
+        || {
+            cliclack::confirm("Try a different Control API URL?")
+                .initial_value(true)
+                .interact()
+                .map_err(Into::into)
+        },
+        |error| cliclack::log::error(format!("{error:#}")).map_err(Into::into),
+        MAX_DISCOVERY_ATTEMPTS,
+    )?;
+    if discovered.is_none() {
+        cliclack::outro_cancel("Setup cancelled; no files were changed.")?;
+    }
+    Ok(discovered)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,8 +388,9 @@ pub fn setup() -> Result<()> {
     if let Some(message) = legacy_windows_state_message()? {
         eprintln!("{message}");
     }
-    let url = prompt_control_api_url()?;
-    let mut discovered = discover_configuration(&url)?;
+    let Some(mut discovered) = discover_control_api()? else {
+        return Ok(());
+    };
     let active_path = gh_common::paths::blue_toml_path()?;
     if active_path.exists() {
         let current = BlueToml::load().context("loading current blue.toml")?;
@@ -910,7 +1002,10 @@ pub fn start() -> Result<()> {
     let cfg = if path.exists() {
         BlueToml::load().context("loading blue.toml")?
     } else {
-        activate_discovered(discover_configuration(&prompt_control_api_url()?)?)?
+        let Some(discovered) = discover_control_api()? else {
+            return Ok(());
+        };
+        activate_discovered(discovered)?
     };
     let session = ensure_session_for_start(&cfg)?;
     let client = ServiceClient::from_config(&cfg).context("building service client")?;
@@ -2469,7 +2564,10 @@ pub fn run(name: &str, args: &[String]) -> Result<()> {
                 "Blue is not configured; run `blue setup` in a terminal before launching an agent"
             );
         }
-        let cfg = activate_discovered(discover_configuration(&prompt_control_api_url()?)?)?;
+        let Some(discovered) = discover_control_api()? else {
+            return Ok(());
+        };
+        let cfg = activate_discovered(discovered)?;
         let client = ServiceClient::from_config(&cfg).context("building service client")?;
         (cfg, client)
     } else {
@@ -6670,5 +6768,909 @@ mod tests {
         assert!(!matching.repository_mismatch());
         assert!(prepared(Some("git@example.com:other/repo.git")).repository_mismatch());
         assert!(prepared(None).repository_mismatch());
+    }
+
+    /// Control API discovery retry loop (issue #90). Every collaborator is an
+    /// injected fake, so these tests need neither a TTY nor the network.
+    mod discovery_retry {
+        use super::*;
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        const FIRST_URL: &str = "https://harnes.example.com";
+        const SECOND_URL: &str = "https://harness.example.com";
+
+        fn cfg_for(url: &str) -> BlueToml {
+            let mut cfg = BlueToml::default();
+            cfg.service.url = url.to_owned();
+            cfg
+        }
+
+        fn interrupted() -> anyhow::Error {
+            std::io::Error::from(std::io::ErrorKind::Interrupted).into()
+        }
+
+        fn is_interrupt(error: &anyhow::Error) -> bool {
+            error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::Interrupted)
+        }
+
+        /// Records every call made by `discover_with_retry` to its collaborators.
+        #[derive(Default)]
+        struct Calls {
+            prompts: Vec<Option<String>>,
+            discovers: Vec<String>,
+            confirms: usize,
+            reports: Vec<String>,
+        }
+
+        struct Script {
+            urls: VecDeque<Result<String>>,
+            outcomes: VecDeque<Result<BlueToml>>,
+            confirms: VecDeque<Result<bool>>,
+        }
+
+        fn run_script(script: Script, max_attempts: usize) -> (Result<Option<BlueToml>>, Calls) {
+            let calls = RefCell::new(Calls::default());
+            let script = RefCell::new(script);
+            let result = discover_with_retry(
+                |previous: Option<&str>| {
+                    calls.borrow_mut().prompts.push(previous.map(str::to_owned));
+                    script
+                        .borrow_mut()
+                        .urls
+                        .pop_front()
+                        .expect("prompt called more times than scripted")
+                },
+                |url: &str| {
+                    calls.borrow_mut().discovers.push(url.to_owned());
+                    script
+                        .borrow_mut()
+                        .outcomes
+                        .pop_front()
+                        .expect("discover called more times than scripted")
+                },
+                || {
+                    calls.borrow_mut().confirms += 1;
+                    script
+                        .borrow_mut()
+                        .confirms
+                        .pop_front()
+                        .expect("confirm_retry called more times than scripted")
+                },
+                |error: &anyhow::Error| {
+                    calls.borrow_mut().reports.push(format!("{error:#}"));
+                    Ok(())
+                },
+                max_attempts,
+            );
+            (result, calls.into_inner())
+        }
+
+        /// One representative error per failure class `gh_service::discover`
+        /// can produce after the URL passed inline validation.
+        fn discovery_failure_classes() -> Vec<(&'static str, anyhow::Error)> {
+            let endpoint = "https://harnes.example.com/.well-known/metaharness";
+            let doc = |version: u32, url: &str, issuer: &str, client_id: &str, scopes: &[&str]| {
+                gh_service::DiscoveryDocument {
+                    version,
+                    control_api_url: url.to_owned(),
+                    oauth: gh_service::DiscoveryOAuth {
+                        issuer: issuer.to_owned(),
+                        client_id: client_id.to_owned(),
+                        scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+                    },
+                }
+            };
+            let rejection = |document: gh_service::DiscoveryDocument| -> anyhow::Error {
+                gh_service::discovery::validate_document(&document)
+                    .expect_err("document must be rejected")
+                    .into()
+            };
+            let good_url = "https://harness.example.com";
+            let good_issuer = "https://auth.example.com";
+            vec![
+                (
+                    "dns",
+                    gh_common::GhError::service(format!(
+                        "contacting {endpoint}: error sending request: dns error: failed to lookup address information"
+                    ))
+                    .into(),
+                ),
+                (
+                    "connect",
+                    gh_common::GhError::service(format!(
+                        "contacting {endpoint}: error sending request: tcp connect error: Connection refused"
+                    ))
+                    .into(),
+                ),
+                (
+                    "tls",
+                    gh_common::GhError::service(format!(
+                        "contacting {endpoint}: error sending request: invalid peer certificate: UnknownIssuer"
+                    ))
+                    .into(),
+                ),
+                (
+                    "timeout",
+                    gh_common::GhError::service(format!(
+                        "contacting {endpoint}: error sending request: operation timed out"
+                    ))
+                    .into(),
+                ),
+                (
+                    "http-404",
+                    gh_common::GhError::service(format!("{endpoint} returned HTTP 404 Not Found"))
+                        .into(),
+                ),
+                (
+                    "http-500",
+                    gh_common::GhError::service(format!(
+                        "{endpoint} returned HTTP 500 Internal Server Error"
+                    ))
+                    .into(),
+                ),
+                (
+                    "invalid-json",
+                    gh_common::GhError::service(
+                        "invalid discovery document: error decoding response body",
+                    )
+                    .into(),
+                ),
+                (
+                    "unsupported-version",
+                    rejection(doc(2, good_url, good_issuer, "blue-cli", &["openid"])),
+                ),
+                (
+                    "bad-canonical-url",
+                    rejection(doc(1, "http://harness.example.com", good_issuer, "blue-cli", &["openid"])),
+                ),
+                (
+                    "bad-issuer",
+                    rejection(doc(1, good_url, "not a url", "blue-cli", &["openid"])),
+                ),
+                (
+                    "empty-client-id",
+                    rejection(doc(1, good_url, good_issuer, "  ", &["openid"])),
+                ),
+                (
+                    "empty-scope",
+                    rejection(doc(1, good_url, good_issuer, "blue-cli", &["openid", " "])),
+                ),
+            ]
+        }
+
+        // AC1
+        #[test]
+        fn every_discovery_failure_class_is_reported_and_offers_a_retry() {
+            for (class, error) in discovery_failure_classes() {
+                let expected = format!("{error:#}");
+                let (result, calls) = run_script(
+                    Script {
+                        urls: VecDeque::from([Ok(FIRST_URL.to_owned()), Ok(SECOND_URL.to_owned())]),
+                        outcomes: VecDeque::from([Err(error), Ok(cfg_for(SECOND_URL))]),
+                        confirms: VecDeque::from([Ok(true)]),
+                    },
+                    MAX_DISCOVERY_ATTEMPTS,
+                );
+                let cfg = result
+                    .unwrap_or_else(|e| panic!("{class}: failure must be retried, got {e:#}"))
+                    .unwrap_or_else(|| panic!("{class}: retry must yield a configuration"));
+                assert_eq!(cfg.service.url, SECOND_URL, "{class}");
+                assert_eq!(
+                    calls.reports.len(),
+                    1,
+                    "{class}: error must be reported once"
+                );
+                assert!(
+                    calls.reports[0].contains(&expected),
+                    "{class}: reported {:?}, expected it to contain {expected:?}",
+                    calls.reports[0]
+                );
+                assert_eq!(calls.confirms, 1, "{class}: confirm_retry must be offered");
+                assert_eq!(calls.discovers.len(), 2, "{class}");
+            }
+        }
+
+        // AC1 + AC3: a declined retry for each class still never exits with Err.
+        #[test]
+        fn every_discovery_failure_class_can_be_declined_without_an_error() {
+            for (class, error) in discovery_failure_classes() {
+                let (result, calls) = run_script(
+                    Script {
+                        urls: VecDeque::from([Ok(FIRST_URL.to_owned())]),
+                        outcomes: VecDeque::from([Err(error)]),
+                        confirms: VecDeque::from([Ok(false)]),
+                    },
+                    MAX_DISCOVERY_ATTEMPTS,
+                );
+                assert!(
+                    matches!(result, Ok(None)),
+                    "{class}: declining must cancel cleanly, got {:?}",
+                    result.map(|c| c.map(|c| c.service.url))
+                );
+                assert_eq!(calls.reports.len(), 1, "{class}");
+                assert_eq!(calls.confirms, 1, "{class}");
+            }
+        }
+
+        // AC2
+        #[test]
+        fn corrected_url_succeeds_on_the_second_attempt() {
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(FIRST_URL.to_owned()), Ok(SECOND_URL.to_owned())]),
+                    outcomes: VecDeque::from([
+                        Err(gh_common::GhError::service(format!(
+                            "contacting {FIRST_URL}/.well-known/metaharness: dns error"
+                        ))
+                        .into()),
+                        Ok(cfg_for(SECOND_URL)),
+                    ]),
+                    confirms: VecDeque::from([Ok(true)]),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            let cfg = result.unwrap().expect("second attempt must succeed");
+            assert_eq!(cfg.service.url, SECOND_URL);
+            assert_eq!(
+                calls.prompts,
+                vec![None, Some(FIRST_URL.to_owned())],
+                "the retry prompt must be pre-filled with the previous URL"
+            );
+            assert_eq!(
+                calls.discovers,
+                vec![FIRST_URL.to_owned(), SECOND_URL.to_owned()]
+            );
+            assert_eq!(calls.confirms, 1);
+            assert_eq!(calls.reports.len(), 1);
+        }
+
+        // AC2
+        #[test]
+        fn successful_first_attempt_does_not_report_or_confirm() {
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(SECOND_URL.to_owned())]),
+                    outcomes: VecDeque::from([Ok(cfg_for(SECOND_URL))]),
+                    confirms: VecDeque::new(),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            assert_eq!(result.unwrap().unwrap().service.url, SECOND_URL);
+            assert_eq!(calls.prompts, vec![None]);
+            assert_eq!(calls.discovers, vec![SECOND_URL.to_owned()]);
+            assert_eq!(calls.confirms, 0);
+            assert!(calls.reports.is_empty());
+        }
+
+        // AC2: previous tracks the most recent URL, not the first one.
+        #[test]
+        fn each_retry_prefills_the_most_recent_url() {
+            let third = "https://harness2.example.com";
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([
+                        Ok(FIRST_URL.to_owned()),
+                        Ok(SECOND_URL.to_owned()),
+                        Ok(third.to_owned()),
+                    ]),
+                    outcomes: VecDeque::from([
+                        Err(anyhow::anyhow!("one")),
+                        Err(anyhow::anyhow!("two")),
+                        Ok(cfg_for(third)),
+                    ]),
+                    confirms: VecDeque::from([Ok(true), Ok(true)]),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            assert_eq!(result.unwrap().unwrap().service.url, third);
+            assert_eq!(
+                calls.prompts,
+                vec![
+                    None,
+                    Some(FIRST_URL.to_owned()),
+                    Some(SECOND_URL.to_owned())
+                ]
+            );
+            assert_eq!(calls.reports.len(), 2);
+            assert_eq!(calls.confirms, 2);
+        }
+
+        // AC3
+        #[test]
+        fn declining_a_retry_returns_none_without_prompting_again() {
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(FIRST_URL.to_owned())]),
+                    outcomes: VecDeque::from([Err(anyhow::anyhow!(
+                        "{FIRST_URL}/.well-known/metaharness returned HTTP 404 Not Found"
+                    ))]),
+                    confirms: VecDeque::from([Ok(false)]),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            assert!(matches!(result, Ok(None)));
+            assert_eq!(calls.prompts.len(), 1);
+            assert_eq!(calls.discovers.len(), 1);
+            assert_eq!(calls.confirms, 1);
+            assert_eq!(calls.reports.len(), 1);
+        }
+
+        // AC3
+        #[test]
+        fn interrupt_during_url_input_propagates_and_is_not_a_retry() {
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Err(interrupted())]),
+                    outcomes: VecDeque::new(),
+                    confirms: VecDeque::new(),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            let error = result.expect_err("interrupt must propagate");
+            assert!(is_interrupt(&error), "{error:#}");
+            assert!(calls.discovers.is_empty());
+            assert_eq!(calls.confirms, 0);
+            assert!(calls.reports.is_empty());
+        }
+
+        // AC3
+        #[test]
+        fn interrupt_during_retry_url_input_propagates() {
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(FIRST_URL.to_owned()), Err(interrupted())]),
+                    outcomes: VecDeque::from([Err(anyhow::anyhow!("boom"))]),
+                    confirms: VecDeque::from([Ok(true)]),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            let error = result.expect_err("interrupt must propagate");
+            assert!(is_interrupt(&error), "{error:#}");
+            assert_eq!(calls.discovers.len(), 1);
+            assert_eq!(calls.prompts.len(), 2);
+            assert_eq!(calls.confirms, 1);
+        }
+
+        // AC3
+        #[test]
+        fn interrupt_during_confirm_propagates_and_is_not_a_retry() {
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(FIRST_URL.to_owned())]),
+                    outcomes: VecDeque::from([Err(anyhow::anyhow!("boom"))]),
+                    confirms: VecDeque::from([Err(interrupted())]),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            let error = result.expect_err("interrupt must propagate, not cancel silently");
+            assert!(is_interrupt(&error), "{error:#}");
+            assert_eq!(calls.prompts.len(), 1);
+            assert_eq!(calls.discovers.len(), 1);
+            assert_eq!(calls.confirms, 1);
+        }
+
+        // AC6
+        #[test]
+        fn exhausting_attempts_returns_the_last_error_without_confirming_again() {
+            assert_eq!(
+                MAX_DISCOVERY_ATTEMPTS, 5,
+                "the retry cap is a named const of 5"
+            );
+            for max in [1, 2, MAX_DISCOVERY_ATTEMPTS] {
+                let urls = (0..max)
+                    .map(|i| Ok(format!("https://h{i}.example.com")))
+                    .collect();
+                let outcomes = (0..max)
+                    .map(|i| Err(anyhow::anyhow!("discovery failure #{i}")))
+                    .collect();
+                let confirms = (0..max).map(|_| Ok(true)).collect();
+                let (result, calls) = run_script(
+                    Script {
+                        urls,
+                        outcomes,
+                        confirms,
+                    },
+                    max,
+                );
+                let error = result.expect_err("exhausted attempts must be an error");
+                let rendered = format!("{error:#}");
+                assert!(
+                    rendered.contains(&format!("discovery failure #{}", max - 1)),
+                    "max={max}: last error must be preserved: {rendered}"
+                );
+                assert!(
+                    !rendered.contains(&format!("discovery failure #{}", max.saturating_sub(2)))
+                        || max == 1,
+                    "max={max}: only the last error is returned: {rendered}"
+                );
+                assert!(
+                    rendered.to_lowercase().contains("attempt"),
+                    "max={max}: context must say attempts were exhausted: {rendered}"
+                );
+                assert_eq!(calls.discovers.len(), max, "max={max}");
+                assert_eq!(calls.prompts.len(), max, "max={max}");
+                assert_eq!(calls.confirms, max - 1, "max={max}");
+                assert_eq!(calls.reports.len(), max, "max={max}");
+            }
+        }
+
+        // AC6: the exhausted-attempts error keeps the original as its root cause.
+        #[test]
+        fn exhausted_error_chain_keeps_the_discovery_error() {
+            let (result, _) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(FIRST_URL.to_owned())]),
+                    outcomes: VecDeque::from([Err(gh_common::GhError::service(
+                        "discovery OAuth client_id is empty",
+                    )
+                    .into())]),
+                    confirms: VecDeque::new(),
+                },
+                1,
+            );
+            let error = result.unwrap_err();
+            assert!(error.chain().any(|cause| cause
+                .to_string()
+                .contains("discovery OAuth client_id is empty")));
+        }
+
+        // AC4: the loop never rewrites the URL it was given.
+        #[test]
+        fn discover_receives_exactly_the_prompted_url() {
+            let raw = "https://harness.example.com/base";
+            let (_, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(raw.to_owned())]),
+                    outcomes: VecDeque::from([Ok(cfg_for(raw))]),
+                    confirms: VecDeque::new(),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            assert_eq!(calls.discovers, vec![raw.to_owned()]);
+        }
+
+        /// AC4: inline validation messages are unchanged (regression guard,
+        /// asserted from `url_input_keeps_inline_validation_and_prefills_previous`).
+        fn assert_inline_url_validation_rejects_malformed_urls_with_existing_messages() {
+            let label = "Control API URL";
+            let cases = [
+                (
+                    "http://harness.example.com",
+                    "Control API URL must use HTTPS (plain HTTP is allowed only for loopback development)",
+                ),
+                ("unix:/run/blue.sock", "Control API URL must have a host"),
+                (
+                    "https://user:pass@harness.example.com",
+                    "Control API URL cannot contain credentials, a query, or a fragment",
+                ),
+                (
+                    "https://harness.example.com/?a=b",
+                    "Control API URL cannot contain credentials, a query, or a fragment",
+                ),
+                (
+                    "https://harness.example.com/#frag",
+                    "Control API URL cannot contain credentials, a query, or a fragment",
+                ),
+                ("not a url", "invalid Control API URL: "),
+            ];
+            for (input, message) in cases {
+                let error = gh_service::validate_deployment_url(input, label)
+                    .expect_err(input)
+                    .to_string();
+                assert!(error.contains(message), "{input}: {error}");
+            }
+            assert!(
+                gh_service::validate_deployment_url("https://harness.example.com", label).is_ok()
+            );
+            assert!(gh_service::validate_deployment_url("http://127.0.0.1:8080", label).is_ok());
+        }
+
+        /// Source of this module minus the tests, for wiring checks.
+        fn production_source() -> &'static str {
+            let source = include_str!("commands.rs");
+            let marker = concat!("#[cfg(test)]\n", "mod tests {");
+            &source[..source.find(marker).expect("test module marker")]
+        }
+
+        /// Body of `fn <name>` in the production source (up to the next
+        /// top-level item).
+        fn fn_body(name: &str) -> &'static str {
+            let source = production_source();
+            let start = [
+                format!("\npub fn {name}("),
+                format!("\nfn {name}("),
+                format!("\npub fn {name}<"),
+                format!("\nfn {name}<"),
+            ]
+            .iter()
+            .find_map(|needle| source.find(needle.as_str()))
+            .unwrap_or_else(|| panic!("fn {name} not found"));
+            let rest = &source[start + 1..];
+            let end = rest.find("\n}\n").expect("end of fn") + 2;
+            &rest[..end]
+        }
+
+        // AC4
+        #[test]
+        fn url_input_keeps_inline_validation_and_prefills_previous() {
+            let body = fn_body("prompt_control_api_url_input");
+            assert!(body.contains(".validate("), "{body}");
+            assert!(
+                body.contains(r#"gh_service::validate_deployment_url(value, "Control API URL")"#),
+                "{body}"
+            );
+            assert!(
+                body.contains("default_input"),
+                "previous must pre-fill the input: {body}"
+            );
+            assert!(
+                !body.contains("intro("),
+                "the intro banner belongs in begin_control_api_setup: {body}"
+            );
+            assert_inline_url_validation_rejects_malformed_urls_with_existing_messages();
+        }
+
+        // AC2: the banner is printed once per command, outside the loop.
+        #[test]
+        fn intro_banner_is_printed_by_the_once_per_command_guard() {
+            assert!(fn_body("begin_control_api_setup").contains("cliclack::intro("));
+            assert!(!fn_body("discover_with_retry").contains("intro("));
+            let entry = fn_body("discover_control_api");
+            assert_eq!(
+                entry.matches("begin_control_api_setup()").count(),
+                1,
+                "{entry}"
+            );
+        }
+
+        // AC1 + AC3: production wrapper reports via cliclack and cancels cleanly.
+        #[test]
+        fn production_wrapper_reports_errors_and_cancels_with_no_changes_message() {
+            let entry = fn_body("discover_control_api");
+            assert!(entry.contains("discover_with_retry("), "{entry}");
+            assert!(entry.contains("prompt_control_api_url_input"), "{entry}");
+            assert!(entry.contains("discover_configuration"), "{entry}");
+            assert!(entry.contains("cliclack::log::error"), "{entry}");
+            assert!(entry.contains("cliclack::confirm"), "{entry}");
+            assert!(entry.contains("outro_cancel"), "{entry}");
+            assert!(entry.contains("no files were changed"), "{entry}");
+            assert!(entry.contains("MAX_DISCOVERY_ATTEMPTS"), "{entry}");
+            // The spinner still reports the failure before the error is logged.
+            assert!(fn_body("discover_configuration").contains("Deployment discovery failed"));
+        }
+
+        // AC7
+        #[test]
+        fn all_call_sites_use_the_retry_wrapper() {
+            let source = production_source();
+            let direct = concat!("discover_configuration(", "&prompt_control_api_url()?)");
+            assert!(
+                !source.contains(direct),
+                "a caller still bypasses the retry wrapper"
+            );
+            assert!(
+                !source.contains(concat!("prompt_control_api_url", "()")),
+                "the old single-shot prompt must not be called anymore"
+            );
+            for name in ["setup", "start", "run"] {
+                let body = fn_body(name);
+                assert_eq!(
+                    body.matches("discover_control_api()").count(),
+                    1,
+                    "{name} must go through discover_control_api exactly once"
+                );
+            }
+            assert_start_and_run_keep_their_own_non_tty_messages();
+        }
+
+        // AC3: every site treats a declined retry the same way, with exit 0.
+        #[test]
+        fn declined_retry_returns_ok_at_every_call_site_before_any_side_effect() {
+            for name in ["setup", "start", "run"] {
+                let body = fn_body(name);
+                let at = body
+                    .find("discover_control_api()")
+                    .unwrap_or_else(|| panic!("{name} must call discover_control_api()"));
+                let after = &body[at..];
+                let window = &after[..after.len().min(300)];
+                assert!(
+                    window.contains("return Ok(())"),
+                    "{name}: a declined retry must return Ok(()) right after the wrapper: {window}"
+                );
+                let ok_return = at + window.find("return Ok(())").unwrap();
+                for side_effect in [
+                    "activate_discovered(",
+                    "detach_tenant(",
+                    "Session::remove()",
+                    "login(",
+                    ".save()",
+                    "run_prepared(",
+                ] {
+                    if let Some(pos) = body.find(side_effect) {
+                        assert!(
+                            pos > ok_return,
+                            "{name}: {side_effect} must not run before the cancellation check"
+                        );
+                    }
+                }
+            }
+        }
+
+        // AC5
+        #[test]
+        fn non_tty_guard_fails_fast_with_the_setup_message() {
+            if interactive_terminal() {
+                return;
+            }
+            let error = begin_control_api_setup().expect_err("non-TTY must fail fast");
+            assert_eq!(
+                error.to_string(),
+                "Blue setup requires an interactive terminal; run `blue setup` in a terminal or provision blue.toml"
+            );
+        }
+
+        // AC5
+        #[test]
+        fn non_tty_entry_point_fails_before_any_prompt_or_network_call() {
+            if interactive_terminal() {
+                return;
+            }
+            let error = discover_control_api().expect_err("non-TTY must fail fast");
+            assert_eq!(
+                error.to_string(),
+                "Blue setup requires an interactive terminal; run `blue setup` in a terminal or provision blue.toml"
+            );
+        }
+
+        // AC5: the guard runs before the loop, so an injected prompt that would
+        // panic is never reached without a TTY.
+        #[test]
+        fn non_tty_guard_short_circuits_before_injected_prompt() {
+            if interactive_terminal() {
+                return;
+            }
+            let result = begin_control_api_setup().and_then(|()| {
+                discover_with_retry(
+                    |_: Option<&str>| -> Result<String> {
+                        panic!("prompt must not run without a TTY")
+                    },
+                    |_: &str| -> Result<BlueToml> { panic!("discover must not run without a TTY") },
+                    || -> Result<bool> { panic!("confirm must not run without a TTY") },
+                    |_: &anyhow::Error| -> Result<()> {
+                        panic!("report must not run without a TTY")
+                    },
+                    MAX_DISCOVERY_ATTEMPTS,
+                )
+            });
+            assert!(result.is_err());
+        }
+
+        /// AC5: start() and run() keep their own non-TTY messages (regression
+        /// guard, asserted from `all_call_sites_use_the_retry_wrapper`).
+        fn assert_start_and_run_keep_their_own_non_tty_messages() {
+            assert!(fn_body("start").contains(
+                "bare `blue` is interactive; use `blue run <agent> -- <args>` for non-interactive automation"
+            ));
+            assert!(fn_body("run").contains(
+                "Blue is not configured; run `blue setup` in a terminal before launching an agent"
+            ));
+            if !interactive_terminal() {
+                let error = start().expect_err("non-TTY start must fail fast");
+                assert!(
+                    error.to_string().starts_with("bare `blue` is interactive"),
+                    "{error:#}"
+                );
+            }
+        }
+
+        /// Calls that write state or talk to the session/login path. None of
+        /// them may run inside the retry wrapper, so their errors can never be
+        /// retried as if they were discovery failures.
+        const POST_DISCOVERY_SIDE_EFFECTS: &[&str] = &[
+            "activate_discovered(",
+            "detach_tenant(",
+            "restore_tenant_state(",
+            "Session::remove()",
+            "Session::load()",
+            "login(",
+            ".save()",
+            "write_atomic(",
+            "std::fs::write(",
+            "gh_config::",
+            "run_prepared(",
+            "ensure_session_for_start(",
+        ];
+
+        // AC7 + AC8: the retry wrapper and its helpers only discover; they never
+        // persist config, touch the session, log in, or write agent files.
+        #[test]
+        fn retry_wrapper_and_helpers_have_no_post_discovery_side_effects() {
+            for name in [
+                "begin_control_api_setup",
+                "prompt_control_api_url_input",
+                "discover_with_retry",
+                "discover_control_api",
+                "discover_configuration",
+            ] {
+                let body = fn_body(name);
+                assert!(
+                    !body.contains("todo!("),
+                    "{name} is not implemented: {body}"
+                );
+                for side_effect in POST_DISCOVERY_SIDE_EFFECTS {
+                    assert!(
+                        !body.contains(side_effect),
+                        "{name} must not call {side_effect}; non-discovery work belongs to the caller: {body}"
+                    );
+                }
+            }
+        }
+
+        // AC7: each call site applies activate_discovered to the wrapper's
+        // result after the call returns, not inside the retried closure.
+        #[test]
+        fn call_sites_activate_the_discovered_config_after_the_wrapper_returns() {
+            for name in ["setup", "start", "run"] {
+                let body = fn_body(name);
+                let at = body
+                    .find("discover_control_api()")
+                    .unwrap_or_else(|| panic!("{name} must call discover_control_api()"));
+                let line_start = body[..at].rfind('\n').map_or(0, |i| i + 1);
+                let line = &body[line_start..at];
+                assert!(
+                    !line.contains("activate_discovered("),
+                    "{name}: activate_discovered must not wrap the retry wrapper on one line: {line}"
+                );
+                let activate = body
+                    .find("activate_discovered(")
+                    .unwrap_or_else(|| panic!("{name} must still activate the discovered config"));
+                assert!(
+                    activate > at,
+                    "{name}: activate_discovered must run after discover_control_api returns"
+                );
+            }
+            // login stays in setup after discovery, as before.
+            let setup = fn_body("setup");
+            assert!(
+                setup.find("login(").unwrap() > setup.find("discover_control_api()").unwrap(),
+                "setup must still log in after discovery"
+            );
+        }
+
+        // AC7: once discovery succeeds the loop is done. A later failure in the
+        // caller (save, login, session) propagates as-is and never re-prompts.
+        #[test]
+        fn post_discovery_errors_propagate_and_are_not_retried() {
+            for failure in [
+                "saving discovered blue.toml: permission denied",
+                "login failed: device code expired",
+                "loading session: corrupt session file",
+            ] {
+                let calls = RefCell::new(Calls::default());
+                let result = discover_with_retry(
+                    |previous: Option<&str>| {
+                        calls.borrow_mut().prompts.push(previous.map(str::to_owned));
+                        Ok(SECOND_URL.to_owned())
+                    },
+                    |url: &str| {
+                        calls.borrow_mut().discovers.push(url.to_owned());
+                        Ok(cfg_for(url))
+                    },
+                    || -> Result<bool> {
+                        calls.borrow_mut().confirms += 1;
+                        Ok(true)
+                    },
+                    |error: &anyhow::Error| {
+                        calls.borrow_mut().reports.push(format!("{error:#}"));
+                        Ok(())
+                    },
+                    MAX_DISCOVERY_ATTEMPTS,
+                )
+                .and_then(|cfg| {
+                    let cfg = cfg.expect("discovery succeeded");
+                    assert_eq!(cfg.service.url, SECOND_URL);
+                    Err::<BlueToml, _>(anyhow::anyhow!(failure))
+                });
+                let error = result.expect_err("post-discovery failure must propagate");
+                assert_eq!(format!("{error:#}"), failure);
+                let calls = calls.into_inner();
+                assert_eq!(calls.prompts.len(), 1, "{failure}: no re-prompt");
+                assert_eq!(calls.discovers.len(), 1, "{failure}: no re-discovery");
+                assert_eq!(calls.confirms, 0, "{failure}: no retry offered");
+                assert!(
+                    calls.reports.is_empty(),
+                    "{failure}: not reported as discovery"
+                );
+            }
+        }
+
+        // AC7: a failure of the reporter itself is not a discovery error; it
+        // propagates unchanged instead of being retried.
+        #[test]
+        fn report_failure_propagates_without_confirming_or_retrying() {
+            let discovers = RefCell::new(0usize);
+            let confirms = RefCell::new(0usize);
+            let result = discover_with_retry(
+                |_: Option<&str>| Ok(FIRST_URL.to_owned()),
+                |_: &str| -> Result<BlueToml> {
+                    *discovers.borrow_mut() += 1;
+                    Err(anyhow::anyhow!("dns error"))
+                },
+                || -> Result<bool> {
+                    *confirms.borrow_mut() += 1;
+                    Ok(true)
+                },
+                |_: &anyhow::Error| -> Result<()> { Err(anyhow::anyhow!("terminal write failed")) },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            let error = result.expect_err("report failure must propagate");
+            assert!(
+                format!("{error:#}").contains("terminal write failed"),
+                "{error:#}"
+            );
+            assert_eq!(*discovers.borrow(), 1);
+            assert_eq!(*confirms.borrow(), 0);
+        }
+
+        // AC7: a non-interrupt confirm failure propagates as-is and is not
+        // treated as a decline (Ok(None)) or as another attempt.
+        #[test]
+        fn non_interrupt_confirm_failure_propagates_unchanged() {
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(FIRST_URL.to_owned())]),
+                    outcomes: VecDeque::from([Err(anyhow::anyhow!("boom"))]),
+                    confirms: VecDeque::from([Err(anyhow::anyhow!("broken pipe on confirm"))]),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            let error = result.expect_err("confirm failure must propagate");
+            assert_eq!(format!("{error:#}"), "broken pipe on confirm");
+            assert_eq!(calls.prompts.len(), 1);
+            assert_eq!(calls.discovers.len(), 1);
+        }
+
+        // AC8: the loop is driven entirely by injected closures, so it runs
+        // under cargo test with no TTY and no network, and its body has no
+        // terminal, network or filesystem access of its own.
+        #[test]
+        fn loop_is_pure_over_injected_closures() {
+            let body = fn_body("discover_with_retry");
+            for collaborator in ["prompt(", "discover(", "confirm_retry(", "report("] {
+                assert!(
+                    body.contains(collaborator),
+                    "discover_with_retry must drive its injected {collaborator}..) closure: {body}"
+                );
+            }
+            for forbidden in [
+                "cliclack::",
+                "interactive_terminal(",
+                "gh_service::discover(",
+                "discover_configuration(",
+                "std::fs::",
+                "BlueToml::load",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "discover_with_retry must only use its injected closures, found {forbidden}: {body}"
+                );
+            }
+            let (result, calls) = run_script(
+                Script {
+                    urls: VecDeque::from([Ok(FIRST_URL.to_owned()), Ok(SECOND_URL.to_owned())]),
+                    outcomes: VecDeque::from([
+                        Err(anyhow::anyhow!("contacting {FIRST_URL}: dns error")),
+                        Ok(cfg_for(SECOND_URL)),
+                    ]),
+                    confirms: VecDeque::from([Ok(true)]),
+                },
+                MAX_DISCOVERY_ATTEMPTS,
+            );
+            assert_eq!(result.unwrap().unwrap().service.url, SECOND_URL);
+            assert_eq!(calls.discovers.len(), 2);
+        }
     }
 }
