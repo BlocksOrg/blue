@@ -92,9 +92,11 @@ pub fn assert_mcp_registered(home: &Home, agent: &str) {
         }
         "opencode" => {
             let config = read_json(&home.data_path().join("runtime/opencode/opencode.json"));
-            // OpenCode collapses command+args into one array under mcp.<name>.
+            // OpenCode collapses command+args into one array under mcp.<name>
+            // (1.x) or mcp.servers.<name> (2.x).
             let first = config
-                .pointer("/mcp/e2e-remote/command/0")
+                .pointer("/mcp/servers/e2e-remote/command/0")
+                .or_else(|| config.pointer("/mcp/e2e-remote/command/0"))
                 .and_then(serde_json::Value::as_str);
             assert_eq!(
                 first,

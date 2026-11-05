@@ -32,6 +32,13 @@ test("canonical lock supplies every unique pin and historical cell without slim 
     grid.length,
   );
   assert.ok(grid.length > 4);
+  const opencode = grid.filter((c) => c.agent === "opencode");
+  assert.equal(opencode.find((c) => c.pin).package, "@opencode/cli");
+  assert.ok(
+    opencode
+      .filter((c) => c.version.startsWith("1."))
+      .every((c) => c.package === "opencode-ai"),
+  );
 });
 test("npm prefix selection uses the native layout", () => {
   assert.equal(binDirectory("C:\\install", "win32"), "C:\\install");
@@ -91,7 +98,7 @@ test("fixture generation preserves legacy bytes and renders native policies as d
     const legacy = await prepareFixtures(dir, { legacy: true });
     assert.equal(
       legacy.packageSha256,
-      "f84937b7e4221f795d8603b954cff846c266276fe2bc38e8e98c9812f4c1593f",
+      "2bea374e0d62af5fd23d73027a4b9865675afc9c5a427246580b9a8c180d55f4",
     );
     const native = await prepareFixtures(dir, { platform: "win32" });
     const policy = YAML.parse(

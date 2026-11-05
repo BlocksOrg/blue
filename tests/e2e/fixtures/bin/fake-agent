@@ -14,13 +14,20 @@ fi
 
 # OpenCode session restoration uses its native export/import contract. An
 # unknown export exits non-zero; import returns the new native session ID.
-if [[ "$agent" == "opencode" ]] && [[ "${1:-}" == "session" ]] && [[ "${2:-}" == "list" ]]; then
-  printf '[]\n'
-  exit 0
-fi
-if [[ "$agent" == "opencode" ]] && [[ "${1:-}" == "import" ]]; then
-  printf 'Imported session: e2e-opencode-imported\n'
-  exit 0
+# OpenCode 1.x imports with `import <file>`; 2.x runs every restore command on
+# a private server, `--standalone session import <file> --directory <dir>`.
+if [[ "$agent" == "opencode" ]]; then
+  opencode_args=("$@")
+  [[ "${opencode_args[0]:-}" == "--standalone" ]] && opencode_args=("${opencode_args[@]:1}")
+  if [[ "${opencode_args[0]:-}" == "session" ]] && [[ "${opencode_args[1]:-}" == "list" ]]; then
+    printf '[]\n'
+    exit 0
+  fi
+  if [[ "${opencode_args[0]:-}" == "import" ]] ||
+    { [[ "${opencode_args[0]:-}" == "session" ]] && [[ "${opencode_args[1]:-}" == "import" ]]; }; then
+    printf 'Imported session: e2e-opencode-imported\n'
+    exit 0
+  fi
 fi
 
 # The supervisor's graceful-stop path sends SIGTERM and then waits for the

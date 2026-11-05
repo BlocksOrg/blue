@@ -40,19 +40,21 @@ export async function prepareFixtures(
         `[[hooks]]\nevent = "SessionStart"\ncommand = ${JSON.stringify(marker)}\ntimeout = 5\n`,
       );
     }
-    const plugin = join(root, "opencode-plugin.js");
-    await writeFile(
-      plugin,
-      (await readFile(plugin, "utf8"))
-        .replaceAll(
-          '"/tmp/blue-e2e/component-markers"',
-          "process.env.E2E_SLIM_MARKER_DIR",
-        )
-        .replaceAll(
-          '"/tmp/blue-e2e/component-markers/opencode-package-plugin"',
-          "`${process.env.E2E_SLIM_MARKER_DIR}/opencode-package-plugin`",
-        ),
-    );
+    for (const name of ["opencode-plugin.js", "opencode-plugin-v2.js"]) {
+      const plugin = join(root, name);
+      await writeFile(
+        plugin,
+        (await readFile(plugin, "utf8"))
+          .replaceAll(
+            '"/tmp/blue-e2e/component-markers"',
+            "process.env.E2E_SLIM_MARKER_DIR",
+          )
+          .replaceAll(
+            '"/tmp/blue-e2e/component-markers/opencode-package-plugin"',
+            "`${process.env.E2E_SLIM_MARKER_DIR}/opencode-package-plugin`",
+          ),
+      );
+    }
     const tar = await import("tar");
     await tar.c(
       {
