@@ -539,12 +539,12 @@ mod tests {
         let runtime = crate::managed_runtime_dir(&home).join("opencode");
         assert_eq!(
             config["plugins"],
-            json!([runtime.join("plugins/tool").display().to_string()])
+            json!([runtime.join("plugins").join("tool").display().to_string()])
         );
         assert!(plan
             .writes
             .iter()
-            .any(|write| write.path == runtime.join("plugins/tool/index.js")));
+            .any(|write| write.path == runtime.join("plugins").join("tool").join("index.js")));
         assert_eq!(
             config["skills"],
             json!([runtime.join("skills").display().to_string()])
