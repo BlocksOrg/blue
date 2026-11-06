@@ -87,6 +87,30 @@
       "rationale": "This is the fingerprint of a deliberately public deterministic JWT signing key used only by the hermetic e2e-slim fixture.",
       "compensating_control": "The key is confined to test fixtures, is not referenced by deployment manifests, and production startup requires externally supplied secrets.",
       "expires": "2026-12-05"
+    },
+    {
+      "scanner": "npm-audit",
+      "identifier": "GHSA-965c-763c-88jm",
+      "owner": "platform-security",
+      "rationale": "The dashboard does not enable the better-auth Magic Link plugin, which this OAuth-state-as-magic-link advisory requires. Patched better-auth (>=1.7.7) drops the account.issuer column that services/control-api/migrations/0002_better_auth.sql declares NOT NULL, so the upgrade needs a coordinated schema migration and is tracked separately.",
+      "compensating_control": "apps/dashboard/lib/auth.ts registers only the admin, jwt, organization, genericOAuth and oauth-provider plugins; adding magicLink before the upgrade lands must remove this exception.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "npm-audit",
+      "identifier": "GHSA-r4xp-prcw-77qf",
+      "owner": "platform-security",
+      "rationale": "The dashboard does not enable the better-auth OAuth Proxy plugin, which this account-takeover advisory requires. Patched better-auth (>=1.7.7) drops the account.issuer column that services/control-api/migrations/0002_better_auth.sql declares NOT NULL, so the upgrade needs a coordinated schema migration and is tracked separately.",
+      "compensating_control": "apps/dashboard/lib/auth.ts registers only the admin, jwt, organization, genericOAuth and oauth-provider plugins; adding oAuthProxy before the upgrade lands must remove this exception.",
+      "expires": "2026-12-05"
+    },
+    {
+      "scanner": "npm-audit",
+      "identifier": "GHSA-44jh-23m7-hpcf",
+      "owner": "platform-security",
+      "rationale": "Low-severity rate-limit race in @better-auth/drizzle-adapter, reported only because better-auth carries critical advisories; the dashboard passes a pg Pool to better-auth and never loads the Drizzle adapter. Patched better-auth (>=1.7.7) drops the account.issuer column that services/control-api/migrations/0002_better_auth.sql declares NOT NULL, so the upgrade needs a coordinated schema migration and is tracked separately.",
+      "compensating_control": "apps/dashboard/lib/auth.ts configures database: authPool (node-postgres), so better-auth's built-in Kysely adapter handles rate-limit storage instead of the affected Drizzle adapter.",
+      "expires": "2026-12-05"
     }
   ]
 }
