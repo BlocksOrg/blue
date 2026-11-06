@@ -4430,7 +4430,15 @@ fn native_session_exists(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let sessions: serde_json::Value = serde_json::from_slice(&output.stdout)
+    session_list_contains(&output.stdout, session_id, label)
+}
+
+/// OpenCode 1.x prints nothing, not `[]`, when no sessions exist.
+fn session_list_contains(stdout: &[u8], session_id: &str, label: &str) -> Result<bool> {
+    if stdout.trim_ascii().is_empty() {
+        return Ok(false);
+    }
+    let sessions: serde_json::Value = serde_json::from_slice(stdout)
         .with_context(|| format!("decoding the {label} session list"))?;
     Ok(sessions.as_array().is_some_and(|sessions| {
         sessions.iter().any(|session| {
@@ -6818,5 +6826,24 @@ mod tests {
         assert!(!matching.repository_mismatch());
         assert!(prepared(Some("git@example.com:other/repo.git")).repository_mismatch());
         assert!(prepared(None).repository_mismatch());
+    }
+
+    #[test]
+    fn session_list_contains_treats_empty_output_as_no_sessions() {
+        for stdout in ["", "\n", "[]"] {
+            assert!(!session_list_contains(stdout.as_bytes(), "ses_1", "OpenCode").unwrap());
+        }
+    }
+
+    #[test]
+    fn session_list_contains_matches_session_ids() {
+        let stdout = br#"[{"id":"ses_1"},{"id":"ses_2"}]"#;
+        assert!(session_list_contains(stdout, "ses_2", "OpenCode").unwrap());
+        assert!(!session_list_contains(stdout, "ses_3", "OpenCode").unwrap());
+    }
+
+    #[test]
+    fn session_list_contains_rejects_non_json_output() {
+        assert!(session_list_contains(b"not json", "ses_1", "OpenCode").is_err());
     }
 }

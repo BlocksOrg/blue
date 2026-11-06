@@ -18,9 +18,14 @@ fi
 # a private server, `--standalone session import <file> --directory <dir>`.
 if [[ "$agent" == "opencode" ]]; then
   opencode_args=("$@")
-  [[ "${opencode_args[0]:-}" == "--standalone" ]] && opencode_args=("${opencode_args[@]:1}")
+  opencode_v2=false
+  if [[ "${opencode_args[0]:-}" == "--standalone" ]]; then
+    opencode_v2=true
+    opencode_args=("${opencode_args[@]:1}")
+  fi
+  # Real 1.x prints nothing, not `[]`, when no sessions exist.
   if [[ "${opencode_args[0]:-}" == "session" ]] && [[ "${opencode_args[1]:-}" == "list" ]]; then
-    printf '[]\n'
+    [[ "$opencode_v2" == true ]] && printf '[]\n'
     exit 0
   fi
   if [[ "${opencode_args[0]:-}" == "import" ]] ||
