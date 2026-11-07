@@ -13,7 +13,7 @@ Every supported agent ends up with two configurations: the one you already own, 
 | Codex | `~/.codex/config.toml` | `~/.codex/blue.config.toml` | Blue launches Codex with `--profile blue`. |
 | Claude Code | `~/.claude/settings.json` and `~/.claude.json` | `runtime/claude/settings.json` and `runtime/claude/mcp.json` | Blue passes `--settings` and `--mcp-config` to the governed process. |
 | Kimi Code | `~/.kimi-code/config.toml` and `~/.kimi-code/mcp.json` | `runtime/kimi/` | Blue points `KIMI_CODE_HOME` at the generated directory. |
-| OpenCode | `~/.config/opencode/opencode.json` and `~/.local/share/opencode/auth.json` | `runtime/opencode/opencode.json` and its sibling package directories | Blue exports `OPENCODE_CONFIG_CONTENT` and `OPENCODE_CONFIG_DIR`. |
+| OpenCode | `~/.config/opencode/opencode.json` and `~/.local/share/opencode/auth.json` | `runtime/opencode/opencode.json` and its sibling package directories | Blue exports `OPENCODE_CONFIG_CONTENT`. For OpenCode 1.x it also exports `OPENCODE_CONFIG_DIR`; OpenCode 2.x gets `--standalone` instead, and the generated configuration references the package directories by path. |
 
 Paths shown as `runtime/…` are relative to Blue's managed data directory, which is `~/.config/blue` on macOS and Linux and `%LOCALAPPDATA%\Blue\Data` on Windows. See [Windows paths and migration](/next/cli/windows-paths) for the full Windows layout.
 
@@ -27,7 +27,7 @@ For Codex, the governed launch selects the separate `blue` profile, so the organ
 
 For Claude Code, the generated settings and MCP files are passed as extra launch arguments, so Claude merges them with `~/.claude/settings.json` and `~/.claude.json` at startup.
 
-For OpenCode, the generated configuration arrives through environment variables and lands in OpenCode's own layered configuration, above your global `~/.config/opencode/opencode.json`.
+For OpenCode, the generated configuration arrives through environment variables and lands in OpenCode's own layered configuration, above your global `~/.config/opencode/opencode.json`. OpenCode 2.x treats `OPENCODE_CONFIG_DIR` as a replacement for `~/.config/opencode`, so Blue does not set it there and your global configuration, plugins, skills, and agents keep loading. Blue renders OpenCode 2.x configuration in its native shape (`permissions`, `providers`, `mcp.servers`, and `policies`).
 
 <Note>
   Kimi Code works differently. Blue builds an isolated `KIMI_CODE_HOME` and seeds it from your native `~/.kimi-code/` files when it reconciles, rather than layering at launch. An edit to your own Kimi files therefore reaches a governed session only after the next `blue apply`.

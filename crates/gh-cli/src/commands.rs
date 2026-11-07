@@ -2745,12 +2745,7 @@ fn run_prepared(
     );
     tracing::debug!(elapsed_ms = startup_started.elapsed().as_millis(), harness = %harness, "coding agent ready to launch");
 
-    let launch_args = write
-        .launch_args
-        .iter()
-        .cloned()
-        .chain(args.iter().cloned())
-        .collect::<Vec<_>>();
+    let launch_args = merge_launch_args(&write.launch_args, args);
     // Mint this blue run's session identity and inject it into the agent process
     // env only. It must NEVER enter the gh-config plan env (goldens/fingerprints
     // stay deterministic); the managed session-start hook reads it back to map
@@ -3756,10 +3751,13 @@ fn finalize_blue_session_inner(blue_session_id: &str) -> Result<()> {
     // Synthesize a hook-style payload from the metadata so each harness routes
     // through its native capture path (kimi via its filesystem resolver,
     // opencode via its stable plugin export).
+    // `reason: exit` tells a capture operation the native process is gone, so
+    // it may re-read native state the in-session hook could not finish writing.
     let payload = serde_json::json!({
         "session_id": session_id,
         "transcript_path": metadata.transcript_path,
         "cwd": metadata.cwd,
+        "reason": "exit",
     });
     // Capture and spool the session bundle, then upload ONLY the just-spooled
     // record. A full spool drain would bound exit latency by unrelated stale
@@ -4239,13 +4237,23 @@ fn restore_verified_bundle(
     // stopped. Recompute it immediately before publication to retain sessions
     // another local process may have added in the meantime.
     prepare_native_session_index(harness, bundle, &home)?;
-    if harness == Harness::Opencode
-        && opencode_session_exists(destination, &bundle.manifest.native_session_id)?
-    {
-        bail!(
-            "native session collision for {}; the local OpenCode session was not changed",
-            bundle.manifest.native_session_id
-        );
+    let native_import = registration.implementation.session_import();
+    if native_import.is_some() {
+        ensure_installed_generation(harness, registration)?;
+    }
+    if let Some(import) = native_import {
+        if native_session_exists(
+            harness,
+            import,
+            destination,
+            &bundle.manifest.native_session_id,
+        )? {
+            bail!(
+                "native session collision for {}; the local {} session was not changed",
+                bundle.manifest.native_session_id,
+                harness.metadata().label
+            );
+        }
     }
     if !preflight {
         gh_config::session_bundle::restore_home_files_with(
@@ -4272,39 +4280,55 @@ fn restore_verified_bundle(
         }
     }
     let mut native_session_id = bundle.manifest.native_session_id.clone();
-    if harness == Harness::Opencode && !preflight {
+    if let Some(import) = native_import.filter(|_| !preflight) {
+        let label = harness.metadata().label;
         let export = bundle
             .manifest
             .files
             .iter()
             .find(|file| file.role == "portable_export")
             .and_then(|file| bundle.files.get(&file.path))
-            .ok_or_else(|| anyhow!("OpenCode bundle has no portable export"))?;
-        let import_path =
-            session_spool_dir()?.join(format!("opencode-import-{}.json", std::process::id()));
+            .ok_or_else(|| anyhow!("{label} bundle has no portable export"))?;
+        let import_path = session_spool_dir()?.join(format!(
+            "{}-import-{}.json",
+            harness.key(),
+            std::process::id()
+        ));
         gh_common::write_atomic(&import_path, export)?;
-        let mut command = std::process::Command::new(
-            gh_common::which("opencode").unwrap_or_else(|| PathBuf::from("opencode")),
-        );
-        command.arg("import").arg(&import_path);
+        let mut command = native_command(harness);
+        command.args((import.import_args)(&import_path, destination));
         if let Some(destination) = destination {
             command.current_dir(destination);
         }
-        let output = command.output().context("running opencode import")?;
+        let output = command
+            .output()
+            .with_context(|| format!("running {label} session import"));
         let _ = std::fs::remove_file(&import_path);
+        let output = output?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
-            bail!(
-                "opencode import failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+            bail!("{label} session import failed: {}", stderr.trim());
         }
-        native_session_id = String::from_utf8_lossy(&output.stdout)
+        native_session_id = match String::from_utf8_lossy(&output.stdout)
             .lines()
-            .find_map(|line| line.trim().strip_prefix("Imported session:"))
+            .find_map(|line| line.trim().strip_prefix(import.imported_prefix))
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow!("opencode import did not report an imported session ID"))?;
+        {
+            Some(id) => id.to_owned(),
+            // The pre-import probe races with other local processes; a vendor
+            // that reports the conflict and exits 0 still left nothing changed.
+            None if import
+                .collision_marker
+                .is_some_and(|marker| stderr.contains(marker)) =>
+            {
+                bail!(
+                    "native session collision for {}; the local {label} session was not changed",
+                    bundle.manifest.native_session_id
+                )
+            }
+            None => bail!("{label} session import did not report an imported session ID"),
+        };
     }
     let args = match harness {
         Harness::Codex => vec!["resume", native_session_id.as_str()],
@@ -4325,32 +4349,97 @@ fn restore_verified_bundle(
     Ok(result)
 }
 
-fn opencode_session_exists(destination: Option<&Path>, session_id: &str) -> Result<bool> {
-    let mut command = std::process::Command::new(
-        gh_common::which("opencode").unwrap_or_else(|| PathBuf::from("opencode")),
-    );
-    command.args([
-        "session",
-        "list",
-        "--max-count",
-        "2147483647",
-        "--format",
-        "json",
-    ]);
+/// Managed launch arguments precede the user's argv. A managed boolean flag the
+/// user already passed (OpenCode 2.x `--standalone`) is not repeated; flags
+/// followed by a managed value are always kept with their value.
+fn merge_launch_args(managed: &[String], user: &[String]) -> Vec<String> {
+    let boolean = |index: usize| {
+        managed[index].starts_with("--")
+            && !managed[index].contains('=')
+            && managed
+                .get(index + 1)
+                .is_none_or(|next| next.starts_with('-'))
+    };
+    managed
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| !(boolean(*index) && user.contains(arg)))
+        .map(|(_, arg)| arg)
+        .chain(user)
+        .cloned()
+        .collect()
+}
+
+fn native_command(harness: Harness) -> std::process::Command {
+    let program = harness.binary_names()[0];
+    std::process::Command::new(gh_common::which(program).unwrap_or_else(|| PathBuf::from(program)))
+}
+
+/// Native import formats are generation-specific: a bundle recorded under one
+/// generation is refused before the installed CLI of another is invoked.
+fn ensure_installed_generation(
+    harness: Harness,
+    recorded: &gh_config::implementations::ImplementationRegistration,
+) -> Result<()> {
+    match gh_harness::detect(harness).and_then(|installed| installed.version) {
+        Some(version) => generation_mismatch(harness, recorded, &version).map_or(Ok(()), Err),
+        None => Ok(()),
+    }
+}
+
+fn generation_mismatch(
+    harness: Harness,
+    recorded: &gh_config::implementations::ImplementationRegistration,
+    installed: &semver::Version,
+) -> Option<anyhow::Error> {
+    let current = gh_config::implementations::definition(harness).select(installed)?;
+    if current.interval.profile == recorded.interval.profile {
+        return None;
+    }
+    let interval = recorded.interval;
+    let range = match interval.before {
+        Some(before) => format!(">={}, <{before}", interval.introduced),
+        None => format!(">={}", interval.introduced),
+    };
+    Some(anyhow!(
+        "session was recorded with {label} profile `{}`; resuming requires {label} {range}, but the installed {label} {installed} uses `{}`",
+        interval.profile,
+        current.interval.profile,
+        label = harness.metadata().label,
+    ))
+}
+
+fn native_session_exists(
+    harness: Harness,
+    import: &gh_config::implementations::NativeSessionImport,
+    destination: Option<&Path>,
+    session_id: &str,
+) -> Result<bool> {
+    let label = harness.metadata().label;
+    let mut command = native_command(harness);
+    command.args(import.list_args);
     if let Some(destination) = destination {
         command.current_dir(destination);
     }
     let output = command
         .output()
-        .context("checking for a local OpenCode session collision")?;
+        .with_context(|| format!("checking for a local {label} session collision"))?;
     if !output.status.success() {
         bail!(
-            "could not safely check OpenCode session collisions: {}",
+            "could not safely check {label} session collisions: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let sessions: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("decoding `opencode session list --format json`")?;
+    session_list_contains(&output.stdout, session_id, label)
+}
+
+/// OpenCode 1.x prints nothing, not `[]`, when no sessions exist.
+fn session_list_contains(stdout: &[u8], session_id: &str, label: &str) -> Result<bool> {
+    if stdout.trim_ascii().is_empty() {
+        return Ok(false);
+    }
+    let sessions: serde_json::Value = serde_json::from_slice(stdout)
+        .with_context(|| format!("decoding the {label} session list"))?;
     Ok(sessions.as_array().is_some_and(|sessions| {
         sessions.iter().any(|session| {
             session.get("id").and_then(serde_json::Value::as_str) == Some(session_id)
@@ -5110,6 +5199,73 @@ fn set_executable(_path: &std::path::Path) {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opencode_sessions_resume_only_on_their_recording_generation() {
+        let recorded = |profile| {
+            gh_config::implementations::implementation_for_profile(Harness::Opencode, profile)
+                .unwrap()
+        };
+        let version = |raw| semver::Version::parse(raw).unwrap();
+        let error = generation_mismatch(
+            Harness::Opencode,
+            recorded("opencode-v0_0_0"),
+            &version("2.2.5"),
+        )
+        .unwrap()
+        .to_string();
+        assert!(error.contains("`opencode-v0_0_0`"), "{error}");
+        assert!(error.contains(">=0.0.0, <2.0.0"), "{error}");
+        assert!(error.contains("2.2.5 uses `opencode-v2_0_0`"), "{error}");
+        let error = generation_mismatch(
+            Harness::Opencode,
+            recorded("opencode-v2_0_0"),
+            &version("1.18.25"),
+        )
+        .unwrap()
+        .to_string();
+        assert!(error.contains("requires OpenCode >=2.0.0"), "{error}");
+        assert!(generation_mismatch(
+            Harness::Opencode,
+            recorded("opencode-v1"),
+            &version("2.0.0")
+        )
+        .is_none());
+        assert!(generation_mismatch(
+            Harness::Opencode,
+            recorded("opencode-v0_0_0"),
+            &version("1.19.5")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn managed_boolean_flags_are_not_repeated_but_valued_flags_are_kept() {
+        let owned = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            merge_launch_args(
+                &owned(&["--standalone"]),
+                &owned(&["--standalone", "-s", "id"])
+            ),
+            owned(&["--standalone", "-s", "id"])
+        );
+        assert_eq!(
+            merge_launch_args(&owned(&["--standalone"]), &owned(&["run", "hi"])),
+            owned(&["--standalone", "run", "hi"])
+        );
+        assert_eq!(
+            merge_launch_args(
+                &owned(&["--config", "check_for_update_on_startup=false"]),
+                &owned(&["--config", "model=x"])
+            ),
+            owned(&[
+                "--config",
+                "check_for_update_on_startup=false",
+                "--config",
+                "model=x"
+            ])
+        );
+    }
+
     use super::*;
     use gh_config::resolve_compatibility;
 
@@ -6670,5 +6826,24 @@ mod tests {
         assert!(!matching.repository_mismatch());
         assert!(prepared(Some("git@example.com:other/repo.git")).repository_mismatch());
         assert!(prepared(None).repository_mismatch());
+    }
+
+    #[test]
+    fn session_list_contains_treats_empty_output_as_no_sessions() {
+        for stdout in ["", "\n", "[]"] {
+            assert!(!session_list_contains(stdout.as_bytes(), "ses_1", "OpenCode").unwrap());
+        }
+    }
+
+    #[test]
+    fn session_list_contains_matches_session_ids() {
+        let stdout = br#"[{"id":"ses_1"},{"id":"ses_2"}]"#;
+        assert!(session_list_contains(stdout, "ses_2", "OpenCode").unwrap());
+        assert!(!session_list_contains(stdout, "ses_3", "OpenCode").unwrap());
+    }
+
+    #[test]
+    fn session_list_contains_rejects_non_json_output() {
+        assert!(session_list_contains(b"not json", "ses_1", "OpenCode").is_err());
     }
 }

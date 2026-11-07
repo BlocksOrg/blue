@@ -17,4 +17,4 @@ pub use launch::{
     launch_inherited, terminal_size, PtyEvent, PtySession, RawGuard, TerminalModeGuard,
 };
 
-pub use install::{detect_installation, InstallMethod, Installation};
+pub use install::{detect_installation, npm_packages, InstallMethod, Installation};

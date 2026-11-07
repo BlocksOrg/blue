@@ -11,7 +11,9 @@
     "`integrity` mirrors the lock's shape (pulled from npm dist metadata when",
     "authoring); `profile` documents the adapter VersionInterval each sample maps",
     "to. `arguments` is the per-cell launch argv (the element mentioning",
-    "BLUE_CERT_OK is swapped for the tool-forcing prompt at cert time)."
+    "BLUE_CERT_OK is swapped for the tool-forcing prompt at cert time).",
+    "`package` is optional and overrides the lock's package for a sample from",
+    "an older release line (OpenCode 1.x ships as `opencode-ai`)."
   ],
   "agents": {
     "codex": {
@@ -83,19 +85,29 @@
     "opencode": {
       "versions": [
         {
+          "version": "1.18.25",
+          "package": "opencode-ai",
+          "integrity": "sha512-pS4RKJ9eKwU7Dp5G5pdj1rhMnpG5APixXzfTKNoFqv9aFVI36Rnza2jESvKifxyPZlsA65MQB03WCArY0EK6mg==",
+          "profile": "opencode-v0_0_0",
+          "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."]
+        },
+        {
           "version": "1.18.10",
+          "package": "opencode-ai",
           "integrity": "sha512-/PoGrZnTrSrmHvvXUg12O4yAEjytuqEQNG8usCydrYg4EtosvbtKtGIHI40DFaIhPws91Wa20niSvFG32xL8ZQ==",
           "profile": "opencode-v0_0_0",
           "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."]
         },
         {
           "version": "1.17.12",
+          "package": "opencode-ai",
           "integrity": "sha512-zqtPmMK6BLyAZ0SywKkt8iVwm+gB6RNM7OUbnHS8bRNuC3y6bAbYwOCLuXrE3E/RZ7CyGK2Jj08fheVmGdjKcg==",
           "profile": "opencode-v0_0_0",
           "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."]
         },
         {
           "version": "1.15.13",
+          "package": "opencode-ai",
           "integrity": "sha512-9LvgcILITiYPsKrBYSHQYR4ur/WBQYMHN5jEnboa/NVboPyl+WBGgvDHQ2SJasPpBmCAd2YTTorz2uMbcF7Hhw==",
           "profile": "opencode-v0_0_0",
           "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."]

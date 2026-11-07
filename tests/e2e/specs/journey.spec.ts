@@ -13,7 +13,7 @@ const canonicalProfiles: Record<string, string> = {
   codex: "codex-v0_145_0",
   claude: "claude-v2_0_12",
   kimi: "kimi-v0_0_0",
-  opencode: "opencode-v0_0_0",
+  opencode: "opencode-v2_0_0",
 };
 
 const deviceUrlPattern = /http:\/\/127\.0\.0\.1:3000\/device\/[A-Za-z0-9_-]+/;

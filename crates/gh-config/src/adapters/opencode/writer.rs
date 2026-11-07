@@ -11,8 +11,8 @@ use serde_json::{json, Map, Value};
 use crate::util::json_pretty;
 use crate::HarnessWrite;
 
-const GOVERNED_PROVIDER: &str = "governed";
-const GATEWAY_TOKEN_ENV: &str = "BLUE_OPENCODE_GATEWAY_TOKEN";
+pub(super) const GOVERNED_PROVIDER: &str = "governed";
+pub(super) const GATEWAY_TOKEN_ENV: &str = "BLUE_OPENCODE_GATEWAY_TOKEN";
 const ADDITIONAL_GOVERNED_MODELS: &[&str] = &["openai/gpt-5.6-sol"];
 const SCHEMA: &str = "https://opencode.ai/config.json";
 
@@ -145,7 +145,7 @@ pub fn write(
 /// is the only thing that knows what it actually serves), else the built-in
 /// default. Strip one optional `governed/` prefix and ignore empty IDs.
 /// Never empty, so the provider block is always renderable.
-fn governed_catalog(policy: &HarnessPolicy) -> Vec<String> {
+pub(super) fn governed_catalog(policy: &HarnessPolicy) -> Vec<String> {
     let configured = policy
         .managed_config
         .extra
@@ -173,7 +173,7 @@ fn governed_catalog(policy: &HarnessPolicy) -> Vec<String> {
 /// Both the bare name and the `<provider>/`-prefixed spelling are accepted, so
 /// a native `governed/openai/gpt-x` or `openai/gpt-x` resolves to the same
 /// catalog entry. Anything else is a provider `enabled_providers` disables.
-fn native_governed_model(native: &Map<String, Value>, catalog: &[String]) -> Option<String> {
+pub(super) fn native_governed_model(native: &Map<String, Value>, catalog: &[String]) -> Option<String> {
     let model = native.get("model").and_then(Value::as_str)?;
     let stripped = model.split_once('/').map(|(_, rest)| rest);
     [Some(model), stripped]
@@ -229,7 +229,7 @@ pub fn apply_packages(
     Ok(())
 }
 
-fn migrate_legacy_global_config(
+pub(super) fn migrate_legacy_global_config(
     plan: &mut crate::adapters::ReconcilePlan,
     home: &Path,
     path: &Path,
@@ -332,7 +332,7 @@ fn merge_mcp_block(
     root.insert("mcp".into(), Value::Object(mcp));
 }
 
-fn plan_skills(
+pub(super) fn plan_skills(
     plan: &mut crate::adapters::ReconcilePlan,
     sources: &[std::path::PathBuf],
     target: &Path,

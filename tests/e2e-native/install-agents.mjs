@@ -53,17 +53,17 @@ export async function cells(matrix = true) {
   const historical = JSON.parse(
     await readFile(join(repo, "tests/e2e-slim/agents.matrix.json")),
   );
+  // A historical sample may name an older release line's package (OpenCode
+  // 1.x is `opencode-ai`, 2.x is `@opencode/cli`); it defaults to the pin's.
   return Object.entries(lock.agents).flatMap(([agent, pin]) =>
     [
-      pin.version,
-      ...(matrix
-        ? historical.agents[agent].versions.map((v) => v.version)
-        : []),
-    ].map((version) => ({
+      { version: pin.version, package: pin.package },
+      ...(matrix ? historical.agents[agent].versions : []),
+    ].map((sample) => ({
       agent,
-      version,
-      package: pin.package,
-      pin: version === pin.version,
+      version: sample.version,
+      package: sample.package ?? pin.package,
+      pin: sample.version === pin.version,
     })),
   );
 }

@@ -47,7 +47,7 @@ governance:
       name: E2E Skill
       version: "1.0.0"
       source_ref: file:///fixtures/e2e-package.tar.gz
-      sha256: f84937b7e4221f795d8603b954cff846c266276fe2bc38e8e98c9812f4c1593f
+      sha256: 2bea374e0d62af5fd23d73027a4b9865675afc9c5a427246580b9a8c180d55f4
       adapters:
         codex:
           plugin_dir: e2e-package/codex-plugin
@@ -63,6 +63,12 @@ governance:
           skills_dir: *skills
           agents_dir: *agents
           plugins: [e2e-package/opencode-plugin.js]
+          # OpenCode 2.x cannot load the v1 plugin API.
+          variants:
+            - introduced: 2.0.0
+              skills_dir: *skills
+              agents_dir: *agents
+              plugins: [e2e-package/opencode-plugin-v2.js]
   session_upload:
     presign_url: http://127.0.0.1:8080/session-uploads/presign
   harnesses:

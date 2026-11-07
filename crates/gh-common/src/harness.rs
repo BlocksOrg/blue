@@ -73,9 +73,11 @@ macro_rules! harness_catalog {
                 label: "OpenCode",
                 description: "OpenCode agent settings",
                 binary_names: &["opencode"],
-                install_command_template: "npm install -g 'opencode-ai@{version}'",
+                // The newest generation's package. OpenCode 1.x installs from
+                // `opencode-ai`; each generation's adapter owns its own plan.
+                install_command_template: "npm install -g '@opencode/cli@{version}'",
                 install_program: "npm",
-                install_args: &["install", "-g", "opencode-ai@{version}"],
+                install_args: &["install", "-g", "@opencode/cli@{version}"],
             }
         }
     };

@@ -26,10 +26,10 @@
       "capabilities": ["gateway", "revision", "mcp", "packages", "skills", "agents", "hooks", "session_upload", "session_start", "session_resume"]
     },
     "opencode": {
-      "package": "opencode-ai",
-      "version": "1.18.25",
-      "integrity": "sha512-pS4RKJ9eKwU7Dp5G5pdj1rhMnpG5APixXzfTKNoFqv9aFVI36Rnza2jESvKifxyPZlsA65MQB03WCArY0EK6mg==",
-      "profile": "opencode-v0_0_0",
+      "package": "@opencode/cli",
+      "version": "2.2.5",
+      "integrity": "sha512-sJAwrwuVa5b+pA3O1UOiSDcC9DgdPVmtkWv6aF6q3+rOiOTCqrE41tkz1kyyE2O8BYPs4eOvBuzkQ6oEm8w5Mw==",
+      "profile": "opencode-v2_0_0",
       "arguments": ["run", "Return BLUE_CERT_OK and do not edit files."],
       "capabilities": ["gateway", "revision", "mcp", "packages", "skills", "agents", "plugins", "hooks", "session_upload", "session_start", "session_resume"]
     }

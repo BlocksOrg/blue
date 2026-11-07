@@ -98,6 +98,17 @@ Harnesses with standalone installers may resolve the selector to a concrete
 published version and update that installation in place; they must not install a
 second binary that remains shadowed on `PATH`.
 
+The install plan, and therefore the npm package, belongs to each generation's
+operation set rather than to the harness. OpenCode 1.x installs `opencode-ai`
+and 2.x installs `@opencode/cli`; both publish the same `opencode` binary.
+Installation-layout detection recognizes every package a harness has used.
+Repair prefers the generation that already owns the installed version, so an
+out-of-range 1.x release is repaired within 1.x. When the policy only admits a
+generation published under another package, Blue never switches packages
+itself: it returns manual guidance to uninstall the current package and install
+the other, as the vendor requires. A fresh install with no detected binary uses
+the newest generation the policy admits.
+
 Wrapped-launch update suppression is also generation-owned. Each named
 `Operations` set declares how its harness version disables native update checks
 or automatic installation. The same operation decorates both a newly reconciled
@@ -228,8 +239,22 @@ adapters:
   throughout that interval: `SessionEnd` arrived at `1.0.85`, so it is not
   supported uniformly. These releases are recorded in the
   [upstream changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
-- Kimi and OpenCode retain one production interval each. Candidate transitions
-  and the evidence still needed are recorded in
+- OpenCode: `2.0.0` ships under a new npm package (`@opencode/cli`) and is
+  incompatible with the 1.x output in four ways, so `opencode-v2_0_0` has its
+  own operation set. 1.x plugins do not load, so the session plugin uses the
+  v2 `{ id, setup(ctx) }` API and uploads on `session.execution.*`. The CLI
+  attaches to a shared per-user background service that never sees Blue's launch
+  environment, so every launch and restore command passes `--standalone`.
+  `OPENCODE_CONFIG_DIR` replaces the user's global configuration directory
+  instead of layering over it. Blue therefore renders native v2 configuration
+  in `OPENCODE_CONFIG_CONTENT` and references managed plugins and skills by
+  absolute path; package agents are inlined, because no configuration key
+  names an agent directory. Restoration uses `session import`, and 1.x exports
+  cannot be imported by 2.x, so restoring a bundle on the other generation is
+  refused before OpenCode runs. See the upstream
+  [V1 migration guide](https://github.com/anomalyco/opencode/blob/dev/services/www/src/docs/content/migrate-v1.mdx).
+- Kimi retains one production interval. Candidate transitions and the evidence
+  still needed are recorded in
   `crates/gh-config/tests/fixtures/future-boundaries.json`; they are not production
   boundaries.
 

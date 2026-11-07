@@ -73,12 +73,12 @@ unsupported, or if an installer fails.
 
 | Installation | Recognition evidence | Repair |
 | --- | --- | --- |
-| npm-compatible global layout (all four harnesses, Unix) | `<prefix>/bin/<agent>` resolves to the expected package under `<prefix>/lib/node_modules`; package name and `bin` target match the resolved executable, and the package directory equals its canonical path (no linked or redirected package directories) | `npm install -g --prefix <detected-prefix> <package>@<exact-version>` |
+| npm-compatible global layout (all four harnesses, Unix) | `<prefix>/bin/<agent>` resolves to one of the harness's packages under `<prefix>/lib/node_modules` (OpenCode: `opencode-ai` for 1.x, `@opencode/cli` for 2.x); package name and `bin` target match the resolved executable, and the package directory equals its canonical path (no linked or redirected package directories) | `npm install -g --prefix <detected-prefix> <package>@<exact-version>`, only when the policy-compatible release is published under the detected package |
 | Claude native (Unix) | Native binary in `~/.local/share/claude/versions/<version>`, reached through `~/.local/bin/claude`; relative symlink chains are resolved | Detected executable: `install <exact-version>` |
 | Homebrew Claude/Codex/OpenCode | Resolved target under the matching `Caskroom` or `Cellar` package, including custom prefixes | Refuse automatic arbitrary-version pinning; manually migrate to npm or use a compatible vendor/Homebrew installation |
 | Kimi standalone (Unix) | Regular native binary at the documented default `~/.kimi-code/bin/kimi`, without redirected parent directories | Official installer with exact `--version`, `KIMI_INSTALL_DIR`, and `KIMI_NO_MODIFY_PATH=1`; the child PATH excludes the installation's bin so the installer skips legacy migration |
 | Kimi legacy uv tool | Target belongs to a Python environment with `uv-receipt.toml` identifying `kimi-cli` and `pyvenv.cfg` | Refuse: legacy Python versions are not the current Kimi CLI; manually migrate to npm |
-| OpenCode standalone (Unix) | Regular native binary at the default `~/.opencode/bin/opencode`, without redirected parent directories | Detected executable: `upgrade <exact-version> --method curl` |
+| OpenCode standalone (Unix) | Regular native binary at the default `~/.opencode/bin/opencode`, without redirected parent directories | Detected executable: `upgrade <exact-version> --method curl`, only within the installed major release line |
 | Codex standalone/release download, custom Kimi/OpenCode roots, pnpm/bun wrappers, Windows wrappers/native layouts, other unrecognized layouts | No supported installation layout | Refuse automatic replacement; manually install a policy-compatible release or migrate to npm |
 
 A manually copied package matching the npm-compatible layout is also eligible
@@ -180,6 +180,57 @@ version's atomic operation set owns this control, so a later harness version can
 adopt a changed vendor mechanism without altering older intervals.
 
 Daemon runs, redirected/non-interactive commands, and `blue apply --yes` never install native CLIs. They fail closed and print installation-aware manual guidance for an operator.
+
+## OpenCode 1.x and 2.x
+
+OpenCode 2 is a separate release line with its own npm package, and the two
+cannot be installed side by side. Blue supports both:
+
+| Installed | Profile | npm package |
+| --- | --- | --- |
+| `>=0.0.0, <2.0.0` | `opencode-v0_0_0` | `opencode-ai` |
+| `>=2.0.0` | `opencode-v2_0_0` | `@opencode/cli` |
+
+Blue repairs an installation only inside its own release line. An OpenCode
+1.x release above Blue's certified 1.x ceiling is repaired to a certified 1.x
+release, never upgraded to 2.x. Blue never switches between `opencode-ai` and
+`@opencode/cli`: when the policy admits only the other line, Blue prints the
+commands to run instead, for example:
+
+```text
+opencode 1.18.25 does not match the required version range >=2.
+Installation: npm global — /usr/local/bin/opencode
+The supported release is published under a different package, and Blue does not switch packages automatically.
+
+To switch manually (POSIX shell or PowerShell):
+  npm uninstall -g --prefix "/usr/local" opencode-ai
+  npm install -g --prefix "/usr/local" '@opencode/cli@>=2 >=2.0.0 <2.2.6-0'
+Then retry Blue.
+```
+
+To keep a fleet on 1.x, set `version_requirement: "<2"` for `opencode`; fresh
+installs then use `opencode-ai`. Without a requirement, fresh installs use the
+newest generation, so an existing open range such as `>=1.18` now also admits
+2.x releases.
+
+Before moving users to 2.x:
+
+- **Packages.** OpenCode 2 does not load 1.x plugin modules. Give each package
+  that ships an OpenCode plugin a `variants` entry with `introduced: 2.0.0` that
+  points at a plugin written for the 2.x plugin API, or bound the 1.x adapter
+  with `before: 2.0.0`. See [Versioned package layouts](#versioned-package-layouts).
+- **Sessions.** A session captured on 1.x resumes only with OpenCode 1.x, and a
+  2.x session only with 2.x, because 2.x cannot import 1.x exports. Blue refuses
+  a cross-release restore before it runs OpenCode and names the required range.
+- **Launch.** Blue starts OpenCode 2 with `--standalone`, so each governed
+  session runs its own private server instead of OpenCode's shared background
+  service, which would not receive Blue's managed configuration or gateway
+  credentials. `--server` is rejected by OpenCode in that mode.
+- **Provider restriction.** In gateway mode Blue restricts providers with
+  `provider.use` policies. OpenCode 2 ranks policies from a user's own
+  configuration files above launch-supplied ones, so, as with every managed
+  overlay setting, a user who adds their own `provider.use` allow statement can
+  re-enable another provider.
 
 ## Breaking-version profiles
 

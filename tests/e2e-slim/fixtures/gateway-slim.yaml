@@ -88,7 +88,7 @@ governance:
       name: E2E Skill
       version: "1.0.0"
       source_ref: file:///tmp/blue-e2e/e2e-package.tar.gz
-      sha256: f84937b7e4221f795d8603b954cff846c266276fe2bc38e8e98c9812f4c1593f
+      sha256: 2bea374e0d62af5fd23d73027a4b9865675afc9c5a427246580b9a8c180d55f4
       adapters:
         codex:
           skills_dir: e2e-package/codex-plugin/skills

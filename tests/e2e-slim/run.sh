@@ -136,10 +136,13 @@ if [[ "${E2E_SLIM_INSTALL_AGENTS:-}" == "1" ]]; then
       count="$(jq -r ".agents.${agent}.versions | length" "$matrix_file")"
       for ((i = 0; i < count; i++)); do
         version="$(jq -r ".agents.${agent}.versions[$i].version" "$matrix_file")"
+        # A sample may come from an older release line's package (OpenCode 1.x
+        # is `opencode-ai`, 2.x is `@opencode/cli`); default to the lock's.
+        sample_pkg="$(jq -r --arg pkg "$pkg" ".agents.${agent}.versions[$i].package // \$pkg" "$matrix_file")"
         prefix="$matrix_root/$agent/$version"
         mkdir -p "$prefix"
-        echo "    matrix $agent: $pkg@$version"
-        NPM_CONFIG_PREFIX="$prefix" npm install -g "${pkg}@${version}"
+        echo "    matrix $agent: $sample_pkg@$version"
+        NPM_CONFIG_PREFIX="$prefix" npm install -g "${sample_pkg}@${version}"
         manifest_json="$(jq -n --argjson m "$manifest_json" \
           --arg a "$agent" --arg v "$version" --arg d "$prefix/bin" \
           '$m | .[$a][$v] = $d')"

@@ -110,7 +110,7 @@ Bundles contain the native data needed by each harness:
 - Codex: rollout JSONL and native index-derived display metadata.
 - Claude: primary JSONL, session-owned subagent transcripts, metadata, and externalized tool results.
 - Kimi: sanitized `state.json`, agent wire histories, plans, and attachments. Credentials, approval grants, processes, cron jobs, queued goals, and logs are excluded.
-- OpenCode: its native export-shaped session and messages JSON, restored through `opencode import`.
+- OpenCode: its native export-shaped session and messages JSON, restored through `opencode import` (1.x) or `opencode session import` (2.x).
 
 ## How titles and previews are generated
 
@@ -174,7 +174,7 @@ and governance eligibility checks for the destination machine.
 | Codex | Portable capture begins with the profile whose native lifecycle supports `SessionEnd`. The bundle requires exactly one rollout under `.codex/sessions`; earlier captures stay downloadable but non-resumable. Display metadata is matched by native session ID before the rollout fallback is scanned. Restore places the rollout at its native path and invokes the explicit `codex resume <id>` path; it does not overwrite Codex database state. |
 | Claude | Only profiles with a uniform portable capture contract are resumable. Blue captures the primary project JSONL and session-owned companion subtree, accepts the supported native index container shapes, and merges a new entry without replacing unrelated sessions. Older pre-hook and hooks-only profiles remain non-resumable. |
 | Kimi | The adapter accepts the hook path or searches only the documented managed/native session roots for the exact session ID. It captures all agent histories, plans, and attachments, sanitizes `state.json`, and recognizes existing index IDs written as `session_id`, `sessionId`, or `id`. |
-| OpenCode | Blue writes the native export shape `{info, messages}` instead of parsing OpenCode's private database. Restore delegates format interpretation to `opencode import`, reads the imported ID reported by the CLI, and resumes that ID. |
+| OpenCode | Blue writes the native export shape `{info, messages}` instead of parsing OpenCode's private database; on 2.x that is the output of `opencode session export`, refreshed after each turn and again after OpenCode exits. Restore delegates format interpretation to `opencode import` (1.x) or `opencode session import` (2.x), reads the imported ID reported by the CLI, and resumes that ID. OpenCode 2.x cannot import 1.x exports, so a session resumes only on the release line that recorded it; Blue refuses the other before running OpenCode. |
 
 <Note>
   Compatibility profiles protect known storage layouts; they do not make an
