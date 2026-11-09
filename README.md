@@ -96,8 +96,8 @@ Once the services are healthy:
 | Dashboard | <http://127.0.0.1:3000> |
 | Control API | <http://127.0.0.1:8080> |
 | PostgreSQL | `127.0.0.1:5433` |
-| MinIO API | <http://127.0.0.1:9000> |
-| MinIO console | <http://127.0.0.1:9001> |
+| S3 API (SeaweedFS) | <http://127.0.0.1:9000> |
+| SeaweedFS admin UI | <http://127.0.0.1:9001> |
 
 The optional inference proxy (<http://127.0.0.1:8081>) starts only with the
 `gateway` Compose profile.

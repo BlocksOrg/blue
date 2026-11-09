@@ -3,7 +3,7 @@
 The E2E suite builds the production Blue image, installs the executable fixture in
 `fixtures/custom-provisioner`, and layers only that executable
 onto the stock image using the consumer deployment pattern. It boots the result with
-PostgreSQL, pinned MinIO server/client releases from Quay, the inference proxy,
+PostgreSQL, a digest-pinned SeaweedFS S3 store (initialized with the AWS CLI), the inference proxy,
 and a deterministic LiteLLM-compatible
 upstream. A lightweight deterministic endpoint stands in for the separately tested
 documentation site. The suite then runs the `blue` binary from the deployment
@@ -45,7 +45,7 @@ managed bytes and recorded digests stable. The component reads its credential fr
 runtime environment and stamps its returned alias; the journey asserts that
 marker, so module loading, invocation, and credential use must all work. The full suite
 adds every OpenAPI route/authentication boundary, all four harness adapters,
-PTY behavior, session capture through MinIO, inference credential swapping and
+PTY behavior, session capture through the S3 store, inference credential swapping and
 request logs, administrator workflows, SCIM lifecycle, shims, critical
 dashboard pages, and browser-level filtering behavior for members, invitations,
 sessions, clients, and gateway request logs. Behavioral cases additionally drive

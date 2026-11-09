@@ -105,7 +105,7 @@ Generated policies carry native MCP paths and an HTTP package object with its
 exact SHA-256. A test-only database row associates the package with its artifact
 ID; Blue uses its existing authenticated artifact API to obtain the presigned
 HTTP download. Direct public package fetches still require HTTPS/public hosts.
-The executable archive is private in MinIO and requires a signed URL. The
+The executable archive is private in the S3 store and requires a signed URL. The
 anonymous grant permits reading only a fresh, inert `health.txt` fixture.
 Existing full-suite fixtures and the Linux legacy tarball bytes are preserved.
 
