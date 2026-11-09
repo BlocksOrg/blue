@@ -28,8 +28,8 @@ instead and can silently select the password-mode defaults.
 | Dashboard | `http://127.0.0.1:3000` | Login and administration UI |
 | Control API | `http://127.0.0.1:8080` | Policy, gateway, client, and session API |
 | PostgreSQL | `127.0.0.1:5433` | Authentication and control-plane state |
-| MinIO API | `http://127.0.0.1:9000` | Raw-session object storage |
-| MinIO console | `http://127.0.0.1:9001` | Local storage administration |
+| S3 API (SeaweedFS) | `http://127.0.0.1:9000` | Raw-session object storage |
+| SeaweedFS admin UI | `http://127.0.0.1:9001` | Local storage administration (log in with the S3 credentials) |
 
 Create `deploy/.env` before testing authentication or sharing a development environment:
 
@@ -37,8 +37,8 @@ Create `deploy/.env` before testing authentication or sharing a development envi
 HARNESS_BOOTSTRAP_ADMIN_EMAIL=operator@example.com
 HARNESS_BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-long-random-password
 BETTER_AUTH_SECRET=replace-with-at-least-32-random-bytes
-MINIO_ROOT_USER=replace-local-storage-user
-MINIO_ROOT_PASSWORD=replace-local-storage-password
+BLUE_S3_ACCESS_KEY=replace-local-storage-user
+BLUE_S3_SECRET_KEY=replace-local-storage-password
 # Version label displayed beside the dashboard logo; release builds inject this into the image.
 BLUE_DEPLOYMENT_VERSION=0.2.0
 ```
@@ -117,4 +117,6 @@ cd deploy
 docker compose down
 ```
 
-Named volumes retain PostgreSQL and MinIO data. Adding `--volumes` deletes local state and should be used only when a full reset is intended.
+Named volumes retain PostgreSQL and S3 (SeaweedFS) data. Adding `--volumes` deletes local state and should be used only when a full reset is intended.
+
+Stacks created before the move to SeaweedFS stored objects in a `minio-data` volume. Compose no longer uses it, so earlier local session uploads are not carried over; remove it with `docker volume rm deploy_minio-data` once you no longer need them.

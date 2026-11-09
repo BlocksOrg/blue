@@ -21,7 +21,7 @@ Before adding a connection, prepare:
 - A read-only GitHub App or Bitbucket access token.
 - A mounted PEM CA bundle when an enterprise provider uses a private certificate authority.
 
-The Compose stack creates the `package-artifacts` MinIO bucket automatically. Production deployments must create the bucket separately and set `HARNESS_PACKAGE_BUCKET`.
+The Compose stack creates the `package-artifacts` bucket in its local S3-compatible store automatically. Production deployments must create the bucket separately and set `HARNESS_PACKAGE_BUCKET`.
 
 ## Configure artifact storage
 

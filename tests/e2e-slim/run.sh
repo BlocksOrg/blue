@@ -166,7 +166,7 @@ export E2E_SLIM_BLUE_BIN="$repo_root/target/debug/blue"
 
 export E2E_SLIM_CONTROL_API_URL="http://127.0.0.1:8080"
 export E2E_SLIM_DATABASE_URL="postgres://harness:harness@127.0.0.1:5432/governance"
-export E2E_SLIM_MINIO_URL="http://127.0.0.1:9000"
+export E2E_SLIM_S3_URL="http://127.0.0.1:9000"
 
 if [[ "$gateway" == "1" ]]; then
   export E2E_SLIM_INFERENCE_PROXY_URL="http://127.0.0.1:8081"

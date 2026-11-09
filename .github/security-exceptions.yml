@@ -87,6 +87,30 @@
       "rationale": "This is the fingerprint of a deliberately public deterministic JWT signing key used only by the hermetic e2e-slim fixture.",
       "compensating_control": "The key is confined to test fixtures, is not referenced by deployment manifests, and production startup requires externally supplied secrets.",
       "expires": "2026-12-05"
+    },
+    {
+      "scanner": "npm-audit",
+      "owner": "platform-security",
+      "expires": "2026-12-05",
+      "identifier": "GHSA-965c-763c-88jm",
+      "rationale": "better-auth 1.7.7+ removes the issuer-scoped account model that the dashboard's account schema (account.issuer NOT NULL, unique issuer+accountId) and genericOAuth accountIssuer depend on, so the upgrade needs its own auth schema migration. The advisory needs the Magic Link plugin, which the dashboard never enables.",
+      "compensating_control": "lib/auth.ts registers only admin, jwt, organization, oauth-provider, device authorization, genericOAuth and nextCookies; with no Magic Link endpoint, OAuth state cannot be redeemed as a sign-in token. Tracked for removal by the better-auth 1.7.x upgrade."
+    },
+    {
+      "scanner": "npm-audit",
+      "owner": "platform-security",
+      "expires": "2026-12-05",
+      "identifier": "GHSA-r4xp-prcw-77qf",
+      "rationale": "Same blocked better-auth 1.7.7+ upgrade. The advisory needs the OAuth Proxy plugin with cookie-backed sign-in state, and the dashboard uses neither.",
+      "compensating_control": "The OAuth Proxy plugin is not registered and sign-in state uses the default database strategy, so no proxy endpoint decrypts attacker-supplied profiles. Tracked for removal by the better-auth 1.7.x upgrade."
+    },
+    {
+      "scanner": "npm-audit",
+      "owner": "platform-security",
+      "expires": "2026-12-05",
+      "identifier": "GHSA-44jh-23m7-hpcf",
+      "rationale": "Same blocked better-auth 1.7.7+ upgrade. The advisory affects the Drizzle adapter with database-backed rate limits; the dashboard uses the built-in pg/Kysely adapter, which is already fixed in 1.7.0.",
+      "compensating_control": "No Drizzle adapter is configured and rate-limit records use Better Auth's default storage rather than the PostgreSQL rate-limit table. Tracked for removal by the better-auth 1.7.x upgrade."
     }
   ]
 }

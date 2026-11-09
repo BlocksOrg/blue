@@ -21,8 +21,8 @@ control_api:
     provider: s3
     bucket: raw-sessions
     region: us-east-1
-    endpoint: http://minio:9000
-    public_endpoint: http://minio:9000
+    endpoint: http://s3:9000
+    public_endpoint: http://s3:9000
     force_path_style: true
     presign_ttl_seconds: 300
     retention_days: 30

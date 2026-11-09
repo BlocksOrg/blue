@@ -20,21 +20,21 @@ tier.
 
 ## What's tested
 
-Every test runs against a **live** control-api + Postgres + MinIO (real service
-binary, real database, real object storage). The MinIO server and client use
-pinned release images from the project's Quay registry so CI does not depend on
-mutable or retired Docker Hub tags.
+Every test runs against a **live** control-api + Postgres + an S3-compatible
+store (real service binary, real database, real object storage). The store is
+SeaweedFS (`weed mini`), and the AWS CLI creates its buckets. Both images are
+pinned by digest so CI does not depend on mutable tags.
 
 | Test | What it exercises | Needs a real agent CLI? | Needs the gateway path? |
 | --- | --- | --- | --- |
 | `bootstrap_login` | Mint token → control-api verifies it via JWKS (RS256 signature, issuer, audience, expiry) → `blue login` short-circuits → `GET /auth/me` returns the admin identity. | no | no |
 | `claude_config` | `blue apply` writes Claude's governed model, the `e2e-remote` MCP server, and the managed `example` skill into its managed config. | yes (`claude`) | no |
 | `all_agents_config` | The **same** model + MCP + skill assertions for `codex` / `kimi` / `opencode`, so all four agents are covered identically. | yes (per agent) | no |
-| `session_upload` | `blue session-upload` per harness → detached worker presigns → PUTs to MinIO → completes; the list shows all 4, and one artifact is downloaded and byte-compared to the upload. | no | no |
+| `session_upload` | `blue session-upload` per harness → detached worker presigns → PUTs to the S3 store → completes; the list shows all 4, and one artifact is downloaded and byte-compared to the upload. | no | no |
 | `agent_matrix_config` | **Tier A (version matrix).** The same model + MCP + skill assertions as `all_agents_config`, but per `(agent, version)` cell across multiple CLI versions (not just the pin). No inference. Self-skips unless the matrix is enabled. | yes (per cell) | no |
 | `agent_certification` | **Tier B (version matrix).** Per `(agent, version)` cell, one uniform body: `blue run <agent>` launches the real agent through the real gateway and forces the managed `blue_certify` MCP tool. Codex certification inspects its structured JSONL event stream for a completed `e2e-remote/blue_certify` call containing `BLUE_MCP_OK`; Claude, Kimi, and OpenCode assert the `mcp-started` + `mcp-called` marker files and `BLUE_MCP_OK`. The test also asserts that a LiteLLM spend log recorded the governed model alias with a swapped virtual key rather than the client inference JWT. With the matrix off it certifies just the pin per agent (today's coverage). | yes (per cell) | **yes** (opt-in) |
 
-**Real vs. faked.** Real: control-api, Postgres, MinIO (real presigned PUT/GET),
+**Real vs. faked.** Real: control-api, Postgres, SeaweedFS S3 (real presigned PUT/GET),
 the `blue` CLI, the agent CLIs (really installed, version-probed for eligibility),
 and — on the gateway path — a real inference-proxy and a real LiteLLM fed by a
 real OpenRouter key, i.e. **real model inference, no provider faking**. Faked:
@@ -166,9 +166,9 @@ non-expired session carrying the JWT). Then it only runs `blue login`, which
 short-circuits to *"Already logged in"*. **Do not "fix" this by calling
 `setup`** — it will hang/fail.
 
-## Endpoint crossing (why two MinIO URLs)
+## Endpoint crossing (why two S3 URLs)
 
-control-api's own S3 client talks to `minio:9000` (in-network), but the
+control-api's own S3 client talks to `s3:9000` (in-network), but the
 **presigned** URLs it hands back must be reachable from the host test runner, so
 `HARNESS_BLOB_PUBLIC_ENDPOINT` and `governance.session_upload.presign_url` point
 at `127.0.0.1`. Path-style addressing keeps the signatures valid across the
@@ -219,7 +219,7 @@ successful native gateway results, not just a passing fixture suite or workflow.
 
 Native package fixtures use a seeded managed artifact and the authenticated download
 API because public package URLs reject HTTP/loopback. Production access rules
-are unchanged; the advertised MinIO URL is signed before the client receives it.
+are unchanged; the advertised S3 URL is signed before the client receives it.
 The native overlay keeps the executable archive private; anonymous reads are
 limited to a fresh `health.txt` object for readiness and tunnel digest checks.
 The config matrix exercises the real signed archive download and SHA-256 check.
