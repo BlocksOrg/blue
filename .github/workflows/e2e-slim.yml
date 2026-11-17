@@ -2,7 +2,7 @@ name: End-to-end (slim)
 
 # Slim e2e in two disjoint jobs (selection via nextest profiles, see
 # tests/e2e-slim/.config/nextest.toml):
-#   * e2e-slim-governance — secret-free governance-only path (Postgres + MinIO +
+#   * e2e-slim-governance — secret-free governance-only path (Postgres + S3 store +
 #     JWKS sidecar + control-api), bootstrap/config/session-upload tests.
 #   * e2e-slim-gateway — secret-gated real-inference path (adds LiteLLM fed by
 #     OpenRouter + inference-proxy), per-agent certification tests only.
@@ -68,7 +68,7 @@ jobs:
 
   e2e-slim-governance:
     # Draft PRs skip Tier A -- it loads the production image and boots
-    # Postgres + MinIO + a JWKS sidecar + control-api, then walks the whole
+    # Postgres + S3 store + a JWKS sidecar + control-api, then walks the whole
     # blessed-CLI-version matrix. Marking the PR ready for review fires
     # `ready_for_review` (see the trigger above) and runs it.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

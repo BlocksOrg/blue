@@ -1,4 +1,4 @@
-# Local stack. The control API always uses PostgreSQL; MinIO is its local
+# Local stack. The control API always uses PostgreSQL; SeaweedFS is its local
 # S3-compatible raw-session blob backend. LiteLLM remains a separate profile.
 services:
   migrate:
@@ -36,7 +36,7 @@ services:
       HARNESS_PACKAGE_BUCKET: package-artifacts
       HARNESS_BITBUCKET_TOKEN: ${HARNESS_BITBUCKET_TOKEN:-}
       HARNESS_BLOB_REGION: us-east-1
-      HARNESS_BLOB_ENDPOINT: http://minio:9000
+      HARNESS_BLOB_ENDPOINT: http://s3:9000
       HARNESS_BLOB_PUBLIC_ENDPOINT: http://127.0.0.1:9000
       HARNESS_BLOB_FORCE_PATH_STYLE: "true"
       HARNESS_INTERNAL_ALLOWED_CLIENT_ID: ${HARNESS_INFERENCE_PROXY_CLIENT_ID:-blue-inference-proxy}
@@ -57,8 +57,8 @@ services:
       HARNESS_GATEWAY_JWT_ISSUER: http://127.0.0.1:8080
       HARNESS_GATEWAY_JWT_AUDIENCE: blue-inference-proxy
       HARNESS_GATEWAY_JWT_PRIVATE_KEY_FILE: /var/run/blue/gateway-jwt/signing-key.pem
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${BLUE_S3_ACCESS_KEY:-blue-local}
+      AWS_SECRET_ACCESS_KEY: ${BLUE_S3_SECRET_KEY:-blue-local-secret}
       HARNESS_LISTEN: 0.0.0.0:8080
       HARNESS_INTERNAL_LISTEN: 0.0.0.0:8082
     volumes:
@@ -72,7 +72,7 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
       postgres-control: { condition: service_healthy }
-      minio-init: { condition: service_completed_successfully }
+      s3-init: { condition: service_completed_successfully }
 
   dashboard:
     build:
@@ -117,27 +117,45 @@ services:
       timeout: 3s
       retries: 20
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    command: ["server", "/data", "--console-address", ":9001"]
+  s3:
+    # SeaweedFS all-in-one (`weed mini`). The S3 credentials double as the
+    # admin UI login on :9001.
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    command:
+      - mini
+      - -dir=/data
+      - -s3.port=9000
+      - -admin.port=9001
+      - -admin.port.legacy=0
+      - -admin.user=${BLUE_S3_ACCESS_KEY:-blue-local}
+      - -admin.password=${BLUE_S3_SECRET_KEY:-blue-local-secret}
+      - -master.telemetry=false
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${BLUE_S3_ACCESS_KEY:-blue-local}
+      AWS_SECRET_ACCESS_KEY: ${BLUE_S3_SECRET_KEY:-blue-local-secret}
     ports: ["9000:9000", "9001:9001"]
-    volumes: ["minio-data:/data"]
+    volumes: ["s3-data:/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    depends_on: [minio]
+  s3-init:
+    image: amazon/aws-cli:2.39.6@sha256:eccdb3ec77e159d43ca6a750a70738c546883138be7f094498294a1477ec7e42
+    depends_on:
+      s3: { condition: service_healthy }
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do sleep 1; done;
-        mc mb --ignore-existing local/raw-sessions;
-        mc mb --ignore-existing local/package-artifacts
+        until aws s3api list-buckets >/dev/null; do sleep 1; done &&
+        { aws s3api head-bucket --bucket raw-sessions 2>/dev/null || aws s3 mb s3://raw-sessions; } &&
+        { aws s3api head-bucket --bucket package-artifacts 2>/dev/null || aws s3 mb s3://package-artifacts; }
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${BLUE_S3_ACCESS_KEY:-blue-local}
+      AWS_SECRET_ACCESS_KEY: ${BLUE_S3_SECRET_KEY:-blue-local-secret}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://s3:9000
 
   inference-proxy:
     profiles: ["gateway"]
@@ -197,4 +215,4 @@ services:
 volumes:
   postgres-control-data:
   postgres-litellm-data:
-  minio-data:
+  s3-data:

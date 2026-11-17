@@ -1,8 +1,9 @@
 //! Shared support for the `e2e-slim` suite.
 //!
 //! The suite drives the real `blue` CLI against a lean, **gateway-disabled**
-//! control-api stack (Postgres + MinIO + a JWKS sidecar). Because the dashboard
-//! / Better Auth stack is absent, we self-serve authentication: control-api
+//! control-api stack (Postgres + an S3-compatible store + a JWKS sidecar).
+//! Because the dashboard / Better Auth stack is absent, we self-serve
+//! authentication: control-api
 //! still verifies user tokens the normal way (RS256 signature via its cached
 //! JWKS, plus issuer / audience / expiry), so we mint our own RS256 JWT with a
 //! committed **test-only** key whose public half the sidecar serves.
@@ -44,7 +45,7 @@ const SIGNING_KEY_PEM: &[u8] = include_bytes!("../../fixtures/jwt/signing-key.pe
 pub struct Stack {
     pub control_api_url: String,
     pub database_url: String,
-    pub minio_url: String,
+    pub s3_url: String,
     pub blue_bin: PathBuf,
     pub http: reqwest::blocking::Client,
 }
@@ -91,8 +92,8 @@ pub fn env_or_skip() -> Option<Stack> {
     let control_api_url = required_env("E2E_SLIM_CONTROL_API_URL")?;
     let database_url = required_env("E2E_SLIM_DATABASE_URL")
         .unwrap_or_else(|| "postgres://harness:harness@127.0.0.1:5432/governance".to_owned());
-    let minio_url =
-        required_env("E2E_SLIM_MINIO_URL").unwrap_or_else(|| "http://127.0.0.1:9000".to_owned());
+    let s3_url =
+        required_env("E2E_SLIM_S3_URL").unwrap_or_else(|| "http://127.0.0.1:9000".to_owned());
     let blue_bin = PathBuf::from(
         non_empty_env("E2E_SLIM_BLUE_BIN")
             .unwrap_or_else(|| format!("target/debug/blue{}", std::env::consts::EXE_SUFFIX)),
@@ -104,7 +105,7 @@ pub fn env_or_skip() -> Option<Stack> {
     Some(Stack {
         control_api_url: control_api_url.trim_end_matches('/').to_owned(),
         database_url,
-        minio_url: minio_url.trim_end_matches('/').to_owned(),
+        s3_url: s3_url.trim_end_matches('/').to_owned(),
         blue_bin,
         http,
     })
@@ -326,7 +327,7 @@ pub struct Home {
     profile: platform::TestProfile,
     blue_bin: PathBuf,
     control_api_url: String,
-    minio_url: String,
+    s3_url: String,
     bearer: String,
     sub: String,
     email: String,
@@ -391,7 +392,7 @@ impl Home {
             profile,
             blue_bin: stack.blue_bin.clone(),
             control_api_url: stack.control_api_url.clone(),
-            minio_url: stack.minio_url.clone(),
+            s3_url: stack.s3_url.clone(),
             bearer: jwt.to_owned(),
             sub: sub.to_owned(),
             email: email.to_owned(),
@@ -558,7 +559,7 @@ impl Home {
     }
 
     /// Download the completed artifact bytes for `id`: `POST` to mint a presigned
-    /// GET, then fetch it (the URL points at the host-published MinIO endpoint).
+    /// GET, then fetch it (the URL points at the host-published S3 endpoint).
     pub fn download_upload(&self, id: &str) -> Vec<u8> {
         let signed: serde_json::Value = self
             .api(
@@ -586,9 +587,9 @@ impl Home {
             .to_vec()
     }
 
-    /// Host-published MinIO endpoint (for diagnostics/round-trip assertions).
-    pub fn minio_url(&self) -> &str {
-        &self.minio_url
+    /// Host-published S3 endpoint (for diagnostics/round-trip assertions).
+    pub fn s3_url(&self) -> &str {
+        &self.s3_url
     }
 }
 

@@ -2,21 +2,21 @@
 services:
   postgres:
     ports: !override ["127.0.0.1:${E2E_NATIVE_POSTGRES_PORT:-5432}:5432"]
-  minio:
+  s3:
     ports: !override ["127.0.0.1:9000:9000"]
   control-api:
     ports: !override ["127.0.0.1:8080:8080"]
     volumes:
       - ${E2E_NATIVE_FIXTURES:?}/governance-only-slim.yaml:/etc/blue/blue.yaml:ro
       - ${E2E_NATIVE_FIXTURES:?}/gateway-slim.yaml:/etc/blue/gateway-slim.yaml:ro
-  minio-init:
+  s3-init:
     volumes:
       - ${E2E_NATIVE_FIXTURES:?}:/native-fixtures:ro
     command:
       - >-
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb --ignore-existing local/raw-sessions &&
-        mc mb --ignore-existing local/package-artifacts &&
-        mc cp /native-fixtures/e2e-package.tar.gz local/package-artifacts/e2e-package.tar.gz &&
-        mc cp /native-fixtures/health.txt local/package-artifacts/health.txt &&
-        mc anonymous set-json /native-fixtures/package-policy.json local/package-artifacts
+        until aws s3api list-buckets >/dev/null; do sleep 1; done &&
+        { aws s3api head-bucket --bucket raw-sessions 2>/dev/null || aws s3 mb s3://raw-sessions; } &&
+        { aws s3api head-bucket --bucket package-artifacts 2>/dev/null || aws s3 mb s3://package-artifacts; } &&
+        aws s3 cp --only-show-errors /native-fixtures/e2e-package.tar.gz s3://package-artifacts/e2e-package.tar.gz &&
+        aws s3 cp --only-show-errors /native-fixtures/health.txt s3://package-artifacts/health.txt &&
+        aws s3api put-bucket-policy --bucket package-artifacts --policy file:///native-fixtures/package-policy.json

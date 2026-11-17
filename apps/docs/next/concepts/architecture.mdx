@@ -16,7 +16,7 @@ flowchart LR
   CLI --> API
   API --> Catalog[Package catalog]
   API --> DB[(PostgreSQL)]
-  API --> Blob[(S3 or MinIO)]
+  API --> Blob[(S3-compatible store)]
   CLI --> Agent[Codex / Claude / Kimi / OpenCode]
   Agent --> Proxy[Inference proxy]
   Proxy --> API

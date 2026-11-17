@@ -453,7 +453,7 @@ export class Backend {
     );
     // Public package fetches intentionally reject HTTP/private addresses.
     // Seed a managed artifact, then exercise the existing authenticated download
-    // API and its original, loopback-advertised presigned MinIO URL.
+    // API and its original, loopback-advertised presigned S3 URL.
     const database = new pg.Client({
       connectionString: this.databaseUrl,
       connectionTimeoutMillis: 5000,

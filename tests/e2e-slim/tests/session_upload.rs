@@ -1,4 +1,4 @@
-//! (d) `blue session-upload` → MinIO round-trip, per harness.
+//! (d) `blue session-upload` → S3 blob round-trip, per harness.
 //!
 //! For each of the four harnesses we lay out a native session on disk (the
 //! bundle validator requires every artifact to live inside the harness's real
@@ -9,7 +9,7 @@
 //! until all four captured sessions appear, and for one of them assert the
 //! stored artifact is `complete` and the transcript inside the downloaded
 //! bundle round-trips exactly (proving the presigned PUT/GET against the
-//! host-published MinIO endpoint).
+//! host-published S3 endpoint).
 //!
 //! Unlike the config tests this needs no agent CLI installed — `session-upload`
 //! only needs a valid compatibility profile and a capturable native session —

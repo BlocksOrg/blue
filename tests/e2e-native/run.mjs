@@ -101,7 +101,7 @@ if (values["cleanup-only"]) {
       ),
       E2E_SLIM_CONTROL_API_URL: "http://127.0.0.1:8080",
       E2E_SLIM_DATABASE_URL: backend.databaseUrl,
-      E2E_SLIM_MINIO_URL: "http://127.0.0.1:9000",
+      E2E_SLIM_S3_URL: "http://127.0.0.1:9000",
     };
     if (values.suite === "gateway")
       Object.assign(env, {

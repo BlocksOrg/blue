@@ -195,7 +195,7 @@ control_api:
 | `blob_storage.region` | S3 signing region; defaults to `us-east-1`. |
 | `blob_storage.endpoint` | Optional internal S3-compatible endpoint used by the service. Omit for AWS S3. |
 | `blob_storage.public_endpoint` | Optional client-reachable endpoint embedded in presigned URLs. Use when the internal endpoint is not externally resolvable. |
-| `blob_storage.force_path_style` | Enable for providers such as local MinIO that require path-style addressing. |
+| `blob_storage.force_path_style` | Enable for S3-compatible stores, such as the local SeaweedFS in Compose, that require path-style addressing. |
 | `blob_storage.presign_ttl_seconds` | Positive lifetime for upload/download URLs; defaults to 300 seconds. |
 | `blob_storage.retention_days` | Positive session-retention deadline stored by Blue. The AWS starter creates a matching lifecycle rule; configure equivalent expiration for other storage backends because Blue does not delete expired objects itself. |
 | `package_artifacts.bucket` | Separate non-expiring bucket for immutable archives mirrored from managed repositories; defaults to `package-artifacts`. |
